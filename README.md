@@ -31,37 +31,16 @@ This system elegantly simulates the complete lifecycle workflow:
 ## 2️⃣ Architecture
 
 ```mermaid
-flowchart TD
-    %% Actors
-    Cust([Customer])
-    Chef([Kitchen Staff])
-    Own([Business Owner])
+flowchart LR
+    C[Customer Web] -->|Create Order| API[FastAPI API]
+    K[Kitchen Web] -->|Update Status| API
+    O[Owner Dashboard] -->|Read Analytics| API
 
-    %% UI
-    subgraph Frontends [Next.js UIs]
-        CW(Customer Web)
-        KW(Kitchen Web)
-        OW(Owner Dashboard)
-    end
+    API --> DB[(PostgreSQL)]
+    DB --> DBT[dbt Pipeline]
+    DBT --> A[(Analytics Models)]
 
-    %% Backend
-    API{FastAPI}
-    WS{WebSocket}
-
-    %% Data
-    DB[(PostgreSQL)]
-    DBT((dbt))
-    WH[(Analytics Tables)]
-
-    Cust --> CW -->|POST Order| API
-    Chef --> KW -->|PATCH Status| API
-    Own --> OW -->|GET Analytics| API
-    
-    API --> DB
-    DB --> DBT --> WH
-    
-    API -.->|Broadcast| WS
-    WS -.-> KW
+    API -. WebSocket .-> K
 ```
 
 ---
