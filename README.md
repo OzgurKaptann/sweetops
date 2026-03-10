@@ -1,5 +1,14 @@
 # SweetOps 🍩
 
+![GitHub repo size](https://img.shields.io/github/repo-size/ozgurkaptann/sweetops)
+![GitHub last commit](https://img.shields.io/github/last-commit/ozgurkaptann/sweetops)
+![GitHub stars](https://img.shields.io/github/stars/ozgurkaptann/sweetops?style=social)
+
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-green)
+![dbt](https://img.shields.io/badge/dbt-Analytics-orange)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Database-blue)
+![Next.js](https://img.shields.io/badge/Next.js-Frontend-black)
+![Docker](https://img.shields.io/badge/Docker-Containerization-blue)
 ## 1️⃣ Project Overview
 
 SweetOps is a modern, data-driven, full-stack restaurant operations platform. 
@@ -54,6 +63,23 @@ flowchart TD
     API -.->|Broadcast| WS
     WS -.-> KW
 ```
+
+---
+
+## Event Driven Data Flow
+
+SweetOps mimarisi klasik POS sistemlerinden farklıdır.
+
+Her sipariş bir event olarak ele alınır ve şu pipeline'a girer:
+
+**Customer Order**  
+→ **Operational DB** (PostgreSQL)  
+→ **dbt Transformations**  
+→ **Analytics Tables**  
+→ **Owner Dashboard**  
+→ **Forecast Models**
+
+Bu yaklaşım sayesinde sistem yalnızca operasyon sağlamakla kalmaz, aynı zamanda değer katan, analiz edilebilir bir veri ekosistemi üretir.
 
 ---
 
@@ -144,7 +170,11 @@ SweetOps/
 - hourly demand
 
 **Forecast Layer**
-- dbt ile oluşturulan rolling 7 day average demand forecasting modeli.
+- Forecast modelleri dbt SQL modelleri olarak yazılmıştır
+- Rolling 7 day moving average kullanılır
+- Amaç ML değil analytics pipeline (veri hazırlık katmanı) göstermektir
+- Ingredient demand (malzeme talebi) tahmini yapılır
+- Trend direction (yön) ve confidence level (güven düzeyi) hesaplanır
 
 ---
 
@@ -176,16 +206,54 @@ To run the local ecosystem and generate the mock history:
 
 ---
 
-## 8️⃣ Türkçe Açıklama
+---
 
-Bu sistem:
-- sipariş operasyonu
-- mutfak ekranı
-- gerçek zamanlı WebSocket güncellemeleri
-- dbt ile analitik pipeline
-- talep tahmin modeli
+## Why This Project Exists
 
-gibi bileşenleri tek bir mimaride birleştiren bir demo platformudur. 
+SweetOps was built as a portfolio project to demonstrate how modern backend engineering and data engineering can work together.
 
-**Amaç:**
-Modern veri mühendisliği ve backend mimarisini tek projede göstermek.
+Instead of building a simple dashboard, the goal was to show a **complete operational data system** including:
+
+- transactional backend
+- real-time WebSocket communication
+- analytics pipelines
+- demand forecasting layer
+- multi-app frontend architecture
+
+---
+
+## Türkçe Açıklama
+
+SweetOps, restoran operasyonlarını ve veri analitiğini aynı sistem içinde birleştiren modern bir demo platformudur.
+
+Proje klasik bir POS sistemi gibi çalışmak yerine her siparişi bir **veri olayı (event)** olarak ele alır.
+
+Bu olaylar aşağıdaki veri hattından geçer:
+
+**Müşteri Siparişi**  
+→ **Operasyonel Veritabanı** (PostgreSQL)  
+→ **dbt ile Veri Dönüşümleri**  
+→ **Analitik Tablolar**  
+→ **Yönetim Paneli** (Owner Dashboard)  
+→ **Talep Tahmin Modelleri** (Forecast Layer)
+
+Projenin amacı yalnızca bir arayüz oluşturmak değil; aynı zamanda aşağıdaki modern yazılım mimarilerini tek bir projede göstermektir:
+
+- Backend API mimarisi (FastAPI)
+- Gerçek zamanlı sistemler (WebSocket)
+- Veri mühendisliği pipeline'ı (dbt)
+- Analitik veri modelleme
+- Basit talep tahmini (Rolling Average Forecast)
+- Çok uygulamalı frontend mimarisi (Customer / Kitchen / Owner)
+
+SweetOps bu yönüyle hem **Backend Engineering** hem de **Data Engineering** disiplinlerini bir araya getiren portföy niteliğinde bir projedir.
+
+---
+
+## Future Improvements
+
+- ML based demand forecasting
+- Redis backed WebSocket scaling
+- Multi-store architecture
+- Authentication & RBAC
+- Production deployment (Kubernetes)
