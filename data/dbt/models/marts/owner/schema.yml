@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: agg_daily_sales
+    description: 1 row per day
+    columns:
+      - name: sales_date
+        tests:
+          - unique
+          - not_null
+
+  - name: agg_hourly_orders
+    description: 1 row per day, per hour
+    columns:
+      - name: hour_bucket
+        tests:
+          - unique
+          - not_null
+
+  - name: agg_top_ingredients
+    description: 1 row per ingredient (aggregated)
+    columns:
+      - name: ingredient_id
+        tests:
+          - unique
+          - not_null
+
+  - name: agg_daily_ingredient_demand
+    description: 1 row per ingredient per day
+    columns:
+      - name: demand_date
+        tests:
+          - not_null

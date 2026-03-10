@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: sweetops_db
+    environment:
+      POSTGRES_USER: sweetops
+      POSTGRES_PASSWORD: sweetops_password
+      POSTGRES_DB: sweetops_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - sweetops_net
+
+  redis:
+    image: redis:7
+    container_name: sweetops_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - sweetops_net
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: sweetops_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./apps/api:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://sweetops:sweetops_password@postgres:5432/sweetops_db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - sweetops_net
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: sweetops_metabase
+    ports:
+      - "3000:3000"
+    environment:
+      - MB_DB_TYPE=postgres
+      - MB_DB_DBNAME=sweetops_db
+      - MB_DB_PORT=5432
+      - MB_DB_USER=sweetops
+      - MB_DB_PASS=sweetops_password
+      - MB_DB_HOST=postgres
+    depends_on:
+      - postgres
+    networks:
+      - sweetops_net
+
+  dbt:
+    image: ghcr.io/dbt-labs/dbt-postgres:1.7.latest # or standard dbt
+    container_name: sweetops_dbt
+    volumes:
+      - ./data/dbt:/usr/app/dbt
+      - ./data/dbt/profiles.yml:/root/.dbt/profiles.yml
+    command: tail -f /dev/null
+    depends_on:
+      - postgres
+    networks:
+      - sweetops_net
+
+networks:
+  sweetops_net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:

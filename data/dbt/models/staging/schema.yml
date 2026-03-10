@@ -1,0 +1,60 @@
+version: 2
+
+sources:
+  - name: public
+    database: sweetops_db
+    schema: public
+    tables:
+      - name: orders
+      - name: order_items
+      - name: order_item_ingredients
+      - name: products
+      - name: ingredients
+      - name: order_status_events
+
+models:
+  - name: stg_orders
+    description: 1 row per order
+    columns:
+      - name: order_id
+        tests:
+          - unique
+          - not_null
+  - name: stg_order_items
+    description: 1 row per order item
+    columns:
+      - name: order_item_id
+        tests:
+          - unique
+          - not_null
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+  - name: stg_order_item_ingredients
+    description: 1 row per order item ingredient selection
+    columns:
+      - name: order_item_ingredient_id
+        tests:
+          - unique
+          - not_null
+      - name: order_item_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_order_items')
+              field: order_item_id
+      - name: ingredient_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_ingredients')
+              field: ingredient_id
+  - name: stg_products
+    description: 1 row per product
+  - name: stg_ingredients
+    description: 1 row per ingredient
+  - name: stg_order_status_events
+    description: 1 row per status change event per order
