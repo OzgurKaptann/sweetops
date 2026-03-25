@@ -10,20 +10,18 @@ from app.models.ingredient import Ingredient
 from decimal import Decimal
 
 def create_order(db: Session, order_data: OrderCreateRequest, background_tasks: BackgroundTasks):
-    # Calculate totals
     total_amount = Decimal('0.00')
     
-    # Create the base order
     new_order = Order(
         store_id=order_data.store_id,
         table_id=order_data.table_id,
         status="NEW",
-        total_amount=0 # Will update after items
+        total_amount=0
     )
     db.add(new_order)
-    db.flush() # Secure the order ID
+    db.flush()
     
-    # Log the status event for analytics
+    # Log the status event
     status_event = OrderStatusEvent(
         order_id=new_order.id,
         status_to="NEW"
@@ -33,7 +31,6 @@ def create_order(db: Session, order_data: OrderCreateRequest, background_tasks: 
     item_count = 0
     
     for item_data in order_data.items:
-        # Get product price (In a real scenario, handle Not Found errors properly)
         product = db.query(Product).filter(Product.id == item_data.product_id).first()
         base_price = product.base_price if product else Decimal('0.00')
         
@@ -53,23 +50,31 @@ def create_order(db: Session, order_data: OrderCreateRequest, background_tasks: 
             ingredient = db.query(Ingredient).filter(Ingredient.id == ing_data.ingredient_id).first()
             price_mod = ingredient.price if ingredient else Decimal('0.00')
             
+            # Snapshot consumption at order time
+            consumed_qty = None
+            consumed_unit = None
+            if ingredient and ingredient.standard_quantity:
+                consumed_qty = ingredient.standard_quantity * ing_data.quantity
+                consumed_unit = ingredient.unit
+            
             new_ing = OrderItemIngredient(
                 order_item_id=new_item.id,
                 ingredient_id=ing_data.ingredient_id,
                 quantity=ing_data.quantity,
-                price_modifier=price_mod
+                price_modifier=price_mod,
+                consumed_quantity=consumed_qty,
+                consumed_unit=consumed_unit,
             )
             db.add(new_ing)
             item_total += (price_mod * ing_data.quantity)
             
         total_amount += item_total
     
-    # Update total
     new_order.total_amount = total_amount
     db.commit()
     db.refresh(new_order)
 
-    # Broadcast order_created event to Kitchen WebSocket safely
+    # Broadcast order_created event to Kitchen WebSocket
     from app.services.websocket_manager import kitchen_ws_manager
     
     background_tasks.add_task(

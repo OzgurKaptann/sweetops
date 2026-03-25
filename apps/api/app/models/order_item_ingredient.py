@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, ForeignKey, Numeric, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, Numeric, DateTime
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .base import Base
@@ -10,6 +10,8 @@ class OrderItemIngredient(Base):
     ingredient_id = Column(Integer, ForeignKey("ingredients.id"))
     quantity = Column(Integer, default=1)
     price_modifier = Column(Numeric(10, 2), default=0)
+    consumed_quantity = Column(Numeric(8, 2), nullable=True)
+    consumed_unit = Column(String(10), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     order_item = relationship("OrderItem", back_populates="ingredients")

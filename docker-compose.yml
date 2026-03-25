@@ -33,6 +33,7 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./apps/api:/app
+      - ./scripts:/app/scripts
     ports:
       - "8000:8000"
     environment:
@@ -48,7 +49,7 @@ services:
     image: metabase/metabase:latest
     container_name: sweetops_metabase
     ports:
-      - "3000:3000"
+      - "3100:3000"
     environment:
       - MB_DB_TYPE=postgres
       - MB_DB_DBNAME=sweetops_db
@@ -62,7 +63,7 @@ services:
       - sweetops_net
 
   dbt:
-    image: ghcr.io/dbt-labs/dbt-postgres:1.7.latest # or standard dbt
+    image: ghcr.io/dbt-labs/dbt-postgres:1.7.latest
     container_name: sweetops_dbt
     volumes:
       - ./data/dbt:/usr/app/dbt
@@ -80,3 +81,4 @@ networks:
 volumes:
   pgdata:
   redisdata:
+

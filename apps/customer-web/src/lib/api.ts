@@ -1,10 +1,10 @@
-import { OrderCreateRequest, OrderCreatedResponse, Product, Ingredient } from '@sweetops/types';
+import { OrderCreateRequest, OrderCreatedResponse, MenuResponse } from '@sweetops/types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
-export async function fetchMenu(): Promise<{ products: Product[]; ingredients: Ingredient[] }> {
+export async function fetchMenu(): Promise<MenuResponse> {
   const res = await fetch(`${API_BASE}/public/menu`, { cache: 'no-store' });
-  if (!res.ok) throw new Error('Failed to fetch menu');
+  if (!res.ok) throw new Error('Menü yüklenemedi');
   return res.json();
 }
 
@@ -14,6 +14,6 @@ export async function createOrder(payload: OrderCreateRequest): Promise<OrderCre
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error('Failed to create order');
+  if (!res.ok) throw new Error('Sipariş oluşturulamadı');
   return res.json();
 }

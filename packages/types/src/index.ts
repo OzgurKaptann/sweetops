@@ -10,6 +10,20 @@ export interface Ingredient {
   name: string;
   category: string;
   price: string;
+  unit?: string;
+  standard_quantity?: string;
+  allows_portion_choice?: boolean;
+}
+
+export interface IngredientCategory {
+  name: string;
+  ingredients: Ingredient[];
+}
+
+export interface MenuResponse {
+  products: Product[];
+  ingredients: Ingredient[];
+  categories: IngredientCategory[];
 }
 
 export interface OrderItemIngredientCreate {

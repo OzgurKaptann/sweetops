@@ -109,16 +109,16 @@ export default function KitchenDashboard() {
     try {
       await updateOrderStatus(orderId, nextStatus);
     } catch (err) {
-        alert("Guncelleme sirasinda hata olustu.");
+        alert("Güncelleme sırasında hata oluştu.");
     }
   };
 
   const getConnectionBadge = () => {
     switch (connectionState) {
-        case 'connected': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">● Live</span>;
-        case 'connecting': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-yellow-100 text-yellow-800 animate-pulse">● Connecting..</span>;
-        case 'error': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800">! Connection Error</span>;
-        case 'disconnected': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">● Disconnected</span>;
+        case 'connected': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">● Canlı</span>;
+        case 'connecting': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-yellow-100 text-yellow-800 animate-pulse">● Bağlanıyor..</span>;
+        case 'error': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800">! Bağlantı Hatası</span>;
+        case 'disconnected': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">● Bağlantı Kesildi</span>;
     }
   };
 
@@ -128,8 +128,8 @@ export default function KitchenDashboard() {
     <main className="min-h-screen bg-gray-100 p-8">
       <header className="mb-8 flex justify-between items-center bg-white p-4 rounded-lg shadow-sm">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Kitchen Display (KDS)</h1>
-          <p className="text-gray-500 mt-1">Live order tracking</p>
+          <h1 className="text-3xl font-bold text-gray-900">🧇 Mutfak Ekranı</h1>
+          <p className="text-gray-500 mt-1">Canlı sipariş takibi</p>
         </div>
         <div className="flex items-center gap-4">
             {getConnectionBadge()}
@@ -138,7 +138,8 @@ export default function KitchenDashboard() {
                   onClick={loadOrders}
                   className="px-3 py-1 bg-blue-50 text-blue-600 rounded text-sm hover:bg-blue-100 transition-colors"
                 >
-                  Refresh
+                  Yenile
+
                 </button>
             )}
         </div>
@@ -151,7 +152,7 @@ export default function KitchenDashboard() {
               <div className="flex justify-between items-start mb-2">
                 <div>
                   <span className="text-xl font-bold font-mono">#{order.id}</span>
-                  <div className="text-sm font-medium text-gray-500">Table {order.table_id}</div>
+                  <div className="text-sm font-medium text-gray-500">Masa {order.table_id}</div>
                 </div>
                 <span className={`px-3 py-1 rounded-full text-xs font-bold ${
                   order.status === 'NEW' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'
@@ -160,7 +161,7 @@ export default function KitchenDashboard() {
                 </span>
               </div>
               <div className="text-xs text-gray-400 mt-2">
-                Order Time: {new Date(order.created_at).toLocaleTimeString()}
+                Sipariş: {new Date(order.created_at).toLocaleTimeString('tr-TR')}
               </div>
             </div>
 
@@ -192,7 +193,7 @@ export default function KitchenDashboard() {
                     : 'bg-green-500 hover:bg-green-600 text-white focus:ring-green-500'
                 }`}
               >
-                {order.status === 'NEW' ? 'START PREPARING' : 'MARK READY'}
+                {order.status === 'NEW' ? 'HAZIRLANIYOR' : 'HAZIR ✓'}
               </button>
             </div>
           </div>
@@ -200,9 +201,9 @@ export default function KitchenDashboard() {
 
         {orders.length === 0 && !loading && (
           <div className="col-span-full py-16 text-center border-2 border-dashed border-gray-300 rounded-lg bg-white">
-            <div className="text-4xl mb-4">🍽️</div>
-            <h3 className="text-lg font-medium text-gray-900 mb-1">Kitchen is quiet</h3>
-            <p className="text-gray-500">No active orders in the queue right now.</p>
+            <div className="text-4xl mb-4">🧇</div>
+            <h3 className="text-lg font-medium text-gray-900 mb-1">Mutfak boş</h3>
+            <p className="text-gray-500">Şu anda bekleyen sipariş yok.</p>
           </div>
         )}
       </div>

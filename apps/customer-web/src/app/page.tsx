@@ -1,139 +1,313 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { fetchMenu, createOrder } from "@/lib/api";
-import { Product, Ingredient, OrderCreateRequest } from "@sweetops/types";
-import { Card, Button } from "@sweetops/ui";
-import { useRouter } from "next/navigation";
+import type { IngredientCategory, Ingredient, Product } from "@sweetops/types";
+
+const MAX_TOPPINGS = 6;
+const MAX_SAUCES = 2;
+
+const CATEGORY_META: Record<string, { icon: string; cssClass: string }> = {
+  "Meyveler":               { icon: "🍓", cssClass: "fruits" },
+  "Kuruyemiş / Süslemeler": { icon: "🥜", cssClass: "toppings" },
+  "Çikolatalar / Soslar":   { icon: "🍫", cssClass: "sauces" },
+};
+
+function isSauceCategory(cat: string): boolean {
+  return cat === "Çikolatalar / Soslar";
+}
 
 export default function Home() {
   const router = useRouter();
-  const [products, setProducts] = useState<Product[]>([]);
-  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-  
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [selectedIngredients, setSelectedIngredients] = useState<Record<number, boolean>>({});
-  const [loading, setLoading] = useState(false);
-  
+  const searchParams = useSearchParams();
+  const storeId = Number(searchParams?.get("store") || 1);
+  const tableId = searchParams?.get("table") ? Number(searchParams.get("table")) : undefined;
+
+  const [categories, setCategories] = useState<IngredientCategory[]>([]);
+  const [product, setProduct] = useState<Product | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Load menu
   useEffect(() => {
-    fetchMenu().then((data) => {
-      setProducts(data.products);
-      setIngredients(data.ingredients);
-    });
+    fetchMenu()
+      .then((menu) => {
+        setCategories(menu.categories);
+        if (menu.products.length > 0) {
+          setProduct(menu.products[0]);
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        setError("Menü yüklenemedi. Lütfen tekrar deneyin.");
+        setLoading(false);
+      });
   }, []);
 
-  const toggleIngredient = (id: number) => {
-    setSelectedIngredients(prev => ({ ...prev, [id]: !prev[id] }));
-  };
+  // Show toast helper
+  const showToast = useCallback((msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  }, []);
 
-  const handleOrder = async () => {
-    if (!selectedProduct) return;
-    setLoading(true);
-    
-    // Convert selected bool map to array of OrderItemIngredientCreate
-    const ingredientList = Object.entries(selectedIngredients)
-      .filter(([_, isSelected]) => isSelected)
-      .map(([id]) => ({ ingredient_id: Number(id), quantity: 1 }));
+  // Build an ingredient map for price lookups
+  const ingredientMap = new Map<number, Ingredient>();
+  categories.forEach((cat) =>
+    cat.ingredients.forEach((ing) => ingredientMap.set(ing.id, ing))
+  );
 
-    const payload: OrderCreateRequest = {
-      store_id: 1, // hardcoded for MVP context
-      table_id: 1,
-      items: [
-        {
-          product_id: selectedProduct.id,
-          quantity: 1,
-          ingredients: ingredientList
+  // Count selected per category type
+  const selectedToppings = Array.from(selected).filter((id) => {
+    const ing = ingredientMap.get(id);
+    return ing && !isSauceCategory(ing.category);
+  }).length;
+
+  const selectedSauces = Array.from(selected).filter((id) => {
+    const ing = ingredientMap.get(id);
+    return ing && isSauceCategory(ing.category);
+  }).length;
+
+  // Toggle ingredient selection
+  const toggleIngredient = useCallback(
+    (id: number) => {
+      const ing = ingredientMap.get(id);
+      if (!ing) return;
+
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+          return next;
         }
-      ]
-    };
 
+        // Check limits
+        if (isSauceCategory(ing.category)) {
+          const currentSauces = Array.from(next).filter((sid) => {
+            const s = ingredientMap.get(sid);
+            return s && isSauceCategory(s.category);
+          }).length;
+          if (currentSauces >= MAX_SAUCES) {
+            showToast(`En fazla ${MAX_SAUCES} sos seçebilirsiniz`);
+            return prev;
+          }
+        } else {
+          const currentToppings = Array.from(next).filter((sid) => {
+            const s = ingredientMap.get(sid);
+            return s && !isSauceCategory(s.category);
+          }).length;
+          if (currentToppings >= MAX_TOPPINGS) {
+            showToast(`En fazla ${MAX_TOPPINGS} malzeme seçebilirsiniz`);
+            return prev;
+          }
+        }
+
+        next.add(id);
+        return next;
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [categories, showToast]
+  );
+
+  // Calculate total price
+  const basePrice = product ? parseFloat(product.base_price) : 0;
+  const ingredientTotal = Array.from(selected).reduce((sum, id) => {
+    const ing = ingredientMap.get(id);
+    return sum + (ing ? parseFloat(ing.price) : 0);
+  }, 0);
+  const totalPrice = basePrice + ingredientTotal;
+
+  // Submit order
+  const handleSubmit = async () => {
+    if (selected.size === 0) {
+      showToast("En az 1 malzeme seçmelisiniz");
+      return;
+    }
+    if (!product) return;
+
+    setSubmitting(true);
     try {
-      const resp = await createOrder(payload);
-      router.push(`/success?order_id=${resp.order_id}&amount=${resp.total_amount}`);
-    } catch (e) {
-      console.error(e);
-      alert("Order failed!");
-    } finally {
-      setLoading(false);
+      const res = await createOrder({
+        store_id: storeId,
+        table_id: tableId,
+        items: [
+          {
+            product_id: product.id,
+            quantity: 1,
+            ingredients: Array.from(selected).map((id) => ({
+              ingredient_id: id,
+              quantity: 1,
+            })),
+          },
+        ],
+      });
+      router.push(
+        `/success?order_id=${res.order_id}&amount=${res.total_amount}`
+      );
+    } catch {
+      showToast("Sipariş gönderilemedi. Tekrar deneyin.");
+      setSubmitting(false);
     }
   };
 
-  // Calculate Subtotal dynamically
-  const subtotal = selectedProduct 
-    ? parseFloat(selectedProduct.base_price) + 
-      Object.entries(selectedIngredients)
-        .filter(([_, s]) => s)
-        .reduce((sum, [id]) => {
-          const ing = ingredients.find(i => i.id === Number(id));
-          return sum + (ing ? parseFloat(ing.price) : 0);
-        }, 0)
-    : 0;
+  // --- Render states ---
+  if (loading) {
+    return (
+      <div className="loading-screen">
+        <div className="loading-spinner" />
+        <p className="loading-text">Menü yükleniyor...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="error-screen">
+        <h2>😕</h2>
+        <p>{error}</p>
+        <button className="retry-btn" onClick={() => window.location.reload()}>
+          Tekrar Dene
+        </button>
+      </div>
+    );
+  }
+  const isDemo = searchParams?.get("demo") === "true";
+
+  // Demo presets — one-tap waffle combos
+  const DEMO_PRESETS = [
+    { label: "🍫 Klasik", names: ["Nutella", "Muz", "Fındık"] },
+    { label: "🎉 Çikolata Şölen", names: ["Kinder Bueno", "Oreo", "Çikolata Topları", "Nutella"] },
+    { label: "🍓 Meyveli Taze", names: ["Çilek", "Muz", "Karamel", "Sprinkle"] },
+  ];
+
+  const applyPreset = (names: string[]) => {
+    const ids = new Set<number>();
+    ingredientMap.forEach((ing, id) => {
+      if (names.includes(ing.name)) ids.add(id);
+    });
+    setSelected(ids);
+    showToast(`${ids.size} malzeme seçildi ✓`);
+  };
 
   return (
-    <main className="max-w-md mx-auto min-h-screen bg-gray-50 pb-24">
-      <header className="bg-white px-4 py-6 shadow-sm mb-6 rounded-b-[2rem]">
-         <h1 className="text-2xl font-bold text-gray-900">Delicious Waffles</h1>
-         <p className="text-gray-500 text-sm">Customize your perfect dessert</p>
+    <div className="page-container">
+      {/* Header */}
+      <header className="header">
+        <div className="header-emoji">🧇</div>
+        <h1>Waffle&apos;ını Oluştur</h1>
+        <p>Malzemelerini seç, biz hazırlayalım!</p>
       </header>
 
-      <div className="px-4 space-y-6">
-        <section>
-          <h2 className="text-lg font-semibold mb-3">1. Choose your Base</h2>
-          <div className="flex gap-4 overflow-x-auto pb-2 snap-x">
-            {products.map(p => (
-              <Card 
-                key={p.id} 
-                className={`snap-center min-w-[200px] cursor-pointer transition-all ${selectedProduct?.id === p.id ? 'ring-2 ring-blue-500 bg-blue-50' : ''}`}
+      {/* Demo Quick Order Presets */}
+      {isDemo && categories.length > 0 && (
+        <div style={{
+          padding: '12px 16px',
+          background: 'linear-gradient(135deg, #FEF3C7 0%, #FDE68A 100%)',
+          borderBottom: '1px solid #F59E0B33',
+        }}>
+          <div style={{ fontSize: '12px', fontWeight: 600, color: '#92400E', marginBottom: '8px', textAlign: 'center' }}>
+            ⚡ Hızlı Sipariş — Tek Dokunuşla
+          </div>
+          <div style={{ display: 'flex', gap: '8px', overflowX: 'auto' }}>
+            {DEMO_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                onClick={() => applyPreset(preset.names)}
+                style={{
+                  flex: '1 0 auto',
+                  padding: '10px 16px',
+                  background: 'white',
+                  border: '2px solid #D4940A',
+                  borderRadius: '12px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  color: '#2C1810',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  boxShadow: '0 2px 8px rgba(212, 148, 10, 0.15)',
+                }}
               >
-                <div onClick={() => setSelectedProduct(p)} className="p-4">
-                  <h3 className="font-medium text-gray-900">{p.name}</h3>
-                  <p className="text-blue-600 font-semibold mt-1">${p.base_price}</p>
-                </div>
-              </Card>
+                {preset.label}
+              </button>
             ))}
           </div>
-        </section>
-
-        {selectedProduct && (
-          <section>
-            <h2 className="text-lg font-semibold mb-3">2. Add Ingredients</h2>
-            <div className="flex flex-wrap gap-2">
-              {ingredients.map(ing => {
-                const isSelected = selectedIngredients[ing.id];
-                return (
-                  <button
-                    key={ing.id}
-                    onClick={() => toggleIngredient(ing.id)}
-                    className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
-                      isSelected 
-                        ? 'bg-blue-600 text-white border-blue-600' 
-                        : 'bg-white text-gray-700 border-gray-200 hover:border-blue-300'
-                    }`}
-                  >
-                    {ing.name} <span className="opacity-75 text-xs ml-1">+${ing.price}</span>
-                  </button>
-                )
-              })}
-            </div>
-          </section>
-        )}
-      </div>
-
-      {selectedProduct && (
-        <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t p-4 shadow-[0_-10px_20px_rgba(0,0,0,0.05)]">
-          <div className="flex justify-between items-center mb-3">
-             <span className="text-gray-600 font-medium">Total:</span>
-             <span className="text-xl font-bold">${subtotal.toFixed(2)}</span>
-          </div>
-          <Button 
-            className="w-full py-3 h-auto text-lg rounded-xl" 
-            onClick={handleOrder}
-            disabled={loading}
-          >
-            {loading ? 'Processing...' : 'Place Order'}
-          </Button>
         </div>
       )}
-    </main>
+
+      {/* Category sections */}
+      {categories.map((cat) => {
+        const meta = CATEGORY_META[cat.name] || {
+          icon: "📦",
+          cssClass: "toppings",
+        };
+        return (
+          <section key={cat.name} className="category-section">
+            <div className="category-header">
+              <div className={`category-icon ${meta.cssClass}`}>
+                {meta.icon}
+              </div>
+              <span className="category-name">{cat.name}</span>
+            </div>
+            <div className="chips-grid">
+              {cat.ingredients.map((ing) => (
+                <button
+                  key={ing.id}
+                  className={`chip ${selected.has(ing.id) ? "selected" : ""}`}
+                  onClick={() => toggleIngredient(ing.id)}
+                  id={`ingredient-${ing.id}`}
+                >
+                  <div className="chip-info">
+                    <span className="chip-name">{ing.name}</span>
+                    <span className="chip-price">+₺{parseFloat(ing.price).toFixed(0)}</span>
+                  </div>
+                  <div className="chip-check">✓</div>
+                </button>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+
+      <div className="bottom-spacer" />
+
+      {/* Sticky bottom bar */}
+      <div className="bottom-bar">
+        <div className="bottom-bar-inner">
+          <div className="price-row">
+            <span className="price-label">
+              Waffle + {selected.size} malzeme
+            </span>
+            <span className="price-value">
+              ₺{totalPrice.toFixed(0)}
+              <span className="currency">,00</span>
+            </span>
+          </div>
+          <button
+            className={`order-btn ${submitting ? "loading" : ""}`}
+            onClick={handleSubmit}
+            disabled={submitting || selected.size === 0}
+            id="submit-order-btn"
+          >
+            {submitting ? (
+              "Gönderiliyor..."
+            ) : (
+              <>
+                Siparişi Gönder
+                <span className="ing-count">{selected.size}</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Toast */}
+      <div className={`toast ${toast ? "visible" : ""}`}>{toast}</div>
+    </div>
   );
 }

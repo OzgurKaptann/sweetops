@@ -5,6 +5,7 @@ from .store import Store
 from .table import Table
 from .product import Product
 from .ingredient import Ingredient
+from .ingredient_stock import IngredientStock, IngredientStockMovement
 from .order import Order
 from .order_item import OrderItem
 from .order_item_ingredient import OrderItemIngredient
@@ -19,6 +20,8 @@ __all__ = [
     "Table",
     "Product",
     "Ingredient",
+    "IngredientStock",
+    "IngredientStockMovement",
     "Order",
     "OrderItem",
     "OrderItemIngredient",

@@ -1,4 +1,4 @@
-import { KPIsResponse, TopIngredientsResponse, HourlyDemandResponse, DailySalesResponse } from '@sweetops/types';
+// Types are defined locally in this file
 
 // Extend our shared types to match the new endpoints safely for MVP
 export interface DashboardKPIs {
@@ -73,3 +73,62 @@ export async function fetchIngredientForecast(): Promise<IngredientForecastData>
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
+
+export interface StockItem {
+  ingredient_id: number;
+  ingredient_name: string;
+  category: string;
+  unit: string;
+  stock_quantity: number;
+  reorder_level: number;
+  severity: 'critical' | 'warning' | 'low' | 'ok';
+  message: string;
+}
+
+export interface StockStatusData {
+  total: number;
+  critical_count: number;
+  warning_count: number;
+  items: StockItem[];
+}
+
+export async function fetchStockStatus(): Promise<StockStatusData> {
+  const res = await fetch(`${API_BASE}/owner/stock-status`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
+// --- Owner Insights ---
+
+export async function fetchCriticalAlerts(): Promise<any> {
+  const res = await fetch(`${API_BASE}/owner/insights/critical-alerts`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
+export async function fetchPrepTime(): Promise<any> {
+  const res = await fetch(`${API_BASE}/owner/insights/prep-time`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
+export async function fetchTrendingIngredients(): Promise<any> {
+  const res = await fetch(`${API_BASE}/owner/insights/trending-ingredients`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
+export async function fetchPopularCombos(): Promise<any> {
+  const res = await fetch(`${API_BASE}/owner/insights/popular-combos`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
+export async function fetchValueSummary(): Promise<any> {
+  const res = await fetch(`${API_BASE}/owner/insights/value-summary`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
+
+
