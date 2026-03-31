@@ -1,3 +1,6 @@
+"use client";
+
+import { useState, useEffect, useRef } from "react";
 import { KPICardGrid } from "@/components/KPICardGrid";
 import { TopIngredientsPanel } from "@/components/TopIngredientsPanel";
 import { HourlyDemandChart } from "@/components/HourlyDemandChart";
@@ -8,8 +11,43 @@ import { PrepTimePanel } from "@/components/PrepTimePanel";
 import { TrendingIngredientsPanel } from "@/components/TrendingIngredientsPanel";
 import { PopularCombosPanel } from "@/components/PopularCombosPanel";
 import { ValueSummaryPanel } from "@/components/ValueSummaryPanel";
+import { DailySalesChart } from "@/components/DailySalesChart";
+
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/kitchen";
+const POLL_INTERVAL_MS = 30_000;
 
 export default function OwnerDashboard() {
+  const [refreshTick, setRefreshTick] = useState(0);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const refresh = () => setRefreshTick((t) => t + 1);
+
+  useEffect(() => {
+    // 30-second auto-poll
+    const timer = setInterval(refresh, POLL_INTERVAL_MS);
+
+    // WebSocket — refresh immediately on new orders
+    const connect = () => {
+      const ws = new WebSocket(WS_URL);
+      ws.onmessage = (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          if (payload.event === "order_created" || payload.event === "order_status_updated") {
+            refresh();
+          }
+        } catch {}
+      };
+      ws.onclose = () => setTimeout(connect, 5000);
+      wsRef.current = ws;
+    };
+    connect();
+
+    return () => {
+      clearInterval(timer);
+      wsRef.current?.close();
+    };
+  }, []);
+
   return (
     <main className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -17,7 +55,15 @@ export default function OwnerDashboard() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16 items-center">
             <h1 className="text-xl font-bold text-gray-900">🧇 SweetOps <span className="text-amber-600">Panel</span></h1>
-            <div className="text-sm text-gray-500">İşletme Paneli • Canlı</div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={refresh}
+                className="text-xs px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors font-medium"
+              >
+                ↻ Yenile
+              </button>
+              <div className="text-sm text-gray-500">İşletme Paneli • Canlı</div>
+            </div>
           </div>
         </div>
       </header>
@@ -25,43 +71,40 @@ export default function OwnerDashboard() {
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
-        {/* Value Summary — THE money shot, top of page */}
-        <ValueSummaryPanel />
+        <ValueSummaryPanel key={`value-${refreshTick}`} />
 
         <div className="mt-8 mb-6 flex items-center justify-between">
           <h2 className="text-2xl font-bold text-gray-900">İşletme Özeti</h2>
         </div>
 
-        {/* KPI Cards */}
-        <KPICardGrid />
+        <KPICardGrid key={`kpi-${refreshTick}`} />
 
-        {/* Critical alerts — urgency */}
         <div className="mt-6">
-          <CriticalAlertsPanel />
+          <CriticalAlertsPanel key={`alerts-${refreshTick}`} />
         </div>
 
-        {/* Operational Insights Row */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-          <PrepTimePanel />
-          <StockWarningsPanel />
+          <PrepTimePanel key={`prep-${refreshTick}`} />
+          <StockWarningsPanel key={`stock-${refreshTick}`} />
         </div>
 
-        {/* Intelligence Row */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-          <TrendingIngredientsPanel />
-          <PopularCombosPanel />
+          <TrendingIngredientsPanel key={`trending-${refreshTick}`} />
+          <PopularCombosPanel key={`combos-${refreshTick}`} />
         </div>
 
-        {/* Charts & Lists Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
           <div className="lg:col-span-2">
-            <HourlyDemandChart />
+            <DailySalesChart key={`daily-${refreshTick}`} refreshTick={refreshTick} />
             <div className="mt-6">
-              <IngredientForecastPanel />
+              <HourlyDemandChart key={`hourly-${refreshTick}`} />
+            </div>
+            <div className="mt-6">
+              <IngredientForecastPanel key={`forecast-${refreshTick}`} />
             </div>
           </div>
           <div>
-            <TopIngredientsPanel />
+            <TopIngredientsPanel key={`top-${refreshTick}`} />
           </div>
         </div>
 

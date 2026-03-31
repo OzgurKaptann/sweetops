@@ -130,5 +130,22 @@ export async function fetchValueSummary(): Promise<any> {
   return res.json();
 }
 
+export interface DailySalesData {
+  as_of: string;
+  currency: string;
+  points: Array<{
+    sales_date: string;
+    total_orders: number;
+    gross_revenue: number;
+    average_order_value: number;
+  }>;
+}
+
+export async function fetchDailySales(): Promise<DailySalesData> {
+  const res = await fetch(`${API_BASE}/owner/daily-sales`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
 
 
