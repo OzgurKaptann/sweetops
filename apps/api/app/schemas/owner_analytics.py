@@ -6,7 +6,7 @@ from decimal import Decimal
 # Base Metadata
 class AnalyticsBase(BaseModel):
     as_of: datetime
-    currency: str = "USD"
+    currency: str = "TRY"
 
 # 1. GET /owner/kpis
 class KPIsData(BaseModel):
@@ -46,7 +46,7 @@ class DailySalesPoint(BaseModel):
     average_order_value: float
 
 class DailySalesResponse(AnalyticsBase):
-    sales: List[DailySalesPoint]
+    points: List[DailySalesPoint]
 
 # 5. GET /owner/ingredient-forecast
 class ForecastItem(BaseModel):

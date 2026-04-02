@@ -3,18 +3,25 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .base import Base
 
+
 class Order(Base):
     __tablename__ = "orders"
+
     id = Column(Integer, primary_key=True, index=True)
-    store_id = Column(Integer, ForeignKey("stores.id"))
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False)
     table_id = Column(Integer, ForeignKey("tables.id"), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     total_amount = Column(Numeric(10, 2), default=0)
-    status = Column(String, default="NEW", index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    status = Column(String, default="NEW", index=True, nullable=False)
+
+    # Idempotency: client-generated UUID, prevents double-submit
+    idempotency_key = Column(String(64), unique=True, nullable=True, index=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
+
     store = relationship("Store", back_populates="orders")
     table = relationship("Table", back_populates="orders")
     items = relationship("OrderItem", back_populates="order")
-    status_events = relationship("OrderStatusEvent", back_populates="order")
+    status_events = relationship("OrderStatusEvent", back_populates="order",
+                                  order_by="OrderStatusEvent.created_at")
