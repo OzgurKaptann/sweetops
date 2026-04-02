@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.schemas.owner_analytics import (
     KPIsResponse, TopIngredientsResponse, 
-    HourlyDemandResponse, DailySalesResponse
+    HourlyDemandResponse, DailySalesResponse,
+    IngredientForecastResponse
 )
 from app.services import owner_analytics_service as service
 from app.models.ingredient import Ingredient
@@ -27,7 +28,7 @@ def get_hourly_demand(db: Session = Depends(get_db)):
 def get_daily_sales(db: Session = Depends(get_db)):
     return service.fetch_daily_sales(db)
 
-@router.get("/ingredient-forecast", response_model=service.IngredientForecastResponse)
+@router.get("/ingredient-forecast", response_model=IngredientForecastResponse)
 def get_ingredient_forecast(db: Session = Depends(get_db)):
     return service.fetch_ingredient_forecast(db)
 

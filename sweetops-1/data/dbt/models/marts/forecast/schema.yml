@@ -1,0 +1,20 @@
+version: 2
+
+models:
+  - name: forecast_ingredient_trend_signals
+    description: 1 row per ingredient per as_of_date calculation
+    columns:
+      - name: ingredient_id
+        tests:
+          - unique
+          - not_null
+
+  - name: forecast_ingredient_daily_baseline
+    description: 1 row per ingredient per forecast_date over 7 days horizon
+    columns:
+      - name: ingredient_id
+        tests:
+          - not_null
+      - name: forecast_date
+        tests:
+          - not_null

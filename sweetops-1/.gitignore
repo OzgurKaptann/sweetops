@@ -1,0 +1,29 @@
+# Node
+node_modules
+.next
+dist
+build
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+
+# Docker
+*.log
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+claude-code-repo/
+claude-skills/
+superpowers-repo/
+
+

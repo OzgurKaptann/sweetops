@@ -56,5 +56,8 @@ class OrderListResponse(BaseSchema):
     store_id: int
     table_id: Optional[int]
     status: str
-    created_at: datetime
+    created_at: str          # UTC ISO-8601, e.g. "2026-04-01T10:00:00+00:00"
+    computed_age_minutes: float
+    priority_score: float
+    sla_severity: str        # "ok" | "warning" | "critical"
     items: List[OrderItemResponse] = []

@@ -10,8 +10,9 @@ from .order import Order
 from .order_item import OrderItem
 from .order_item_ingredient import OrderItemIngredient
 from .order_status_event import OrderStatusEvent
+from .audit_log import AuditLog
 
-# This is critical for Alembic to be able to find all models implicitly
+# Critical: Alembic discovers all models via this import
 __all__ = [
     "Base",
     "Role",
@@ -25,5 +26,6 @@ __all__ = [
     "Order",
     "OrderItem",
     "OrderItemIngredient",
-    "OrderStatusEvent"
+    "OrderStatusEvent",
+    "AuditLog",
 ]
