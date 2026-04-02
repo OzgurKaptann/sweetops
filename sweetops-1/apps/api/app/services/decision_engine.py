@@ -689,12 +689,289 @@ def _row_to_dict(row: OwnerDecision) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Metric-driven signals
+# (Generated from the measurement layer — pattern-level, not moment-in-time.)
+#
+# Decision IDs use "metric_" prefix — guaranteed non-overlapping with the
+# realtime signals above (stock_risk_N, sla_risk_current, etc.).
+#
+# Score cap: 80  — these surface BELOW urgent realtime signals (base 100+)
+#                  but ABOVE informational low-severity signals.
+# ---------------------------------------------------------------------------
+
+_METRIC_SCORE_CAP = 80.0
+
+# Thresholds mirror operational_context_service constants (no shared import
+# to avoid circular dependency — both files own their own constant copy).
+_COMBO_RATE_THRESHOLD   = 0.30   # combo_usage_rate < 30%
+_UPSELL_RATE_THRESHOLD  = 0.15   # upsell_acceptance_rate < 15%
+_SLA_BREACH_THRESHOLD   = 0.20   # sla_breach_rate > 20%
+_COMPLETION_RATE_LOW    = 0.30   # completion_rate < 30%
+_DECISIONS_SEEN_MIN     = 3      # need ≥ 3 seen for engagement signal to fire
+
+
+def _metric_driven_signals(db: Session) -> list[dict]:
+    """
+    Generate decisions driven by today's measurement layer output.
+
+    Four signal types (all "metric_" prefixed IDs):
+      metric_combo_health       — combo_usage_rate below threshold (pattern, not a moment)
+      metric_upsell_visibility  — upsell_acceptance_rate below threshold
+      metric_owner_engagement   — completion_rate below threshold with enough seen
+      metric_kitchen_performance — sla_breach_rate above threshold (sustained, not live)
+
+    Only fires on DataQuality.status == "valid".  Metrics with low_sample, no_data,
+    or unreliable quality are silently skipped — no false signals.
+    """
+    # Late import to avoid circular dependency (metrics_service → decision_engine)
+    try:
+        from app.services.metrics_service import fetch_daily_metrics
+        metrics = fetch_daily_metrics(db)
+    except Exception as exc:
+        logger.error("metric_driven_signals: could not fetch metrics: %s", exc)
+        return []
+
+    signals: list[dict] = []
+    conv    = metrics.conversion
+    kitchen = metrics.kitchen
+    dec     = metrics.decisions
+
+    def _valid(quality_status: str) -> bool:
+        return quality_status == "valid"
+
+    # ── 1. Combo health ───────────────────────────────────────────────────
+    if (
+        _valid(conv.combo_usage_rate.quality.status)
+        and conv.combo_usage_rate.value < _COMBO_RATE_THRESHOLD
+    ):
+        rate = conv.combo_usage_rate.value
+        pct  = round(rate * 100, 1)
+        thr  = round(_COMBO_RATE_THRESHOLD * 100)
+        prev_pct = (
+            round(conv.combo_usage_rate.prev_value * 100, 1)
+            if conv.combo_usage_rate.prev_value is not None else None
+        )
+        trend_note = (
+            f" (down from {prev_pct}% yesterday)"
+            if prev_pct is not None and conv.combo_usage_rate.trend == "down"
+            else ""
+        )
+        signals.append({
+            "id":   "metric_combo_health",
+            "type": "metric_combo_health",
+            "severity": "medium",
+            "decision_score": min(60.0, _METRIC_SCORE_CAP),
+            "blocking_vs_non_blocking": False,
+            "title": "Low combo usage — increase ingredient combination visibility",
+            "description": (
+                f"Today's combo usage rate is {pct}%{trend_note}. "
+                f"Target is >{thr}%. "
+                "Customers are not building ingredient combinations as expected."
+            ),
+            "impact": (
+                "Orders without combos generate lower average order value. "
+                "The combo engine is not converting customers at the expected rate."
+            ),
+            "recommended_action": (
+                "1. Verify that popular-combo badges are visible on the customer menu. "
+                "2. Check the top ingredient pairs in Popular Combos panel and promote them. "
+                "3. Consider a time-limited 'try a combo' prompt for first-time visitors."
+            ),
+            "why_now": (
+                f"Combo usage rate ({pct}%) has been below the {thr}% threshold today. "
+                "The menu ranking engine is already boosting combo ingredients — "
+                "if this persists, the issue is UI visibility, not ranking."
+            ),
+            "expected_impact": (
+                "Improving combo visibility to reach 30% usage typically increases "
+                "average order value by 15–25% based on the AOV gap between combo "
+                "and non-combo orders."
+            ),
+            "data": {
+                "metric": "combo_usage_rate",
+                "value_at_trigger": rate,
+                "threshold": _COMBO_RATE_THRESHOLD,
+                "prev_value": conv.combo_usage_rate.prev_value,
+                "trend": conv.combo_usage_rate.trend,
+                "sample_size": conv.combo_usage_rate.quality.sample_size,
+                "source": "measurement_layer",
+            },
+        })
+
+    # ── 2. Upsell visibility ──────────────────────────────────────────────
+    if (
+        _valid(conv.upsell_acceptance_rate.quality.status)
+        and conv.upsell_acceptance_rate.value < _UPSELL_RATE_THRESHOLD
+    ):
+        rate = conv.upsell_acceptance_rate.value
+        pct  = round(rate * 100, 1)
+        thr  = round(_UPSELL_RATE_THRESHOLD * 100)
+        signals.append({
+            "id":   "metric_upsell_visibility",
+            "type": "metric_upsell_visibility",
+            "severity": "low",
+            "decision_score": min(40.0, _METRIC_SCORE_CAP),
+            "blocking_vs_non_blocking": False,
+            "title": "Low upsell acceptance — customers not adding extra ingredients",
+            "description": (
+                f"Only {pct}% of order-items contain 2 or more ingredients today "
+                f"(target >{thr}%). "
+                "Most customers are ordering single ingredients per item."
+            ),
+            "impact": (
+                "Single-ingredient items generate the minimum possible revenue per item. "
+                "Every unaccepted upsell is a missed revenue opportunity."
+            ),
+            "recommended_action": (
+                "1. Check that the upsell prompt appears BEFORE the customer confirms each item. "
+                "2. Verify the 3 suggested combos are relevant (check Popular Combos panel). "
+                "3. If the prompt is visible but ignored, test different copy: "
+                "   'Most customers also add [X]' outperforms generic 'Add to your order'."
+            ),
+            "why_now": (
+                f"Item-level acceptance rate is {pct}% today — below the {thr}% floor. "
+                "This is the finest-grained conversion signal available."
+            ),
+            "expected_impact": (
+                "Raising upsell acceptance from 15% to 30% adds roughly 0.15 ingredients "
+                "per item, which translates directly into higher average order value."
+            ),
+            "data": {
+                "metric": "upsell_acceptance_rate",
+                "value_at_trigger": rate,
+                "threshold": _UPSELL_RATE_THRESHOLD,
+                "prev_value": conv.upsell_acceptance_rate.prev_value,
+                "trend": conv.upsell_acceptance_rate.trend,
+                "sample_size": conv.upsell_acceptance_rate.quality.sample_size,
+                "source": "measurement_layer",
+            },
+        })
+
+    # ── 3. Owner engagement ───────────────────────────────────────────────
+    if (
+        dec.decisions_seen >= _DECISIONS_SEEN_MIN
+        and _valid(dec.completion_rate.quality.status)
+        and dec.completion_rate.value < _COMPLETION_RATE_LOW
+    ):
+        cr_pct  = round(dec.completion_rate.value * 100, 1)
+        thr_pct = round(_COMPLETION_RATE_LOW * 100)
+        signals.append({
+            "id":   "metric_owner_engagement",
+            "type": "metric_owner_engagement",
+            "severity": "medium",
+            "decision_score": min(55.0, _METRIC_SCORE_CAP),
+            "blocking_vs_non_blocking": False,
+            "title": "Low decision completion rate — signals not being acted on",
+            "description": (
+                f"{dec.decisions_seen} decision(s) were seen today but only "
+                f"{dec.decisions_completed} completed (completion rate: {cr_pct}%, "
+                f"target >{thr_pct}%). "
+                "Acknowledged or dismissed signals do not protect revenue."
+            ),
+            "impact": (
+                "Stock risks that are seen but not resolved lead to stockouts. "
+                "SLA risks that are acknowledged but not acted on lead to customer churn. "
+                "The decision engine only adds value when actions are completed."
+            ),
+            "recommended_action": (
+                f"Review the {dec.decisions_seen - dec.decisions_completed} incomplete decision(s). "
+                "For each: either complete with an outcome or dismiss with a reason. "
+                "If decisions are difficult to act on, check whether recommended actions "
+                "match what is operationally possible in your kitchen."
+            ),
+            "why_now": (
+                f"Completion rate is {cr_pct}% with {dec.decisions_seen} decisions seen today. "
+                "A completion rate below 30% suggests either decision fatigue "
+                "or that the recommended actions are not achievable."
+            ),
+            "expected_impact": (
+                "Raising completion rate above 50% ensures that the majority of "
+                "identified risks are actually resolved before they cause revenue loss."
+            ),
+            "data": {
+                "metric": "completion_rate",
+                "value_at_trigger": dec.completion_rate.value,
+                "threshold": _COMPLETION_RATE_LOW,
+                "decisions_seen": dec.decisions_seen,
+                "decisions_completed": dec.decisions_completed,
+                "decisions_acknowledged": dec.decisions_acknowledged,
+                "source": "measurement_layer",
+            },
+        })
+
+    # ── 4. Kitchen performance ────────────────────────────────────────────
+    if (
+        _valid(kitchen.sla_breach_rate.quality.status)
+        and kitchen.sla_breach_rate.value > _SLA_BREACH_THRESHOLD
+    ):
+        breach_pct = round(kitchen.sla_breach_rate.value * 100, 1)
+        thr_pct    = round(_SLA_BREACH_THRESHOLD * 100)
+        avg_prep   = (
+            f"{kitchen.avg_prep_time_minutes.value:.1f} min avg"
+            if _valid(kitchen.avg_prep_time_minutes.quality.status)
+            else "avg unknown"
+        )
+        signals.append({
+            "id":   "metric_kitchen_performance",
+            "type": "metric_kitchen_performance",
+            "severity": "high",
+            "decision_score": min(80.0, _METRIC_SCORE_CAP),
+            "blocking_vs_non_blocking": True,
+            "title": "Sustained SLA breaches — kitchen performance below standard",
+            "description": (
+                f"{breach_pct}% of orders today exceeded the 10-minute SLA "
+                f"({avg_prep}, target breach rate <{thr_pct}%). "
+                "This is a pattern across today's orders, not an isolated incident."
+            ),
+            "impact": (
+                "Sustained SLA breaches indicate a structural kitchen throughput problem. "
+                "Customers experiencing long waits are significantly more likely to churn. "
+                "Each minute over SLA increases negative review probability."
+            ),
+            "recommended_action": (
+                "1. Check kitchen staffing — is today understaffed vs expected demand? "
+                "2. Review the batching suggestions in the Kitchen display for efficiency gains. "
+                "3. Temporarily remove the highest-complexity items from upsell suggestions "
+                "   (the system has already reduced upsell suggestions to 1). "
+                "4. If breach rate is > 35%, consider a short pause on new orders."
+            ),
+            "why_now": (
+                f"{breach_pct}% of orders today breached the 10-min SLA. "
+                "This metric is computed from actual order completion data — "
+                "unlike the live sla_risk signal which shows current queue age, "
+                "this confirms the pattern has persisted across the whole day."
+            ),
+            "expected_impact": (
+                "Resolving the root cause of kitchen overload should drop breach rate "
+                f"below {thr_pct}% within 2–3 hours of intervention."
+            ),
+            "data": {
+                "metric": "sla_breach_rate",
+                "value_at_trigger": kitchen.sla_breach_rate.value,
+                "threshold": _SLA_BREACH_THRESHOLD,
+                "avg_prep_time_minutes": (
+                    kitchen.avg_prep_time_minutes.value
+                    if _valid(kitchen.avg_prep_time_minutes.quality.status) else None
+                ),
+                "p90_prep_time_minutes": (
+                    kitchen.p90_prep_time_minutes.value
+                    if _valid(kitchen.p90_prep_time_minutes.quality.status) else None
+                ),
+                "sample_size": kitchen.sla_breach_rate.quality.sample_size,
+                "source": "measurement_layer",
+            },
+        })
+
+    return signals
+
+
+# ---------------------------------------------------------------------------
 # Public: GET
 # ---------------------------------------------------------------------------
 
 def get_owner_decisions(db: Session) -> dict:
     """
-    1. Compute all fresh signals.
+    1. Compute all fresh signals (realtime + metric-driven).
     2. Upsert into owner_decisions (respecting cooldown).
     3. Sort by decision_score DESC, then decision_id ASC.
     4. Return envelope.
@@ -708,6 +985,7 @@ def get_owner_decisions(db: Session) -> dict:
         _slow_moving_signals,
         _sla_risk_signals,
         _revenue_anomaly_signals,
+        _metric_driven_signals,      # metric-driven, pattern-level signals
     ):
         try:
             all_signals.extend(fn(db))
@@ -741,7 +1019,7 @@ def get_owner_decisions(db: Session) -> dict:
     return {
         "decisions":         visible,
         "generated_at":      now.isoformat(),
-        "signals_evaluated": 5,
+        "signals_evaluated": 6,   # 5 realtime + 1 metric-driven batch
         "active_count":      len(visible),
         "summary":           summary,
     }

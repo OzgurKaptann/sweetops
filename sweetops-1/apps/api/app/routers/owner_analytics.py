@@ -10,6 +10,7 @@ from app.schemas.owner_analytics import (
 )
 from app.services import owner_analytics_service as service
 from app.services.decision_engine import apply_decision_action, get_owner_decisions
+from app.services.operational_context_service import compute_operational_context, context_to_dict
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock
 
@@ -85,6 +86,44 @@ def patch_decision(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/operational-context")
+def get_operational_context(db: Session = Depends(get_db)):
+    """
+    Current operational mode derived from today's metrics.
+
+    Mode hierarchy (highest priority wins):
+      sla_critical      — sla_breach_rate > 35%: kitchen severely overloaded
+      high_kitchen_load — sla_breach_rate > 20% or avg_prep > 9min: reduce order complexity
+      boost_combos      — combo_usage_rate < 30% or upsell_acceptance < 15%: increase combo visibility
+      normal            — all metrics within expected thresholds
+
+    Downstream effects (applied automatically):
+      boost_combos:      menu ranking promotes combo ingredients (combo_boost=1.6×)
+                         upsell shows full 3 suggestions
+      high_kitchen_load: upsell reduced to 1 suggestion; no combo ranking boost
+      sla_critical:      upsell reduced to 1 suggestion; no combo ranking boost
+
+    Consumed by:
+      - GET /public/menu/   (menu ranking adapts)
+      - GET /public/menu/upsell  (max_suggestions adapts)
+      - Owner dashboard MetricAttentionBanner (shows the reason and suggested action)
+
+    Sample response:
+    {
+      "mode": "boost_combos",
+      "reasons": ["Combo usage rate is 24% (threshold: 30%). Increasing combo ingredient visibility."],
+      "combo_boost": 1.6,
+      "max_upsell_suggestions": 3,
+      "computed_at": "2026-04-02T10:30:00+00:00",
+      "metrics_date": "2026-04-02",
+      "metric_values": { "combo_usage_rate": 0.24, "sla_breach_rate": 0.08, ... },
+      "thresholds": { ... }
+    }
+    """
+    ctx = compute_operational_context(db)
+    return context_to_dict(ctx)
 
 
 @router.get("/stock-status")

@@ -5,6 +5,7 @@ from typing import List
 from app.core.db import get_db
 from app.services.menu_service import get_menu
 from app.services.conversion_engine import compute_upsell, validate_ingredient_selection
+from app.services.operational_context_service import compute_operational_context, OperationalContext
 
 router = APIRouter(prefix="/public/menu", tags=["Public Menu"])
 
@@ -62,7 +63,11 @@ def upsell_suggestions(
       "based_on_ingredient_ids": [1, 3]
     }
     """
-    return compute_upsell(db, ingredient_ids)
+    try:
+        ctx = compute_operational_context(db)
+    except Exception:
+        ctx = OperationalContext()
+    return compute_upsell(db, ingredient_ids, max_suggestions=ctx.max_upsell_suggestions)
 
 
 @router.post("/validate")

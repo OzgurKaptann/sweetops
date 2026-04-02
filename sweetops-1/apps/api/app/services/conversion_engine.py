@@ -167,19 +167,30 @@ def _ranking_score(
     usage_count: int,
     max_usage: int,
     price_rank_norm: float,  # 0.0–1.0 = ing price / max price
+    combo_boost: float = 1.0,  # multiplier for the popularity component (operational context)
+    has_combos: bool = False,  # True if ingredient has recommended_with partners
 ) -> float:
     """
     Deterministic ranking score.
     Components (additive, higher = better position):
-      is_promoted   × 1000   — owner-controlled always-first
-      usage_norm    ×  50    — normalized popularity
-      price_rank    ×  30    — margin proxy (higher price = more profitable)
-      stock_factor  ×  20    — prefer in-stock
+      is_promoted   × 1000                       — owner-controlled always-first
+      usage_norm    × 50 × combo_boost (if combos) — normalized popularity
+                                                     boosted when combo mode is active
+      price_rank    × 30                          — margin proxy (higher price = more profitable)
+      stock_factor  × 20                          — prefer in-stock
+
+    combo_boost is supplied by the operational context (1.0 = normal, 1.6 = boost_combos mode).
+    It ONLY multiplies the popularity component for ingredients that are part of known combos,
+    ensuring the boost is targeted and does not affect solitary ingredients.
     """
     usage_norm   = (usage_count / max_usage) if max_usage > 0 else 0.0
     stock_factor = {"in_stock": 1.0, "low_stock": 0.5, "out_of_stock": 0.0}.get(stock_st, 0.0)
     promoted     = 1000.0 if getattr(ing, "is_promoted", False) else 0.0
-    return round(promoted + usage_norm * 50 + price_rank_norm * 30 + stock_factor * 20, 4)
+
+    # Apply combo_boost only to ingredients that participate in known combos
+    effective_boost = combo_boost if (has_combos and combo_boost > 1.0) else 1.0
+
+    return round(promoted + usage_norm * 50 * effective_boost + price_rank_norm * 30 + stock_factor * 20, 4)
 
 
 def _recommendations_for(
@@ -243,6 +254,7 @@ def enrich_menu(
     db: Session,
     ingredients: list[Ingredient],
     stocks: dict[int, IngredientStock],
+    combo_boost: float = 1.0,
 ) -> list[dict]:
     """
     Return enriched ingredient dicts, ranked and annotated with conversion signals.
@@ -254,6 +266,11 @@ def enrich_menu(
       recommended_with      — list[int] (ingredient IDs)
       out_of_stock_alternative — {ingredient_id, ingredient_name, category, price} | null
       ranking_score         — float (used for ordering; exposed for transparency)
+
+    combo_boost:
+      Supplied by the operational context service (1.0 = normal, >1.0 = boost_combos mode).
+      When > 1.0, the popularity component of ranking_score is multiplied for ingredients
+      that participate in known combos, increasing their visibility in the sorted menu.
     """
     if not ingredients:
         return []
@@ -290,7 +307,13 @@ def enrich_menu(
             if stock_st != "in_stock"
             else None
         )
-        score = _ranking_score(ing, stock_st, usage, max_usage, price_norm)
+        # has_combos: True if this ingredient appears in any known combo pair
+        has_combos = any(ing.id in pair for pair in combo_counts)
+        score = _ranking_score(
+            ing, stock_st, usage, max_usage, price_norm,
+            combo_boost=combo_boost,
+            has_combos=has_combos,
+        )
 
         result.append({
             # Original fields (unchanged)
@@ -301,7 +324,7 @@ def enrich_menu(
             "unit":                 ing.unit,
             "standard_quantity":    str(ing.standard_quantity),
             "allows_portion_choice": ing.allows_portion_choice,
-            # New conversion signal fields
+            # Conversion signal fields
             "stock_status":              stock_st,
             "popular_badge":             _popular_badge(ing.id, usage_counts, pop_threshold),
             "profitable_badge":          _profitable_badge(ing, price75),
@@ -322,9 +345,10 @@ def enrich_menu(
 def compute_upsell(
     db: Session,
     selected_ids: list[int],
+    max_suggestions: int = MAX_UPSELL_SUGGESTIONS,
 ) -> dict:
     """
-    Given currently selected ingredient IDs, return up to MAX_UPSELL_SUGGESTIONS
+    Given currently selected ingredient IDs, return up to max_suggestions
     additional ingredients worth adding.
 
     Algorithm:
@@ -333,6 +357,10 @@ def compute_upsell(
       3. Score: combo_freq × (1 + price_rank_norm)  — rewards high-freq + high-margin combos
       4. Filter: not already selected, is_active, in_stock
       5. Return top N sorted by score DESC, then id ASC
+
+    max_suggestions:
+      Default = MAX_UPSELL_SUGGESTIONS (3). Reduced to 1 during high kitchen load to
+      decrease order complexity and protect prep time SLA.
     """
     if not selected_ids:
         return {"suggestions": [], "based_on_ingredient_ids": []}
@@ -378,7 +406,7 @@ def compute_upsell(
         return {"suggestions": [], "based_on_ingredient_ids": selected_ids}
 
     # Sort: score DESC, id ASC
-    ranked = sorted(candidate_scores.items(), key=lambda x: (-x[1], x[0]))[:MAX_UPSELL_SUGGESTIONS]
+    ranked = sorted(candidate_scores.items(), key=lambda x: (-x[1], x[0]))[:max_suggestions]
 
     suggestions = []
     for ing_id, score in ranked:

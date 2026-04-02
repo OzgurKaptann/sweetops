@@ -24,20 +24,30 @@ const SEVERITY_STYLES = {
   low:    { border: "border-l-yellow-300", badge: "bg-yellow-50 text-yellow-700", label: "LOW", dot: "bg-yellow-400" },
 } as const;
 
-const TYPE_LABELS: Record<DecisionType, string> = {
+const TYPE_LABELS: Record<string, string> = {
   stock_risk: "Stock Risk",
   demand_spike: "Demand Spike",
   slow_moving: "Slow Moving",
   sla_risk: "SLA Risk",
   revenue_anomaly: "Revenue Anomaly",
+  // Metric-driven (pattern-level, generated from measurement layer)
+  metric_combo_health: "Combo Health",
+  metric_upsell_visibility: "Upsell Visibility",
+  metric_owner_engagement: "Owner Engagement",
+  metric_kitchen_performance: "Kitchen Performance",
 };
 
-const TYPE_ICONS: Record<DecisionType, string> = {
+const TYPE_ICONS: Record<string, string> = {
   stock_risk: "📦",
   demand_spike: "📈",
   slow_moving: "🐌",
   sla_risk: "⏱",
   revenue_anomaly: "💰",
+  // Metric-driven
+  metric_combo_health: "🔄",
+  metric_upsell_visibility: "➕",
+  metric_owner_engagement: "✅",
+  metric_kitchen_performance: "⏱",
 };
 
 // ── Resolution quality config ─────────────────────────────────────────────────

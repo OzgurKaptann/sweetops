@@ -13,6 +13,11 @@ const TYPE_VERB: Record<string, string> = {
   sla_risk: "Clear kitchen queue",
   revenue_anomaly: "Investigate revenue drop",
   slow_moving: "Reduce tied capital",
+  // Metric-driven decisions
+  metric_combo_health: "Boost combo visibility",
+  metric_upsell_visibility: "Fix upsell placement",
+  metric_owner_engagement: "Complete pending decisions",
+  metric_kitchen_performance: "Investigate kitchen throughput",
 };
 
 /**

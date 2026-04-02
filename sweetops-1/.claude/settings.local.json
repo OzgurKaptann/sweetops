@@ -19,7 +19,8 @@
       "Bash(curl -s -X PATCH \"http://localhost:8000/kitchen/orders/8/status\" -H \"Content-Type: application/json\" -d '{\"\"status\"\":\"\"NEW\"\"}')",
       "Bash(curl -s -X PATCH \"http://localhost:8000/kitchen/orders/8/status\" -H \"Content-Type: application/json\" -d '{\"\"status\"\":\"\"DELIVERED\"\"}')",
       "Bash(docker ps:*)",
-      "Bash(docker rm:*)"
+      "Bash(docker rm:*)",
+      "Bash(xargs grep:*)"
     ]
   }
 }

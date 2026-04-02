@@ -13,6 +13,10 @@ import { DecisionPanel } from "@/components/DecisionPanel";
 import { StockWarningsPanel } from "@/components/StockWarningsPanel";
 import { OwnerDecision } from "@/lib/api";
 
+// Measurement + attention
+import { MetricsPanel } from "@/components/MetricsPanel";
+import { MetricAttentionBanner } from "@/components/MetricAttentionBanner";
+
 // Analytics
 import { HourlyDemandChart } from "@/components/HourlyDemandChart";
 import { IngredientForecastPanel } from "@/components/IngredientForecastPanel";
@@ -118,13 +122,15 @@ export default function OwnerDashboard() {
           </div>
         </div>
 
-        {/* Focus banner — immediately below nav, inside sticky header */}
+        {/* Focus banner — highest-priority realtime decision */}
         {!bannerDismissed && (
           <FocusBanner
             decision={primaryDecision}
             onDismiss={() => setBannerDismissed(true)}
           />
         )}
+        {/* Metric attention banner — metric-driven mode (below focus banner) */}
+        <MetricAttentionBanner refreshTick={refreshTick} />
       </header>
 
       {/* ── Main content ───────────────────────────────────────────────────── */}
@@ -160,7 +166,13 @@ export default function OwnerDashboard() {
           </div>
         </section>
 
-        {/* ━━━ ZONE 3 · ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+        {/* ━━━ ZONE 3 · MEASUREMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+        <section id="metrics-section">
+          <SectionHeader title="Measurement" subtitle="Is the system actually working? · day-over-day trends" accent="neutral" />
+          <MetricsPanel key={`metrics-${refreshTick}`} refreshTick={refreshTick} />
+        </section>
+
+        {/* ━━━ ZONE 4 · ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
         <section>
           <SectionHeader title="Analytics" subtitle="Demand patterns · forecast · ingredient breakdown" accent="analytics" />
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

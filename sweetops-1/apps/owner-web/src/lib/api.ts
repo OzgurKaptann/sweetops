@@ -252,6 +252,142 @@ export async function fetchDailySales(): Promise<DailySalesData> {
   return res.json();
 }
 
+// ── Metrics (Measurement Layer) ───────────────────────────────────────────────
+
+export type DataQualityStatus = "valid" | "low_sample" | "no_data" | "unreliable";
+
+export interface DataQuality {
+  status: DataQualityStatus;
+  sample_size: number;
+  min_required: number;
+  message: string | null;
+}
+
+export interface TrendValue {
+  value: number;
+  prev_value: number | null;
+  trend: "up" | "down" | "flat";
+  /** Signed %, bounded to [-300, +300]. Null when comparison unavailable. */
+  pct_change: number | null;
+  quality: DataQuality;
+}
+
+export interface MetricsObservability {
+  computed_at: string;
+  computation_ms: number;
+  target_date: string;
+  comparison_date: string;
+  errors: string[];
+}
+
+export interface DailyMetricsData {
+  date: string;
+  as_of: string;
+  conversion: {
+    combo_usage_rate: TrendValue;
+    avg_order_value_with_combo: TrendValue;
+    avg_order_value_without_combo: TrendValue;
+    upsell_acceptance_rate: TrendValue;
+  };
+  decisions: {
+    decisions_seen: number;
+    decisions_acknowledged: number;
+    decisions_completed: number;
+    completion_rate: TrendValue;
+  };
+  kitchen: {
+    avg_prep_time_minutes: TrendValue;
+    p90_prep_time_minutes: TrendValue;
+    sla_breach_rate: TrendValue;
+  };
+  revenue_protection: {
+    stock_risk_triggered: number;
+    stock_risk_resolved: number;
+    estimated_revenue_saved: number;
+    actual_outcome: { good: number; partial: number; failed: number };
+  };
+  meta: MetricsObservability;
+}
+
+export interface MetricDefinition {
+  name: string;
+  group: string;
+  definition: string;
+  calculation: string;
+  edge_cases: string[];
+  interpretation_high: string;
+  interpretation_low: string;
+  decision_implication: string;
+  min_sample: number;
+  unit: "rate" | "currency" | "minutes" | "count";
+  lower_is_better: boolean;
+}
+
+export interface MetricDictionaryData {
+  version: string;
+  metrics: MetricDefinition[];
+}
+
+export async function fetchMetrics(targetDate?: string): Promise<DailyMetricsData> {
+  const url = targetDate
+    ? `${API_BASE}/owner/metrics/?date=${targetDate}`
+    : `${API_BASE}/owner/metrics/`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw Object.assign(new Error("Metrics API Error"), {
+      status: res.status,
+      detail,
+    });
+  }
+  return res.json();
+}
+
+export async function fetchMetricDictionary(): Promise<MetricDictionaryData> {
+  const res = await fetch(`${API_BASE}/owner/metrics/dictionary`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Metric dictionary unavailable");
+  return res.json();
+}
+
+// ── Operational Context ───────────────────────────────────────────────────────
+
+export type OperationalMode =
+  | "normal"
+  | "boost_combos"
+  | "high_kitchen_load"
+  | "sla_critical";
+
+export interface OperationalContextData {
+  mode: OperationalMode;
+  reasons: string[];
+  combo_boost: number;
+  max_upsell_suggestions: number;
+  computed_at: string;
+  metrics_date: string;
+  metric_values: {
+    combo_usage_rate: number | null;
+    upsell_acceptance_rate: number | null;
+    sla_breach_rate: number | null;
+    avg_prep_time_minutes: number | null;
+    completion_rate: number | null;
+    decisions_seen: number;
+    decisions_completed: number;
+  };
+  thresholds: {
+    combo_rate_boost: number;
+    upsell_rate_boost: number;
+    sla_breach_high_load: number;
+    sla_breach_critical: number;
+    avg_prep_high_load_min: number;
+  };
+}
+
+export async function fetchOperationalContext(): Promise<OperationalContextData> {
+  const res = await fetch(`${API_BASE}/owner/operational-context`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Operational context unavailable");
+  return res.json();
+}
+
 // ── Kitchen ───────────────────────────────────────────────────────────────────
 
 export type SLASeverity = "ok" | "warning" | "critical";
