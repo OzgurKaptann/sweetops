@@ -1,0 +1,15 @@
+{
+  "name": "sweetops-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:customer": "npm run dev --workspace=customer-web -- --port 3001",
+    "dev:kitchen": "npm run dev --workspace=kitchen-web -- --port 3002",
+    "dev:owner": "npm run dev --workspace=owner-web -- --port 3003",
+    "build:types": "npm run build --workspace=@sweetops/types",
+    "build:ui": "npm run build --workspace=@sweetops/ui"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:8000/public/menu)",
+      "Bash(curl -s http://localhost:8000/public/menu/)",
+      "Bash(docker compose:*)",
+      "Bash(docker exec:*)",
+      "Bash(curl -s http://localhost:8000/kitchen/orders?store_id=1)",
+      "Bash(curl -s \"http://localhost:8000/kitchen/orders?store_id=1\" -v)",
+      "Bash(curl -s \"http://localhost:8000/kitchen/orders/?store_id=1\")",
+      "Bash(curl -s -I -X OPTIONS \"http://localhost:8000/kitchen/orders/?store_id=1\" -H \"Origin: http://localhost:3001\")",
+      "Bash(curl -s \"http://localhost:8000/owner/daily-sales\")",
+      "Bash(docker cp:*)",
+      "Bash(docker restart:*)",
+      "Bash(curl -s \"http://localhost:8000/health\")",
+      "Bash(curl -s -X POST \"http://localhost:8000/public/orders/\" -H \"Content-Type: application/json\" -H \"Idempotency-Key: test-key-001\" -d '{\"\"store_id\"\":1,\"\"table_id\"\":1,\"\"items\"\":[{\"\"product_id\"\":1,\"\"quantity\"\":1,\"\"ingredients\"\":[{\"\"ingredient_id\"\":1,\"\"quantity\"\":1},{\"\"ingredient_id\"\":8,\"\"quantity\"\":1}]}]}')",
+      "Bash(curl -s -X POST \"http://localhost:8000/public/orders/\" -H \"Content-Type: application/json\" -H \"Idempotency-Key: test-idem-xyz-999\" -d '{\"\"store_id\"\":1,\"\"table_id\"\":1,\"\"items\"\":[{\"\"product_id\"\":1,\"\"quantity\"\":1,\"\"ingredients\"\":[{\"\"ingredient_id\"\":1,\"\"quantity\"\":1}]}]}')",
+      "Bash(curl -s -X PATCH \"http://localhost:8000/kitchen/orders/8/status\" -H \"Content-Type: application/json\" -H \"X-Actor-Id: staff-001\" -d '{\"\"status\"\":\"\"IN_PREP\"\"}')",
+      "Bash(curl -s -X PATCH \"http://localhost:8000/kitchen/orders/8/status\" -H \"Content-Type: application/json\" -d '{\"\"status\"\":\"\"NEW\"\"}')",
+      "Bash(curl -s -X PATCH \"http://localhost:8000/kitchen/orders/8/status\" -H \"Content-Type: application/json\" -d '{\"\"status\"\":\"\"DELIVERED\"\"}')",
+      "Bash(docker ps:*)",
+      "Bash(docker rm:*)"
+    ]
+  }
+}

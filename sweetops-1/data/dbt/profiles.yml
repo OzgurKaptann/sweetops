@@ -1,0 +1,12 @@
+dbt:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: postgres
+      user: sweetops
+      password: sweetops_password
+      port: 5432
+      dbname: sweetops_db
+      schema: analytics
+      threads: 4
