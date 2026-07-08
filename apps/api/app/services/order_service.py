@@ -32,6 +32,30 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Canonical quantity math
+# ---------------------------------------------------------------------------
+
+def calculate_consumed_quantity(
+    standard_quantity: Decimal,
+    selected_quantity: int,
+    item_quantity: int,
+) -> Decimal:
+    """
+    Physical ingredient consumption for a single order-item line.
+
+    consumed = standard_quantity (per portion)
+             × selected_quantity (portions per product)
+             × item_quantity     (number of products ordered)
+
+    This is the ONE canonical formula. It is reused for stock validation,
+    persisted consumption, stock deduction, movement logging and — via the
+    persisted value — cancellation restoration, so those figures can never
+    drift apart.
+    """
+    return standard_quantity * selected_quantity * item_quantity
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -96,7 +120,11 @@ def create_order(
     for item in order_data.items:
         for ing_req in item.ingredients:
             ing = ingredients_by_id[ing_req.ingredient_id]
-            consumed = (ing.standard_quantity or Decimal("1")) * ing_req.quantity
+            consumed = calculate_consumed_quantity(
+                ing.standard_quantity or Decimal("1"),
+                ing_req.quantity,
+                item.quantity,
+            )
             required[ing.id] = required.get(ing.id, Decimal("0")) + consumed
 
     # ── 4. Stock validation — SELECT … FOR UPDATE (row-level lock) ───────
@@ -165,7 +193,11 @@ def create_order(
 
         for ing_data in item_data.ingredients:
             ing = ingredients_by_id[ing_data.ingredient_id]
-            consumed_qty = (ing.standard_quantity or Decimal("1")) * ing_data.quantity
+            consumed_qty = calculate_consumed_quantity(
+                ing.standard_quantity or Decimal("1"),
+                ing_data.quantity,
+                item_data.quantity,
+            )
 
             db.add(OrderItemIngredient(
                 order_item_id=new_item.id,
@@ -175,7 +207,7 @@ def create_order(
                 consumed_quantity=consumed_qty,
                 consumed_unit=ing.unit,
             ))
-            item_total += ing.price * ing_data.quantity
+            item_total += ing.price * ing_data.quantity * item_data.quantity
 
         total_amount += item_total
 
