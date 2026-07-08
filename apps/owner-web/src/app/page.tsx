@@ -1,114 +1,190 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// KPI & performance
 import { KPICardGrid } from "@/components/KPICardGrid";
-import { TopIngredientsPanel } from "@/components/TopIngredientsPanel";
+import { OperationsPanel } from "@/components/OperationsPanel";
+import { MainAnalyticsChart } from "@/components/MainAnalyticsChart";
+
+// Decisions + focus
+import { FocusBanner } from "@/components/FocusBanner";
+import { DecisionPanel } from "@/components/DecisionPanel";
+import { StockWarningsPanel } from "@/components/StockWarningsPanel";
+import { OwnerDecision } from "@/lib/api";
+
+// Measurement + attention
+import { MetricsPanel } from "@/components/MetricsPanel";
+import { MetricAttentionBanner } from "@/components/MetricAttentionBanner";
+
+// Analytics
 import { HourlyDemandChart } from "@/components/HourlyDemandChart";
 import { IngredientForecastPanel } from "@/components/IngredientForecastPanel";
-import { StockWarningsPanel } from "@/components/StockWarningsPanel";
-import { CriticalAlertsPanel } from "@/components/CriticalAlertsPanel";
-import { PrepTimePanel } from "@/components/PrepTimePanel";
-import { TrendingIngredientsPanel } from "@/components/TrendingIngredientsPanel";
-import { PopularCombosPanel } from "@/components/PopularCombosPanel";
-import { ValueSummaryPanel } from "@/components/ValueSummaryPanel";
-import { DailySalesChart } from "@/components/DailySalesChart";
+import { TopIngredientsPanel } from "@/components/TopIngredientsPanel";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/kitchen";
 const POLL_INTERVAL_MS = 30_000;
 
+// ── Section header ────────────────────────────────────────────────────────────
+
+function SectionHeader({
+  title,
+  subtitle,
+  accent,
+}: {
+  title: string;
+  subtitle?: string;
+  accent?: "neutral" | "alert" | "analytics";
+}) {
+  const bar =
+    accent === "alert" ? "bg-red-500" : accent === "analytics" ? "bg-blue-500" : "bg-amber-500";
+  return (
+    <div className="flex items-baseline gap-3 mb-4">
+      <div className={`w-1 h-5 rounded-full ${bar} shrink-0`} />
+      <div>
+        <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">{title}</h2>
+        {subtitle && <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>}
+      </div>
+    </div>
+  );
+}
+
+function LiveDot({ connected }: { connected: boolean }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`w-2 h-2 rounded-full ${connected ? "bg-emerald-500 animate-pulse" : "bg-gray-300"}`} />
+      <span className="text-xs text-gray-500">{connected ? "Live" : "Offline"}</span>
+    </div>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
 export default function OwnerDashboard() {
   const [refreshTick, setRefreshTick] = useState(0);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [primaryDecision, setPrimaryDecision] = useState<OwnerDecision | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   const refresh = () => setRefreshTick((t) => t + 1);
 
-  useEffect(() => {
-    // 30-second auto-poll
-    const timer = setInterval(refresh, POLL_INTERVAL_MS);
+  // Reset banner dismiss when the primary decision changes
+  const handlePrimaryDecision = useCallback((d: OwnerDecision | null) => {
+    setPrimaryDecision((prev) => {
+      if (prev?.id !== d?.id) setBannerDismissed(false);
+      return d;
+    });
+  }, []);
 
-    // WebSocket — refresh immediately on new orders
+  useEffect(() => {
+    const timer = setInterval(refresh, POLL_INTERVAL_MS);
     const connect = () => {
       const ws = new WebSocket(WS_URL);
+      ws.onopen = () => setWsConnected(true);
       ws.onmessage = (e) => {
         try {
-          const payload = JSON.parse(e.data);
-          if (payload.event === "order_created" || payload.event === "order_status_updated") {
-            refresh();
-          }
+          const p = JSON.parse(e.data);
+          if (p.event === "order_created" || p.event === "order_status_updated") refresh();
         } catch {}
       };
-      ws.onclose = () => setTimeout(connect, 5000);
+      ws.onclose = () => { setWsConnected(false); setTimeout(connect, 5000); };
       wsRef.current = ws;
     };
     connect();
-
-    return () => {
-      clearInterval(timer);
-      wsRef.current?.close();
-    };
+    return () => { clearInterval(timer); wsRef.current?.close(); };
   }, []);
 
+  const now = new Date().toLocaleDateString("tr-TR", { day: "numeric", month: "long", year: "numeric" });
+
   return (
-    <main className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16 items-center">
-            <h1 className="text-xl font-bold text-gray-900">🧇 SweetOps <span className="text-amber-600">Panel</span></h1>
+    <div className="min-h-screen bg-[#f8f9fa]">
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <header className="bg-white border-b border-gray-200 sticky top-0 z-20">
+        <div className="max-w-screen-xl mx-auto px-6">
+          <div className="flex items-center justify-between h-14">
             <div className="flex items-center gap-3">
-              <button
-                onClick={refresh}
-                className="text-xs px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors font-medium"
-              >
-                ↻ Yenile
+              <span className="text-base font-bold text-gray-900 tracking-tight">SweetOps</span>
+              <span className="text-gray-300 text-sm">|</span>
+              <span className="text-sm text-gray-500 font-medium">Owner Dashboard</span>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className="text-xs text-gray-400 hidden sm:block">{now}</span>
+              <a href="/kitchen" className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors font-medium">
+                Kitchen →
+              </a>
+              <LiveDot connected={wsConnected} />
+              <button onClick={refresh} className="text-xs px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors font-medium">
+                ↻ Refresh
               </button>
-              <div className="text-sm text-gray-500">İşletme Paneli • Canlı</div>
             </div>
           </div>
         </div>
+
+        {/* Focus banner — highest-priority realtime decision */}
+        {!bannerDismissed && (
+          <FocusBanner
+            decision={primaryDecision}
+            onDismiss={() => setBannerDismissed(true)}
+          />
+        )}
+        {/* Metric attention banner — metric-driven mode (below focus banner) */}
+        <MetricAttentionBanner refreshTick={refreshTick} />
       </header>
 
-      {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {/* ── Main content ───────────────────────────────────────────────────── */}
+      <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-10">
 
-        <ValueSummaryPanel key={`value-${refreshTick}`} />
+        {/* ━━━ ZONE 1 · TODAY'S PERFORMANCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+        <section>
+          <SectionHeader title="Today's Performance" subtitle="Key metrics vs previous period" accent="neutral" />
+          <KPICardGrid key={`kpi-${refreshTick}`} refreshTick={refreshTick} />
+          <div className="mt-4">
+            <OperationsPanel key={`ops-${refreshTick}`} refreshTick={refreshTick} />
+          </div>
+          <div className="mt-4">
+            <MainAnalyticsChart key={`chart-${refreshTick}`} refreshTick={refreshTick} />
+          </div>
+        </section>
 
-        <div className="mt-8 mb-6 flex items-center justify-between">
-          <h2 className="text-2xl font-bold text-gray-900">İşletme Özeti</h2>
-        </div>
-
-        <KPICardGrid key={`kpi-${refreshTick}`} />
-
-        <div className="mt-6">
-          <CriticalAlertsPanel key={`alerts-${refreshTick}`} />
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-          <PrepTimePanel key={`prep-${refreshTick}`} />
-          <StockWarningsPanel key={`stock-${refreshTick}`} />
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-          <TrendingIngredientsPanel key={`trending-${refreshTick}`} />
-          <PopularCombosPanel key={`combos-${refreshTick}`} />
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
-          <div className="lg:col-span-2">
-            <DailySalesChart key={`daily-${refreshTick}`} refreshTick={refreshTick} />
-            <div className="mt-6">
-              <HourlyDemandChart key={`hourly-${refreshTick}`} />
+        {/* ━━━ ZONE 2 · ALERTS & DECISIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+        <section>
+          <SectionHeader title="Alerts & Decisions" subtitle="Sorted by urgency · act on the primary focus first" accent="alert" />
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="lg:col-span-2">
+              <DecisionPanel
+                key={`decisions-${refreshTick}`}
+                refreshTick={refreshTick}
+                onPrimaryDecision={handlePrimaryDecision}
+              />
             </div>
-            <div className="mt-6">
-              <IngredientForecastPanel key={`forecast-${refreshTick}`} />
+            {/* Stock sidebar — shown only when there are non-ok items */}
+            <div>
+              <StockWarningsPanel key={`stock-${refreshTick}`} />
             </div>
           </div>
-          <div>
-            <TopIngredientsPanel key={`top-${refreshTick}`} />
-          </div>
-        </div>
+        </section>
 
-      </div>
-    </main>
+        {/* ━━━ ZONE 3 · MEASUREMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+        <section id="metrics-section">
+          <SectionHeader title="Measurement" subtitle="Is the system actually working? · day-over-day trends" accent="neutral" />
+          <MetricsPanel key={`metrics-${refreshTick}`} refreshTick={refreshTick} />
+        </section>
+
+        {/* ━━━ ZONE 4 · ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+        <section>
+          <SectionHeader title="Analytics" subtitle="Demand patterns · forecast · ingredient breakdown" accent="analytics" />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <HourlyDemandChart key={`hourly-${refreshTick}`} refreshTick={refreshTick} />
+            <IngredientForecastPanel key={`forecast-${refreshTick}`} refreshTick={refreshTick} />
+          </div>
+          <div className="mt-4">
+            <TopIngredientsPanel key={`top-${refreshTick}`} refreshTick={refreshTick} />
+          </div>
+        </section>
+
+      </main>
+    </div>
   );
 }

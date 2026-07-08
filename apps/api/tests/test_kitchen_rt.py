@@ -142,7 +142,7 @@ class TestKitchenOrdersSorting:
 
         r = client.get("/kitchen/orders/?store_id=1")
         assert r.status_code == 200
-        ids = [o["id"] for o in r.json()]
+        ids = [o["id"] for o in r.json()["orders"]]
 
         assert ids.index(old_id) < ids.index(fresh_id), (
             f"Critical-zone order {old_id} must appear before fresh order {fresh_id}. "
@@ -178,7 +178,7 @@ class TestKitchenOrdersSorting:
 
         r = client.get("/kitchen/orders/?store_id=1")
         assert r.status_code == 200
-        orders = r.json()
+        orders = r.json()["orders"]
 
         # Extract only our three orders (others may exist in the test DB)
         our_ids = {ok_id, warn_id, crit_id}
@@ -207,7 +207,7 @@ class TestKitchenOrdersSorting:
         client.post("/public/orders/", json=p, headers=h)
 
         r = client.get("/kitchen/orders/?store_id=1")
-        for order in r.json():
+        for order in r.json()["orders"]:
             assert order["priority_score"] >= 0, f"Negative score: {order}"
 
         cleanup_ingredient(db, ing.id)
@@ -221,7 +221,7 @@ class TestSlaSeverityInResponse:
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()
+        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
         assert our["sla_severity"] == "ok"
 
@@ -235,7 +235,7 @@ class TestSlaSeverityInResponse:
 
         _backdate_order(db, oid, minutes_ago=SLA_WARNING_MINUTES + 0.5)
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()
+        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
         assert our["sla_severity"] == "warning", f"Expected warning, got: {our['sla_severity']}"
 
@@ -249,7 +249,7 @@ class TestSlaSeverityInResponse:
 
         _backdate_order(db, oid, minutes_ago=SLA_CRITICAL_MINUTES + 1.0)
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()
+        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
         assert our["sla_severity"] == "critical", f"Expected critical, got: {our['sla_severity']}"
 
@@ -268,7 +268,7 @@ class TestTimestampConsistency:
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()
+        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
 
         ts = our["created_at"]
@@ -298,7 +298,7 @@ class TestTimestampConsistency:
         oid = r.json()["order_id"]
 
         # Fetch from kitchen endpoint
-        orders = client.get("/kitchen/orders/?store_id=1").json()
+        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
 
         # Fetch raw from DB
@@ -416,3 +416,343 @@ async def test_disconnect_is_idempotent():
     manager.disconnect(ws)  # second call must be silent
 
     assert manager.connection_count == 0
+
+
+# ---------------------------------------------------------------------------
+# 9. Unit: decision signals
+# ---------------------------------------------------------------------------
+
+class TestDecisionSignals:
+
+    def test_new_fresh_order_should_not_start(self):
+        from app.services.kitchen_service import _decision_signals, START_IMMEDIATELY_MINUTES
+        should_start, reason = _decision_signals(0.5, "NEW", "ok")
+        assert should_start is False
+        assert "Just placed" in reason
+
+    def test_new_order_at_start_threshold_should_start(self):
+        from app.services.kitchen_service import _decision_signals, START_IMMEDIATELY_MINUTES
+        should_start, reason = _decision_signals(float(START_IMMEDIATELY_MINUTES), "NEW", "ok")
+        assert should_start is True
+        assert "start now" in reason.lower()
+
+    def test_new_warning_order_should_start(self):
+        from app.services.kitchen_service import _decision_signals
+        should_start, reason = _decision_signals(8.0, "NEW", "warning")
+        assert should_start is True
+        assert "SLA" in reason or "Approaching" in reason
+
+    def test_new_critical_order_should_start(self):
+        from app.services.kitchen_service import _decision_signals
+        should_start, reason = _decision_signals(11.0, "NEW", "critical")
+        assert should_start is True
+        assert "SLA breached" in reason
+
+    def test_in_prep_ok_should_not_start(self):
+        from app.services.kitchen_service import _decision_signals
+        should_start, reason = _decision_signals(3.0, "IN_PREP", "ok")
+        assert should_start is False
+        assert "In preparation" in reason
+
+    def test_in_prep_critical_should_start(self):
+        from app.services.kitchen_service import _decision_signals
+        should_start, reason = _decision_signals(11.0, "IN_PREP", "critical")
+        assert should_start is True
+        assert "expedite" in reason.lower()
+
+    def test_in_prep_warning_should_start(self):
+        from app.services.kitchen_service import _decision_signals
+        should_start, reason = _decision_signals(8.0, "IN_PREP", "warning")
+        assert should_start is True
+        assert "Running long" in reason
+
+    def test_urgency_reason_contains_age_minutes(self):
+        """All urgency reasons must include the actual age value."""
+        from app.services.kitchen_service import _decision_signals
+        _, reason = _decision_signals(6.5, "NEW", "ok")
+        assert "6.5" in reason
+
+
+# ---------------------------------------------------------------------------
+# 10. Unit: action hints
+# ---------------------------------------------------------------------------
+
+class TestActionHints:
+
+    def test_critical_new_hint(self):
+        from app.services.kitchen_service import _action_hint
+        assert _action_hint(1, "NEW", "critical", 11.0, []) == "Start immediately — SLA breached"
+
+    def test_warning_new_hint(self):
+        from app.services.kitchen_service import _action_hint
+        assert _action_hint(1, "NEW", "warning", 8.0, []) == "Start soon — approaching SLA"
+
+    def test_batch_hint_references_partner_id(self):
+        from app.services.kitchen_service import _action_hint
+        hint = _action_hint(1, "NEW", "ok", 2.0, [5, 9])
+        assert "Combine with order #5" in hint
+
+    def test_start_now_hint_when_above_threshold_no_batch(self):
+        from app.services.kitchen_service import _action_hint, START_IMMEDIATELY_MINUTES
+        hint = _action_hint(1, "NEW", "ok", float(START_IMMEDIATELY_MINUTES), [])
+        assert hint == "Start now"
+
+    def test_can_wait_fresh_order(self):
+        from app.services.kitchen_service import _action_hint
+        assert _action_hint(1, "NEW", "ok", 0.5, []) == "Can wait"
+
+    def test_sla_takes_precedence_over_batch(self):
+        """Critical SLA hint must appear even when batch partners exist."""
+        from app.services.kitchen_service import _action_hint
+        hint = _action_hint(1, "NEW", "critical", 11.0, [2, 3])
+        assert hint == "Start immediately — SLA breached"
+
+    def test_in_prep_critical(self):
+        from app.services.kitchen_service import _action_hint
+        assert _action_hint(1, "IN_PREP", "critical", 11.0, []) == "Expedite — SLA breached"
+
+    def test_in_prep_ok(self):
+        from app.services.kitchen_service import _action_hint
+        assert _action_hint(1, "IN_PREP", "ok", 3.0, []) == "In progress"
+
+
+# ---------------------------------------------------------------------------
+# 11. Unit: batching suggestions
+# ---------------------------------------------------------------------------
+
+class TestBatchingSuggestions:
+
+    def _make_order(self, oid: int, status: str, *ingredient_names: str) -> dict:
+        """Build a minimal order dict for _batching_suggestions tests."""
+        items = [{
+            "ingredients": [{"ingredient_name": name, "quantity": 1} for name in ingredient_names]
+        }]
+        return {"id": oid, "status": status, "items": items}
+
+    def test_two_orders_sharing_ingredient_produces_suggestion(self):
+        from app.services.kitchen_service import _batching_suggestions
+        orders = [
+            self._make_order(1, "NEW", "Strawberry"),
+            self._make_order(2, "NEW", "Strawberry"),
+        ]
+        suggestions = _batching_suggestions(orders)
+        assert len(suggestions) == 1
+        assert sorted(suggestions[0]["grouped_order_ids"]) == [1, 2]
+        assert "Strawberry" in suggestions[0]["shared_ingredients"]
+
+    def test_in_prep_orders_excluded_from_batching(self):
+        from app.services.kitchen_service import _batching_suggestions
+        orders = [
+            self._make_order(1, "NEW", "Strawberry"),
+            self._make_order(2, "IN_PREP", "Strawberry"),  # already started
+        ]
+        suggestions = _batching_suggestions(orders)
+        assert suggestions == [], "IN_PREP orders must not be batched"
+
+    def test_no_shared_ingredient_produces_no_suggestion(self):
+        from app.services.kitchen_service import _batching_suggestions
+        orders = [
+            self._make_order(1, "NEW", "Strawberry"),
+            self._make_order(2, "NEW", "Banana"),
+        ]
+        assert _batching_suggestions(orders) == []
+
+    def test_three_orders_same_ingredient_one_group(self):
+        from app.services.kitchen_service import _batching_suggestions
+        orders = [
+            self._make_order(1, "NEW", "Chocolate"),
+            self._make_order(2, "NEW", "Chocolate"),
+            self._make_order(3, "NEW", "Chocolate"),
+        ]
+        suggestions = _batching_suggestions(orders)
+        assert len(suggestions) == 1
+        assert sorted(suggestions[0]["grouped_order_ids"]) == [1, 2, 3]
+
+    def test_time_saved_scales_with_extra_orders_and_ingredients(self):
+        from app.services.kitchen_service import _batching_suggestions, BATCH_TIME_SAVE_SECONDS
+        # 3 orders all share Strawberry → 2 extra orders × 1 ingredient × 30s = 60s
+        orders = [
+            self._make_order(1, "NEW", "Strawberry"),
+            self._make_order(2, "NEW", "Strawberry"),
+            self._make_order(3, "NEW", "Strawberry"),
+        ]
+        s = _batching_suggestions(orders)[0]
+        expected_s = (3 - 1) * 1 * BATCH_TIME_SAVE_SECONDS
+        assert s["estimated_time_saved"] == f"{expected_s}s"
+
+    def test_transitive_grouping_via_union_find(self):
+        """
+        A shares 'Strawberry' with B. B shares 'Chocolate' with C.
+        A and C share nothing directly, but union-find groups all three.
+        """
+        from app.services.kitchen_service import _batching_suggestions
+        orders = [
+            self._make_order(1, "NEW", "Strawberry"),
+            self._make_order(2, "NEW", "Strawberry", "Chocolate"),
+            self._make_order(3, "NEW", "Chocolate"),
+        ]
+        suggestions = _batching_suggestions(orders)
+        assert len(suggestions) == 1
+        assert sorted(suggestions[0]["grouped_order_ids"]) == [1, 2, 3]
+        # Each shared ingredient is reported
+        shared = suggestions[0]["shared_ingredients"]
+        assert "Strawberry" in shared
+        assert "Chocolate" in shared
+
+    def test_single_order_produces_no_suggestion(self):
+        from app.services.kitchen_service import _batching_suggestions
+        orders = [self._make_order(1, "NEW", "Strawberry")]
+        assert _batching_suggestions(orders) == []
+
+    def test_empty_list_produces_no_suggestion(self):
+        from app.services.kitchen_service import _batching_suggestions
+        assert _batching_suggestions([]) == []
+
+
+# ---------------------------------------------------------------------------
+# 12. Unit: kitchen load
+# ---------------------------------------------------------------------------
+
+class TestKitchenLoad:
+
+    def _make_order(self, status: str, age_minutes: float) -> dict:
+        return {"status": status, "computed_age_minutes": age_minutes}
+
+    def test_empty_kitchen_is_low(self):
+        from app.services.kitchen_service import _kitchen_load
+        load = _kitchen_load([])
+        assert load["load_level"] == "low"
+        assert load["active_orders_count"] == 0
+        assert "idle" in load["explanation"].lower()
+
+    def test_low_load(self):
+        from app.services.kitchen_service import _kitchen_load, LOAD_MEDIUM_THRESHOLD
+        orders = [self._make_order("NEW", 2.0)] * (LOAD_MEDIUM_THRESHOLD - 1)
+        load = _kitchen_load(orders)
+        assert load["load_level"] == "low"
+
+    def test_medium_load_at_threshold(self):
+        from app.services.kitchen_service import _kitchen_load, LOAD_MEDIUM_THRESHOLD
+        orders = [self._make_order("NEW", 2.0)] * LOAD_MEDIUM_THRESHOLD
+        load = _kitchen_load(orders)
+        assert load["load_level"] == "medium"
+
+    def test_high_load_at_threshold(self):
+        from app.services.kitchen_service import _kitchen_load, LOAD_HIGH_THRESHOLD
+        orders = [self._make_order("NEW", 2.0)] * LOAD_HIGH_THRESHOLD
+        load = _kitchen_load(orders)
+        assert load["load_level"] == "high"
+
+    def test_in_prep_count_is_accurate(self):
+        from app.services.kitchen_service import _kitchen_load
+        orders = [
+            self._make_order("NEW", 1.0),
+            self._make_order("IN_PREP", 3.0),
+            self._make_order("IN_PREP", 5.0),
+        ]
+        load = _kitchen_load(orders)
+        assert load["in_prep_count"] == 2
+        assert load["active_orders_count"] == 3
+
+    def test_average_age_computed_correctly(self):
+        from app.services.kitchen_service import _kitchen_load
+        orders = [
+            self._make_order("NEW", 2.0),
+            self._make_order("IN_PREP", 4.0),
+        ]
+        load = _kitchen_load(orders)
+        assert load["average_age_minutes"] == 3.0
+
+    def test_explanation_mentions_counts(self):
+        from app.services.kitchen_service import _kitchen_load
+        orders = [
+            self._make_order("NEW", 1.0),
+            self._make_order("NEW", 2.0),
+            self._make_order("IN_PREP", 4.0),
+        ]
+        load = _kitchen_load(orders)
+        assert str(load["active_orders_count"]) in load["explanation"]
+
+
+# ---------------------------------------------------------------------------
+# 13. Integration: dashboard API response structure
+# ---------------------------------------------------------------------------
+
+class TestKitchenDashboardAPI:
+
+    def test_dashboard_has_all_top_level_keys(self, db, client):
+        r = client.get("/kitchen/orders/?store_id=1")
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body.keys()) >= {"orders", "kitchen_load", "batching_suggestions"}
+
+    def test_kitchen_load_has_all_fields(self, db, client):
+        r = client.get("/kitchen/orders/?store_id=1")
+        load = r.json()["kitchen_load"]
+        for field in ("load_level", "active_orders_count", "in_prep_count",
+                      "average_age_minutes", "explanation"):
+            assert field in load, f"Missing load field: {field}"
+        assert load["load_level"] in ("low", "medium", "high")
+
+    def test_order_has_all_decision_fields(self, db, client):
+        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
+        client.post("/public/orders/", json=p, headers=h)
+
+        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        assert len(orders) >= 1
+        order = orders[0]
+        for field in ("should_be_started", "urgency_reason", "action_hint"):
+            assert field in order, f"Missing decision field: {field}"
+        assert isinstance(order["should_be_started"], bool)
+        assert isinstance(order["urgency_reason"], str)
+        assert isinstance(order["action_hint"], str)
+        assert len(order["action_hint"]) > 0
+
+        cleanup_ingredient(db, ing.id)
+
+    def test_batching_suggestion_has_correct_fields(self, db, client):
+        """
+        Two orders sharing the same ingredient must produce a batching suggestion
+        with the correct structure.
+        """
+        ing, _ = make_ingredient(db, stock_quantity=Decimal("200.00"))
+
+        p1, h1 = order_payload(ing.id, idem_key=uuid.uuid4().hex)
+        p2, h2 = order_payload(ing.id, idem_key=uuid.uuid4().hex)
+        r1 = client.post("/public/orders/", json=p1, headers=h1)
+        r2 = client.post("/public/orders/", json=p2, headers=h2)
+        oid1 = r1.json()["order_id"]
+        oid2 = r2.json()["order_id"]
+
+        body = client.get("/kitchen/orders/?store_id=1").json()
+        suggestions = body["batching_suggestions"]
+
+        # At least one suggestion grouping our two orders
+        our_suggestion = next(
+            (s for s in suggestions
+             if oid1 in s["grouped_order_ids"] and oid2 in s["grouped_order_ids"]),
+            None,
+        )
+        assert our_suggestion is not None, (
+            f"Expected batching suggestion for orders {oid1},{oid2}. Got: {suggestions}"
+        )
+        assert isinstance(our_suggestion["shared_ingredients"], list)
+        assert len(our_suggestion["shared_ingredients"]) >= 1
+        assert our_suggestion["estimated_time_saved"].endswith("s")
+
+        cleanup_ingredient(db, ing.id)
+
+    def test_action_hint_is_can_wait_for_fresh_order(self, db, client):
+        """A brand-new order with no batch partner should get 'Can wait'."""
+        # Create a unique ingredient so no other order shares it → no batch suggestion
+        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"), name=f"Unique_{uuid.uuid4().hex[:6]}")
+        p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
+        r = client.post("/public/orders/", json=p, headers=h)
+        oid = r.json()["order_id"]
+
+        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        our = next(o for o in orders if o["id"] == oid)
+        assert our["action_hint"] == "Can wait", f"Fresh unique order should be 'Can wait', got: {our['action_hint']!r}"
+
+        cleanup_ingredient(db, ing.id)

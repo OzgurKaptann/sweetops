@@ -11,6 +11,7 @@ from .order_item import OrderItem
 from .order_item_ingredient import OrderItemIngredient
 from .order_status_event import OrderStatusEvent
 from .audit_log import AuditLog
+from .owner_decision import OwnerDecision
 
 # Critical: Alembic discovers all models via this import
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "OrderItemIngredient",
     "OrderStatusEvent",
     "AuditLog",
+    "OwnerDecision",
 ]

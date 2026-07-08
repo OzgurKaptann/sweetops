@@ -14,4 +14,5 @@ class Ingredient(Base):
     shelf_life_days = Column(Integer, nullable=True)
     allows_portion_choice = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
+    is_promoted = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

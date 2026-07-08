@@ -66,6 +66,7 @@ def make_ingredient(
     standard_quantity: Decimal = Decimal("10.00"),
     price: Decimal = Decimal("5.00"),
     unit: str = "g",
+    name: str | None = None,
 ) -> tuple[Ingredient, IngredientStock]:
     """
     Create a test ingredient + stock row.  Returns both ORM objects.
@@ -73,7 +74,7 @@ def make_ingredient(
     """
     uid = uuid.uuid4().hex[:8]
     ing = Ingredient(
-        name=f"TestIng_{uid}",
+        name=name if name is not None else f"TestIng_{uid}",
         category="Test",
         price=price,
         unit=unit,

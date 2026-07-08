@@ -106,10 +106,17 @@ def test_order_creation_invalid_status_value():
 # Kitchen
 # ---------------------------------------------------------------------------
 
-def test_kitchen_orders_returns_list():
+def test_kitchen_orders_returns_dashboard():
     r = client.get("/kitchen/orders/?store_id=1")
     assert r.status_code == 200
-    assert isinstance(r.json(), list)
+    body = r.json()
+    assert "orders" in body
+    assert "kitchen_load" in body
+    assert "batching_suggestions" in body
+    assert isinstance(body["orders"], list)
+    assert isinstance(body["batching_suggestions"], list)
+    load = body["kitchen_load"]
+    assert load["load_level"] in ("low", "medium", "high")
 
 
 def test_kitchen_orders_shape(db):
@@ -119,11 +126,13 @@ def test_kitchen_orders_shape(db):
 
     r = client.get("/kitchen/orders/?store_id=1")
     assert r.status_code == 200
-    orders = r.json()
+    orders = r.json()["orders"]
     assert len(orders) >= 1
 
     order = orders[0]
-    for field in ("id", "store_id", "status", "created_at", "items"):
+    for field in ("id", "store_id", "status", "created_at", "items",
+                  "should_be_started", "urgency_reason", "action_hint",
+                  "sla_severity", "priority_score", "computed_age_minutes"):
         assert field in order, f"Missing field: {field}"
 
     cleanup_ingredient(db, ing.id)

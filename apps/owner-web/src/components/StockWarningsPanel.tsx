@@ -38,6 +38,8 @@ export function StockWarningsPanel() {
   if (!data) return null;
 
   const alertItems = data.items.filter(i => i.severity !== "ok");
+  // No alerts = nothing actionable to show; return null rather than passive "all ok" text
+  if (alertItems.length === 0) return null;
   const visibleItems = showAll ? data.items : (alertItems.length > 0 ? alertItems : data.items.slice(0, 5));
 
   return (

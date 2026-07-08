@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal
 
@@ -63,3 +63,51 @@ class ForecastItem(BaseModel):
 class IngredientForecastResponse(AnalyticsBase):
     forecast_horizon_days: int = 7
     items: List[ForecastItem]
+
+
+# 6. GET /owner/decisions/ + PATCH /owner/decisions/{id}
+class DecisionSummary(BaseModel):
+    high: int
+    medium: int
+    low: int
+
+class OwnerDecision(BaseModel):
+    id: str
+    type: str                        # stock_risk | demand_spike | slow_moving | sla_risk | revenue_anomaly
+    severity: str                    # high | medium | low
+    # Prioritization (additive — new fields)
+    decision_score: float
+    blocking_vs_non_blocking: bool
+    # Human-readable payload
+    title: str
+    description: str
+    impact: str
+    recommended_action: str
+    why_now: str
+    expected_impact: str
+    data: Dict[str, Any] = {}
+    # Lifecycle (additive — new fields)
+    status: str = "pending"          # pending | acknowledged | completed | dismissed
+    acknowledged_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    actor_id: Optional[str] = None
+    resolution_note: Optional[str] = None
+    # Outcome tracking
+    resolution_quality: Optional[str] = None       # good | partial | failed
+    estimated_revenue_saved: Optional[float] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+class OwnerDecisionsResponse(BaseModel):
+    decisions: List[OwnerDecision]
+    generated_at: str
+    signals_evaluated: int
+    active_count: int
+    summary: DecisionSummary
+
+class DecisionActionRequest(BaseModel):
+    action: str                                          # acknowledge | complete | dismiss
+    actor_id: Optional[str] = None
+    resolution_note: Optional[str] = None
+    resolution_quality: Optional[str] = None             # good | partial | failed
+    estimated_revenue_saved: Optional[float] = None      # ₺ saved by acting

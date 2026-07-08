@@ -1,5 +1,111 @@
 // Types are defined locally in this file
 
+// ── Decision Engine ──────────────────────────────────────────────────────────
+
+export type DecisionType =
+  | "stock_risk"
+  | "demand_spike"
+  | "slow_moving"
+  | "sla_risk"
+  | "revenue_anomaly";
+
+export type DecisionSeverity = "high" | "medium" | "low";
+export type DecisionStatus = "pending" | "acknowledged" | "completed" | "dismissed";
+export type DecisionAction = "acknowledge" | "complete" | "dismiss";
+
+export interface StockRiskData {
+  ingredient_id: number;
+  ingredient_name: string;
+  unit: string;
+  current_stock: number;
+  reorder_level: number;
+  velocity_per_hour: number;
+  hours_to_stockout: number | null;
+  revenue_at_risk: number;
+}
+
+export interface DemandSpikeData {
+  last_1h_orders: number;
+  avg_hourly_baseline: number;
+  spike_ratio: number;
+}
+
+export interface SlowMovingData {
+  ingredient_id: number;
+  ingredient_name: string;
+  current_stock: number;
+  reorder_level: number;
+  tied_capital: number;
+  hours_since_last_use: number;
+}
+
+export interface SLARiskData {
+  critical_order_ids: number[];
+  warning_order_ids: number[];
+  critical_count: number;
+  warning_count: number;
+  worst_age_minutes: number;
+}
+
+export interface RevenueAnomalyData {
+  last_1h_revenue: number;
+  avg_hourly_baseline: number;
+  ratio: number;
+  direction: "drop" | "spike";
+}
+
+export type DecisionData =
+  | StockRiskData
+  | DemandSpikeData
+  | SlowMovingData
+  | SLARiskData
+  | RevenueAnomalyData;
+
+export interface OwnerDecision {
+  // Backend serializes this field as `id` (schemas/owner_analytics.OwnerDecision).
+  id: string;
+  type: DecisionType;
+  severity: DecisionSeverity;
+  decision_score: number;
+  blocking_vs_non_blocking: boolean;
+  title: string;
+  description: string;
+  impact: string;
+  recommended_action: string;
+  why_now: string;
+  expected_impact: string;
+  data: DecisionData;
+  status: DecisionStatus;
+  acknowledged_at: string | null;
+  completed_at: string | null;
+  actor_id: string | null;
+  resolution_note: string | null;
+  resolution_quality: ResolutionQuality | null;
+  estimated_revenue_saved: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OwnerDecisionsResponse {
+  decisions: OwnerDecision[];
+  generated_at: string;
+  signals_evaluated: number;
+  active_count: number;
+  summary: { high: number; medium: number; low: number };
+}
+
+export type ResolutionQuality = "good" | "partial" | "failed";
+
+export interface DecisionActionRequest {
+  action: DecisionAction;
+  actor_id?: string;
+  resolution_note?: string;
+  resolution_quality?: ResolutionQuality;
+  estimated_revenue_saved?: number;
+}
+
+// ── Shared types ──────────────────────────────────────────────────────────────
+
 // Extend our shared types to match the new endpoints safely for MVP
 export interface DashboardKPIs {
   as_of: string;
@@ -147,5 +253,257 @@ export async function fetchDailySales(): Promise<DailySalesData> {
   return res.json();
 }
 
+// ── Metrics (Measurement Layer) ───────────────────────────────────────────────
 
+export type DataQualityStatus = "valid" | "low_sample" | "no_data" | "unreliable";
 
+export interface DataQuality {
+  status: DataQualityStatus;
+  sample_size: number;
+  min_required: number;
+  message: string | null;
+}
+
+export interface TrendValue {
+  value: number;
+  prev_value: number | null;
+  trend: "up" | "down" | "flat";
+  /** Signed %, bounded to [-300, +300]. Null when comparison unavailable. */
+  pct_change: number | null;
+  quality: DataQuality;
+}
+
+export interface MetricsObservability {
+  computed_at: string;
+  computation_ms: number;
+  target_date: string;
+  comparison_date: string;
+  errors: string[];
+}
+
+export interface DailyMetricsData {
+  date: string;
+  as_of: string;
+  conversion: {
+    combo_usage_rate: TrendValue;
+    avg_order_value_with_combo: TrendValue;
+    avg_order_value_without_combo: TrendValue;
+    upsell_acceptance_rate: TrendValue;
+  };
+  decisions: {
+    decisions_seen: number;
+    decisions_acknowledged: number;
+    decisions_completed: number;
+    completion_rate: TrendValue;
+  };
+  kitchen: {
+    avg_prep_time_minutes: TrendValue;
+    p90_prep_time_minutes: TrendValue;
+    sla_breach_rate: TrendValue;
+  };
+  revenue_protection: {
+    stock_risk_triggered: number;
+    stock_risk_resolved: number;
+    estimated_revenue_saved: number;
+    actual_outcome: { good: number; partial: number; failed: number };
+  };
+  meta: MetricsObservability;
+}
+
+export interface MetricDefinition {
+  name: string;
+  group: string;
+  definition: string;
+  calculation: string;
+  edge_cases: string[];
+  interpretation_high: string;
+  interpretation_low: string;
+  decision_implication: string;
+  min_sample: number;
+  unit: "rate" | "currency" | "minutes" | "count";
+  lower_is_better: boolean;
+}
+
+export interface MetricDictionaryData {
+  version: string;
+  metrics: MetricDefinition[];
+}
+
+export async function fetchMetrics(targetDate?: string): Promise<DailyMetricsData> {
+  const url = targetDate
+    ? `${API_BASE}/owner/metrics/?date=${targetDate}`
+    : `${API_BASE}/owner/metrics/`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw Object.assign(new Error("Metrics API Error"), {
+      status: res.status,
+      detail,
+    });
+  }
+  return res.json();
+}
+
+export async function fetchMetricDictionary(): Promise<MetricDictionaryData> {
+  const res = await fetch(`${API_BASE}/owner/metrics/dictionary`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Metric dictionary unavailable");
+  return res.json();
+}
+
+// ── Operational Context ───────────────────────────────────────────────────────
+
+export type OperationalMode =
+  | "normal"
+  | "boost_combos"
+  | "high_kitchen_load"
+  | "sla_critical";
+
+export interface OperationalContextData {
+  mode: OperationalMode;
+  reasons: string[];
+  combo_boost: number;
+  max_upsell_suggestions: number;
+  computed_at: string;
+  metrics_date: string;
+  metric_values: {
+    combo_usage_rate: number | null;
+    upsell_acceptance_rate: number | null;
+    sla_breach_rate: number | null;
+    avg_prep_time_minutes: number | null;
+    completion_rate: number | null;
+    decisions_seen: number;
+    decisions_completed: number;
+  };
+  thresholds: {
+    combo_rate_boost: number;
+    upsell_rate_boost: number;
+    sla_breach_high_load: number;
+    sla_breach_critical: number;
+    avg_prep_high_load_min: number;
+  };
+}
+
+export async function fetchOperationalContext(): Promise<OperationalContextData> {
+  const res = await fetch(`${API_BASE}/owner/operational-context`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Operational context unavailable");
+  return res.json();
+}
+
+// ── Kitchen ───────────────────────────────────────────────────────────────────
+
+export type SLASeverity = "ok" | "warning" | "critical";
+export type OrderStatus = "NEW" | "IN_PREP" | "READY" | "DELIVERED" | "CANCELLED";
+
+export interface KitchenOrderItem {
+  id: number;
+  product_id: number;
+  product_name: string | null;
+  quantity: number;
+  ingredients: Array<{
+    id: number;
+    ingredient_id: number;
+    ingredient_name: string | null;
+    quantity: number;
+  }>;
+}
+
+export interface KitchenOrder {
+  id: number;
+  store_id: number;
+  table_id: number | null;
+  status: OrderStatus;
+  created_at: string;
+  computed_age_minutes: number;
+  priority_score: number;
+  sla_severity: SLASeverity;
+  should_be_started: boolean;
+  urgency_reason: string;
+  action_hint: string;
+  items: KitchenOrderItem[];
+}
+
+export interface KitchenLoad {
+  load_level: "low" | "medium" | "high";
+  active_orders_count: number;
+  in_prep_count: number;
+  average_age_minutes: number;
+  explanation: string;
+}
+
+export interface BatchingSuggestion {
+  grouped_order_ids: number[];
+  shared_ingredients: string[];
+  estimated_time_saved: string;
+}
+
+export interface KitchenDashboardResponse {
+  orders: KitchenOrder[];
+  kitchen_load: KitchenLoad;
+  batching_suggestions: BatchingSuggestion[];
+}
+
+export interface StatusUpdateResponse {
+  order_id: number;
+  new_status: string;
+  updated_at: string;
+}
+
+export async function fetchKitchenOrders(
+  storeId = 1,
+): Promise<KitchenDashboardResponse> {
+  const res = await fetch(`${API_BASE}/kitchen/orders/?store_id=${storeId}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Kitchen API Error");
+  return res.json();
+}
+
+export async function patchOrderStatus(
+  orderId: number,
+  status: OrderStatus,
+  actorId?: string,
+): Promise<StatusUpdateResponse> {
+  const res = await fetch(`${API_BASE}/kitchen/orders/${orderId}/status`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(actorId ? { "X-Actor-Id": actorId } : {}),
+    },
+    body: JSON.stringify({ status }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Status update failed");
+  return res.json();
+}
+
+export async function fetchDecisions(): Promise<OwnerDecisionsResponse> {
+  const res = await fetch(`${API_BASE}/owner/decisions/`, { cache: 'no-store' });
+  if (!res.ok) throw new Error('API Error');
+  return res.json();
+}
+
+export async function patchDecision(
+  decisionId: string,
+  action: DecisionAction,
+  actorId?: string,
+  resolutionNote?: string,
+  resolutionQuality?: ResolutionQuality,
+  estimatedRevenueSaved?: number,
+): Promise<OwnerDecision> {
+  const body: DecisionActionRequest = { action };
+  if (actorId) body.actor_id = actorId;
+  if (resolutionNote) body.resolution_note = resolutionNote;
+  if (resolutionQuality) body.resolution_quality = resolutionQuality;
+  if (estimatedRevenueSaved !== undefined) body.estimated_revenue_saved = estimatedRevenueSaved;
+  const res = await fetch(`${API_BASE}/owner/decisions/${decisionId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw Object.assign(new Error('Decision patch failed'), { status: res.status, detail: err });
+  }
+  return res.json();
+}
