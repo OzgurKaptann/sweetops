@@ -1,19 +1,31 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 
+from app.core import messages
 from app.core.db import get_db
+from app.schemas.qr import QrResolveRequest
 from app.services.menu_service import get_menu
 from app.services.conversion_engine import compute_upsell, validate_ingredient_selection
 from app.services.operational_context_service import compute_operational_context, OperationalContext
+from app.services.qr_token_service import resolve_token, QrTableUnavailable
 
 router = APIRouter(prefix="/public/menu", tags=["Public Menu"])
 
 
 @router.get("/")
-def read_menu(db: Session = Depends(get_db)):
+def read_menu(
+    db: Session = Depends(get_db),
+):
     """
-    Public menu with conversion signals.
+    Public menu with conversion signals (ungated).
+
+    This route carries NO QR token — a bearer token must never appear in a URL
+    (see `POST /public/menu/resolve`). The catalog is a single shared waffle
+    menu in the current data model, so this endpoint exposes only non-sensitive
+    menu content and no store/table context. The customer app uses the QR-gated
+    `POST /public/menu/resolve` variant; other internal callers may use this
+    ungated read.
 
     Each ingredient includes additive fields:
       stock_status             — "in_stock" | "low_stock" | "out_of_stock"
@@ -25,6 +37,43 @@ def read_menu(db: Session = Depends(get_db)):
 
     Ingredients within each category are ordered by ranking_score DESC.
     """
+    return get_menu(db)
+
+
+@router.post("/resolve")
+def read_menu_for_qr(
+    body: QrResolveRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    QR-gated menu. The opaque token is sent in the REQUEST BODY — never in the
+    URL — because it is a long-lived bearer token attached to a physical table
+    and a query-string token can leak through browser history, proxy/CDN access
+    logs, referrer headers, screenshots and observability pipelines. (See
+    `POST /public/qr-context/resolve` for the same body-transport rule.)
+
+    The token is re-validated here server-side; an invalid/revoked token returns
+    a Turkish error and NO menu, so a tampered or missing token can never load a
+    menu. There is deliberately no numeric `store` parameter to manipulate. The
+    catalog itself is a single shared waffle menu in the current data model, so
+    no per-store filtering applies; access, not content, is what the token gates.
+
+    Each ingredient includes additive fields:
+      stock_status             — "in_stock" | "low_stock" | "out_of_stock"
+      popular_badge            — true if top-20% by usage in last 7 days
+      profitable_badge         — true if high-margin (or high-price proxy)
+      recommended_with         — list of ingredient IDs that frequently appear together
+      out_of_stock_alternative — nearest same-category in-stock ingredient (if OOS/low)
+      ranking_score            — deterministic sort key (promoted > popular > margin > availability)
+
+    Ingredients within each category are ordered by ranking_score DESC.
+    """
+    try:
+        ctx = resolve_token(db, body.qr_token, touch=False)
+    except QrTableUnavailable:
+        raise HTTPException(status_code=409, detail=messages.QR_UNAVAILABLE)
+    if ctx is None:
+        raise HTTPException(status_code=404, detail=messages.QR_INVALID)
     return get_menu(db)
 
 

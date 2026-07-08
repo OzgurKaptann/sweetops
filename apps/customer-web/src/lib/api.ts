@@ -1,4 +1,8 @@
-import type { OrderCreateRequest, OrderCreatedResponse } from '@sweetops/types';
+import type {
+  OrderCreateRequest,
+  OrderCreatedResponse,
+  QrContextResponse,
+} from '@sweetops/types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
@@ -60,10 +64,84 @@ export interface UpsellResponse {
   based_on_ingredient_ids: number[];
 }
 
+// ── QR context resolution ─────────────────────────────────────────────────────
+
+/**
+ * Classifies why a QR resolution attempt failed so the UI can pick the right
+ * Turkish state and decide whether a retry is meaningful.
+ *
+ * - `invalid`: server says the token is not valid (unknown / revoked / malformed).
+ * - `unavailable`: token is valid but the table/store is not open to ordering.
+ * - `network`: the request never got a response — a retry may succeed.
+ */
+export type QrResolveErrorKind = 'invalid' | 'unavailable' | 'network';
+
+export class QrResolveError extends Error {
+  readonly kind: QrResolveErrorKind;
+  /** Turkish, user-facing message supplied by the server when available. */
+  readonly userMessage?: string;
+
+  constructor(kind: QrResolveErrorKind, userMessage?: string) {
+    super(`qr resolve failed: ${kind}`);
+    this.name = 'QrResolveError';
+    this.kind = kind;
+    this.userMessage = userMessage;
+  }
+
+  get canRetry(): boolean {
+    return this.kind === 'network';
+  }
+}
+
+/**
+ * Resolve an opaque QR token to trustworthy store/table context. The customer
+ * app never derives or trusts numeric store/table ids — they come only from here.
+ */
+export async function resolveQrContext(
+  qrToken: string,
+): Promise<QrContextResponse> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/public/qr-context/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ qr_token: qrToken }),
+      cache: 'no-store',
+    });
+  } catch {
+    throw new QrResolveError('network');
+  }
+
+  if (res.ok) return res.json();
+
+  let detail: string | undefined;
+  try {
+    const body = await res.json();
+    if (body && typeof body.detail === 'string') detail = body.detail;
+  } catch {
+    // no body / not JSON — fall back to a generic Turkish message below.
+  }
+  const kind: QrResolveErrorKind = res.status === 409 ? 'unavailable' : 'invalid';
+  throw new QrResolveError(kind, detail);
+}
+
 // ── API functions ─────────────────────────────────────────────────────────────
 
-export async function fetchMenu(): Promise<EnrichedMenuResponse> {
-  const res = await fetch(`${API_BASE}/public/menu/`, { cache: 'no-store' });
+/**
+ * Load the menu, gated by the resolved QR token.
+ *
+ * The token is sent in the REQUEST BODY (POST /public/menu/resolve), never in
+ * the URL — a query-string bearer token can leak through browser history,
+ * proxy/CDN access logs, referrer headers and screenshots. The backend
+ * re-validates the token; a missing/invalid token loads no menu.
+ */
+export async function fetchMenu(qrToken: string): Promise<EnrichedMenuResponse> {
+  const res = await fetch(`${API_BASE}/public/menu/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qr_token: qrToken }),
+    cache: 'no-store',
+  });
   if (!res.ok) throw new Error('Menü yüklenemedi');
   return res.json();
 }

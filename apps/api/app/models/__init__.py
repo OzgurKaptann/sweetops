@@ -3,6 +3,7 @@ from .role import Role
 from .user import User
 from .store import Store
 from .table import Table
+from .table_qr_token import TableQrToken
 from .product import Product
 from .ingredient import Ingredient
 from .ingredient_stock import IngredientStock, IngredientStockMovement
@@ -20,6 +21,7 @@ __all__ = [
     "User",
     "Store",
     "Table",
+    "TableQrToken",
     "Product",
     "Ingredient",
     "IngredientStock",

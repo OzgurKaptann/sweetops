@@ -40,8 +40,7 @@ function fakeStorageProvider(): () => KeyValueStorage {
 }
 
 const base: OrderFingerprintInput = {
-  store_id: 1,
-  table_id: 5,
+  qr_token: "tok-table-5",
   items: [
     {
       product_id: 10,
@@ -58,8 +57,7 @@ const base: OrderFingerprintInput = {
 
 test("equivalent payloads with different array ordering share a fingerprint", () => {
   const reordered: OrderFingerprintInput = {
-    store_id: 1,
-    table_id: 5,
+    qr_token: "tok-table-5",
     items: [
       {
         product_id: 10,
@@ -76,14 +74,14 @@ test("equivalent payloads with different array ordering share a fingerprint", ()
 
 test("multi-item payloads are order-independent", () => {
   const a: OrderFingerprintInput = {
-    store_id: 1,
+    qr_token: "tok-1",
     items: [
       { product_id: 2, quantity: 1, ingredients: [{ ingredient_id: 9, quantity: 1 }] },
       { product_id: 1, quantity: 1, ingredients: [{ ingredient_id: 4, quantity: 1 }] },
     ],
   };
   const b: OrderFingerprintInput = {
-    store_id: 1,
+    qr_token: "tok-1",
     items: [
       { product_id: 1, quantity: 1, ingredients: [{ ingredient_id: 4, quantity: 1 }] },
       { product_id: 2, quantity: 1, ingredients: [{ ingredient_id: 9, quantity: 1 }] },
@@ -94,10 +92,11 @@ test("multi-item payloads are order-independent", () => {
 
 // ── Scenario 7 — materially different payloads differ ────────────────────────
 
-test("different store, table, product, quantity, or ingredient change the fingerprint", () => {
+test("a different QR token, product, quantity, or ingredient changes the fingerprint", () => {
   const fp = fingerprintOrder(base);
-  assert.notEqual(fp, fingerprintOrder({ ...base, store_id: 2 }));
-  assert.notEqual(fp, fingerprintOrder({ ...base, table_id: 6 }));
+  // Scenario 30 — a different QR context (rotated sticker / different table)
+  // yields a new logical attempt.
+  assert.notEqual(fp, fingerprintOrder({ ...base, qr_token: "tok-table-6" }));
   assert.notEqual(
     fp,
     fingerprintOrder({
@@ -134,9 +133,9 @@ test("different store, table, product, quantity, or ingredient change the finger
   );
 });
 
-test("table_id null and undefined are equivalent", () => {
-  const withNull = fingerprintOrder({ store_id: 1, table_id: null, items: [] });
-  const withUndef = fingerprintOrder({ store_id: 1, items: [] });
+test("qr_token null and undefined are equivalent", () => {
+  const withNull = fingerprintOrder({ qr_token: null, items: [] });
+  const withUndef = fingerprintOrder({ items: [] });
   assert.equal(withNull, withUndef);
 });
 
