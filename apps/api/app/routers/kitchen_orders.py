@@ -3,13 +3,13 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.core.db import get_db
-from app.schemas.order import OrderListResponse, StatusUpdateRequest
+from app.schemas.order import KitchenDashboardResponse, StatusUpdateRequest
 from app.services.kitchen_service import get_kitchen_orders, update_order_status
 
 router = APIRouter(prefix="/kitchen/orders", tags=["Kitchen Orders"])
 
 
-@router.get("/", response_model=List[OrderListResponse])
+@router.get("/", response_model=KitchenDashboardResponse)
 def read_kitchen_orders(store_id: int = 1, db: Session = Depends(get_db)):
     return get_kitchen_orders(db, store_id)
 

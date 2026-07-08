@@ -2,87 +2,186 @@
 
 import { useState, useEffect } from "react";
 import { fetchIngredientForecast, IngredientForecastData } from "@/lib/api";
-import { Card } from "@sweetops/ui";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+  Legend,
+  Cell,
+} from "recharts";
 
-export function IngredientForecastPanel() {
+interface Props {
+  refreshTick?: number;
+}
+
+const TREND_COLOR = {
+  up: "text-emerald-600",
+  down: "text-red-500",
+  stable: "text-gray-400",
+};
+
+const TREND_ARROW = { up: "▲", down: "▼", stable: "—" };
+
+const CONFIDENCE_DOT = {
+  high: "bg-emerald-500",
+  medium: "bg-yellow-400",
+  low: "bg-gray-400",
+};
+
+// Group forecast items by ingredient, take the nearest forecast_date for each
+function groupByIngredient(items: IngredientForecastData["items"]) {
+  const map = new Map<string, IngredientForecastData["items"][0]>();
+  for (const item of items) {
+    if (!map.has(item.ingredient_name)) {
+      map.set(item.ingredient_name, item);
+    } else {
+      // keep the closest date
+      const existing = map.get(item.ingredient_name)!;
+      if (item.forecast_date < existing.forecast_date) {
+        map.set(item.ingredient_name, item);
+      }
+    }
+  }
+  return Array.from(map.values());
+}
+
+export function IngredientForecastPanel({ refreshTick }: Props) {
   const [data, setData] = useState<IngredientForecastData | null>(null);
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    fetchIngredientForecast()
-        .then(res => {
-            console.log("Forecast Data:", res);
-            setData(res);
-        })
-        .catch(err => {
-            console.error("Forecast Error:", err);
-            setError(true);
-        });
-  }, []);
+    setError(false);
+    fetchIngredientForecast().then(setData).catch(() => setError(true));
+  }, [refreshTick]);
 
-  if (error) return <Card className="p-6 text-red-500">Failed to load forecast data.</Card>;
-  if (!data) return <Card className="p-6 animate-pulse h-64 bg-gray-100"></Card>;
-
-  if (data.items.length === 0) {
+  if (error) {
     return (
-      <Card className="p-6 min-h-[300px] flex flex-col">
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">Demand Forecast</h3>
-        <p className="text-xs text-gray-500 mb-4">7-Day Horizon Baseline</p>
-        <div className="flex-1 flex items-center justify-center text-gray-500 text-sm bg-gray-50 rounded border border-dashed border-gray-200">
-          Not enough historical data to generate forecast yet.
-        </div>
-      </Card>
+      <div className="bg-white rounded-xl border border-gray-100 p-5 text-sm text-red-500">
+        Forecast data unavailable.
+      </div>
     );
   }
 
-  const getTrendIcon = (direction: string) => {
-    if (direction === 'up') return <span className="text-green-500 font-bold">↑</span>;
-    if (direction === 'down') return <span className="text-red-500 font-bold">↓</span>;
-    return <span className="text-gray-400 font-bold">-</span>;
-  };
+  if (!data) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-100 p-5 animate-pulse h-[280px]">
+        <div className="h-3 w-32 bg-gray-200 rounded mb-4" />
+        <div className="h-48 bg-gray-100 rounded" />
+      </div>
+    );
+  }
 
-  const getConfidenceBadge = (level: string) => {
-    if (level === 'high') return <span className="w-2 h-2 rounded-full bg-green-500 inline-block mr-1"></span>;
-    if (level === 'medium') return <span className="w-2 h-2 rounded-full bg-yellow-400 inline-block mr-1"></span>;
-    return <span className="w-2 h-2 rounded-full bg-gray-400 inline-block mr-1"></span>; // low
-  };
+  if (data.items.length === 0) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-100 p-5 min-h-[280px] flex flex-col">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+          Forecast vs Baseline
+        </h3>
+        <div className="flex-1 flex items-center justify-center text-gray-400 text-sm text-center">
+          Not enough history to forecast yet.
+          <br />
+          <span className="text-xs mt-1 block">Needs 7–14 days of data.</span>
+        </div>
+      </div>
+    );
+  }
+
+  const nearest = groupByIngredient(data.items);
+
+  // Build chart data: predicted vs recent avg
+  const chartData = nearest.map((item) => ({
+    name: item.ingredient_name,
+    predicted: item.predicted_usage,
+    baseline: item.recent_avg_usage,
+    trend: item.trend_direction,
+    confidence: item.confidence_level,
+    delta: item.trend_delta,
+  }));
 
   return (
-    <Card className="p-6 min-h-[300px]">
-      <div className="flex justify-between items-start mb-4">
-        <div>
-            <h3 className="text-lg font-semibold text-gray-900">Demand Forecast</h3>
-            <p className="text-xs text-gray-500 mt-1">Based on {data.items[0]?.baseline_method.replace(/_/g, ' ')}</p>
-        </div>
-        <div className="text-xs text-gray-400 text-right">
-            Horizon: {data.forecast_horizon_days} Days <br/>
-            <span className="text-[10px]">Data points required: 7-14</span>
-        </div>
+    <div className="bg-white rounded-xl border border-gray-100 p-5 min-h-[280px] flex flex-col">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          Forecast vs Baseline
+        </h3>
+        <span className="text-[10px] text-gray-400">
+          {data.forecast_horizon_days}-day horizon
+        </span>
       </div>
-      
-      <div className="space-y-4">
-        {data.items.map((item, idx) => (
-          <div key={idx} className="flex flex-col sm:flex-row sm:items-center justify-between p-3 border border-gray-100 rounded-lg hover:bg-gray-50 transition-colors">
-            <div className="flex items-center gap-3 w-full sm:w-1/3 mb-2 sm:mb-0">
-              {getConfidenceBadge(item.confidence_level)}
-              <span className="font-medium text-gray-900">{item.ingredient_name}</span>
-            </div>
-            
-            <div className="flex items-center justify-between w-full sm:w-2/3">
-                <div className="text-sm text-gray-500 w-24 text-center">
-                    {item.forecast_date}
-                </div>
-                <div className="flex items-center gap-2 w-20 justify-end">
-                    <span className="text-sm text-gray-400" title="Recent Avg">({item.recent_avg_usage})</span>
-                    <span className="font-semibold text-gray-900 text-base">{item.predicted_usage}</span>
-                </div>
-                <div className="w-16 text-right">
-                   {getTrendIcon(item.trend_direction)} <span className="text-xs text-gray-500 ml-1">{item.trend_delta > 0 ? '+' : ''}{item.trend_delta || ''}</span>
-                </div>
-            </div>
+
+      {/* Chart */}
+      <div className="flex-1 min-h-[200px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={chartData}
+            margin={{ top: 4, right: 4, bottom: 0, left: -8 }}
+            barSize={10}
+            barCategoryGap="30%"
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" vertical={false} />
+            <XAxis
+              dataKey="name"
+              fontSize={10}
+              axisLine={false}
+              tickLine={false}
+              tickMargin={6}
+            />
+            <YAxis fontSize={10} axisLine={false} tickLine={false} />
+            <Tooltip
+              contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 11 }}
+              formatter={(value: any, name: any) => [
+                Number(value).toFixed(1),
+                name === "predicted" ? "Forecast" : "Baseline",
+              ]}
+            />
+            <Legend
+              iconType="square"
+              iconSize={8}
+              wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
+              formatter={(v) => (v === "predicted" ? "Forecast" : "Baseline")}
+            />
+            <Bar dataKey="baseline" fill="#e5e7eb" radius={[2, 2, 0, 0]} />
+            <Bar dataKey="predicted" radius={[2, 2, 0, 0]}>
+              {chartData.map((entry, i) => (
+                <Cell
+                  key={i}
+                  fill={
+                    entry.trend === "up"
+                      ? "#f59e0b"
+                      : entry.trend === "down"
+                      ? "#f87171"
+                      : "#3b82f6"
+                  }
+                />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Confidence legend */}
+      <div className="flex items-center gap-3 mt-3 flex-wrap">
+        {nearest.map((item) => (
+          <div key={item.ingredient_name} className="flex items-center gap-1">
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${CONFIDENCE_DOT[item.confidence_level]}`}
+            />
+            <span className="text-[10px] text-gray-400">{item.ingredient_name}</span>
+            <span
+              className={`text-[10px] font-semibold ${TREND_COLOR[item.trend_direction]}`}
+            >
+              {TREND_ARROW[item.trend_direction]}
+            </span>
           </div>
         ))}
+        <span className="text-[10px] text-gray-300 ml-auto">
+          ● high&nbsp; ● med&nbsp; ● low confidence
+        </span>
       </div>
-    </Card>
+    </div>
   );
 }

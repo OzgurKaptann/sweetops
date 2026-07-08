@@ -56,8 +56,31 @@ class OrderListResponse(BaseSchema):
     store_id: int
     table_id: Optional[int]
     status: str
-    created_at: str          # UTC ISO-8601, e.g. "2026-04-01T10:00:00+00:00"
+    created_at: str               # UTC ISO-8601, e.g. "2026-04-01T10:00:00+00:00"
     computed_age_minutes: float
     priority_score: float
-    sla_severity: str        # "ok" | "warning" | "critical"
+    sla_severity: str             # "ok" | "warning" | "critical"
+    should_be_started: bool
+    urgency_reason: str
+    action_hint: str
     items: List[OrderItemResponse] = []
+
+
+class KitchenLoadResponse(BaseSchema):
+    load_level: str               # "low" | "medium" | "high"
+    active_orders_count: int
+    in_prep_count: int
+    average_age_minutes: float
+    explanation: str
+
+
+class BatchingSuggestion(BaseSchema):
+    grouped_order_ids: List[int]
+    shared_ingredients: List[str]
+    estimated_time_saved: str     # e.g. "60s"
+
+
+class KitchenDashboardResponse(BaseSchema):
+    orders: List[OrderListResponse]
+    kitchen_load: KitchenLoadResponse
+    batching_suggestions: List[BatchingSuggestion]

@@ -57,6 +57,16 @@ _STATUS_WEIGHT: dict[str, float] = {"NEW": 1.2, "IN_PREP": 1.0}
 # Multiplier jumps at each SLA threshold so breached orders always lead the queue
 _SLA_MULTIPLIER: dict[str, float] = {"ok": 1.0, "warning": 1.5, "critical": 2.5}
 
+# Decision signal thresholds
+START_IMMEDIATELY_MINUTES = 3   # NEW orders waiting ≥ this should be started even before warning zone
+
+# Batching
+BATCH_TIME_SAVE_SECONDS = 30    # seconds saved per extra order per shared ingredient when batching
+
+# Kitchen load thresholds (active order count)
+LOAD_MEDIUM_THRESHOLD = 4       # ≥4 active orders → medium
+LOAD_HIGH_THRESHOLD = 7         # ≥7 active orders → high
+
 
 # ---------------------------------------------------------------------------
 # SLA severity
@@ -130,21 +140,263 @@ def _to_utc(dt: datetime) -> datetime:
 
 
 # ---------------------------------------------------------------------------
+# Decision signals
+# ---------------------------------------------------------------------------
+
+def _decision_signals(
+    age_minutes: float, status: str, severity: str
+) -> tuple[bool, str]:
+    """
+    Determine whether an order needs immediate action and articulate why.
+
+    NEW orders — should_be_started = True when:
+        • SLA critical (≥10 min): breach already occurred
+        • SLA warning (7–10 min): approaching breach
+        • age ≥ START_IMMEDIATELY_MINUTES (3 min): waited long enough even in ok zone
+
+    IN_PREP orders — should_be_started = True when:
+        • SLA critical: execution is taking too long → expedite
+        • SLA warning: running long → finish soon
+    """
+    if status == "NEW":
+        if severity == "critical":
+            return True, f"SLA breached — {age_minutes:.1f} min in queue"
+        if severity == "warning":
+            return True, f"Approaching SLA — {age_minutes:.1f} min in queue"
+        if age_minutes >= START_IMMEDIATELY_MINUTES:
+            return True, f"Waiting {age_minutes:.1f} min — start now"
+        return False, f"Just placed — {age_minutes:.1f} min in queue"
+
+    if status == "IN_PREP":
+        if severity == "critical":
+            return True, "SLA breached — expedite immediately"
+        if severity == "warning":
+            return True, f"Running long — {age_minutes:.1f} min elapsed"
+        return False, f"In preparation — {age_minutes:.1f} min elapsed"
+
+    return False, f"Status: {status}"
+
+
+def _action_hint(
+    order_id: int,
+    status: str,
+    severity: str,
+    age_minutes: float,
+    batch_partner_ids: list[int],
+) -> str:
+    """
+    Single actionable instruction for kitchen staff.
+
+    Precedence for NEW orders (highest → lowest):
+        1. critical SLA → "Start immediately — SLA breached"
+        2. warning SLA  → "Start soon — approaching SLA"
+        3. has batch partners → "Combine with order #X"
+        4. age ≥ threshold  → "Start now"
+        5. fresh             → "Can wait"
+
+    Precedence for IN_PREP orders:
+        1. critical → "Expedite — SLA breached"
+        2. warning  → "Finish soon — approaching SLA"
+        3. normal   → "In progress"
+    """
+    if status == "IN_PREP":
+        if severity == "critical":
+            return "Expedite — SLA breached"
+        if severity == "warning":
+            return "Finish soon — approaching SLA"
+        return "In progress"
+
+    if status == "NEW":
+        if severity == "critical":
+            return "Start immediately — SLA breached"
+        if severity == "warning":
+            return "Start soon — approaching SLA"
+        if batch_partner_ids:
+            return f"Combine with order #{batch_partner_ids[0]}"
+        if age_minutes >= START_IMMEDIATELY_MINUTES:
+            return "Start now"
+        return "Can wait"
+
+    return "No action needed"
+
+
+# ---------------------------------------------------------------------------
+# Batching suggestions
+# ---------------------------------------------------------------------------
+
+def _batching_suggestions(orders: list[dict]) -> list[dict]:
+    """
+    Finds NEW orders that share at least one ingredient and groups them.
+
+    Algorithm: union-find on ingredient co-occurrence.
+        Two orders are connected if they share any ingredient.
+        Transitive connections form one group (order A shares with B,
+        B shares with C → A, B, C are one group even if A and C share nothing).
+
+    Only NEW orders are eligible — IN_PREP orders have already started.
+
+    Each suggestion:
+        grouped_order_ids   — sorted list of order IDs in the batch
+        shared_ingredients  — ingredient names shared by ≥2 orders in the group
+        estimated_time_saved — seconds saved: Σ (n_orders_per_ingredient - 1) × 30s
+
+    Time-save rationale: batching N orders that all need ingredient X means
+    prepping X once instead of N times. Each avoided prep = 30 s saved.
+    """
+    # Step 1: collect ingredient sets for NEW orders
+    order_ingredients: dict[int, set[str]] = {}
+    ing_to_orders: dict[str, list[int]] = {}
+
+    for order in orders:
+        if order["status"] != "NEW":
+            continue
+        ings: set[str] = set()
+        for item in order["items"]:
+            for oii in item["ingredients"]:
+                name = oii["ingredient_name"]
+                ings.add(name)
+                if name not in ing_to_orders:
+                    ing_to_orders[name] = []
+                if order["id"] not in ing_to_orders[name]:
+                    ing_to_orders[name].append(order["id"])
+        if ings:
+            order_ingredients[order["id"]] = ings
+
+    if len(order_ingredients) < 2:
+        return []
+
+    # Step 2: union-find
+    parent: dict[int, int] = {oid: oid for oid in order_ingredients}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path compression
+            x = parent[x]
+        return x
+
+    for oid_list in ing_to_orders.values():
+        for i in range(1, len(oid_list)):
+            px, py = find(oid_list[0]), find(oid_list[i])
+            if px != py:
+                parent[px] = py
+
+    # Step 3: group orders by component root
+    groups: dict[int, list[int]] = {}
+    for oid in order_ingredients:
+        root = find(oid)
+        groups.setdefault(root, []).append(oid)
+
+    # Step 4: build suggestions for groups with ≥2 orders
+    suggestions = []
+    for group_ids in sorted(groups.values(), key=lambda g: min(g)):
+        if len(group_ids) < 2:
+            continue
+
+        # Ingredients shared by ≥2 orders in this group
+        ing_counts: dict[str, int] = {}
+        for oid in group_ids:
+            for ing in order_ingredients[oid]:
+                ing_counts[ing] = ing_counts.get(ing, 0) + 1
+        shared_ings = sorted(ing for ing, cnt in ing_counts.items() if cnt >= 2)
+
+        if not shared_ings:
+            continue
+
+        # Time saved: one fewer prep per extra order that uses the ingredient
+        time_saved_s = sum(
+            (ing_counts[ing] - 1) * BATCH_TIME_SAVE_SECONDS
+            for ing in shared_ings
+        )
+
+        suggestions.append({
+            "grouped_order_ids": sorted(group_ids),
+            "shared_ingredients": shared_ings,
+            "estimated_time_saved": f"{time_saved_s}s",
+        })
+
+    return suggestions
+
+
+# ---------------------------------------------------------------------------
+# Kitchen load
+# ---------------------------------------------------------------------------
+
+def _kitchen_load(orders: list[dict]) -> dict:
+    """
+    Classifies kitchen load from active (NEW + IN_PREP) order count.
+
+    Thresholds:
+        low:    count < LOAD_MEDIUM_THRESHOLD  (< 4)
+        medium: LOAD_MEDIUM_THRESHOLD ≤ count < LOAD_HIGH_THRESHOLD  (4–6)
+        high:   count ≥ LOAD_HIGH_THRESHOLD   (≥ 7)
+
+    average_age_minutes: mean age of active orders — proxy for in-queue prep time.
+    """
+    active_count = len(orders)
+    in_prep_count = sum(1 for o in orders if o["status"] == "IN_PREP")
+    new_count = active_count - in_prep_count
+
+    if active_count == 0:
+        return {
+            "load_level": "low",
+            "active_orders_count": 0,
+            "in_prep_count": 0,
+            "average_age_minutes": 0.0,
+            "explanation": "No active orders — kitchen is idle.",
+        }
+
+    avg_age = round(
+        sum(o["computed_age_minutes"] for o in orders) / active_count, 1
+    )
+
+    if active_count >= LOAD_HIGH_THRESHOLD:
+        level = "high"
+        explanation = (
+            f"{active_count} active orders ({new_count} waiting, {in_prep_count} in prep)"
+            f" — heavy load, avg {avg_age} min per order."
+        )
+    elif active_count >= LOAD_MEDIUM_THRESHOLD:
+        level = "medium"
+        explanation = (
+            f"{active_count} active orders ({new_count} waiting, {in_prep_count} in prep)"
+            f" — manageable load, avg {avg_age} min per order."
+        )
+    else:
+        level = "low"
+        explanation = (
+            f"{active_count} active order(s) ({new_count} waiting, {in_prep_count} in prep)"
+            f" — light load, avg {avg_age} min per order."
+        )
+
+    return {
+        "load_level": level,
+        "active_orders_count": active_count,
+        "in_prep_count": in_prep_count,
+        "average_age_minutes": avg_age,
+        "explanation": explanation,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------
 
-def get_kitchen_orders(db: Session, store_id: int = 1) -> list[dict]:
+def get_kitchen_orders(db: Session, store_id: int = 1) -> dict:
     """
-    Return active orders (NEW, IN_PREP) for the kitchen screen.
+    Return the kitchen dashboard: active orders + decision intelligence.
 
-    Sorted by priority_score descending (highest urgency first).
-    Each order includes computed_age_minutes, priority_score, sla_severity.
-    Eager-loads items → ingredients to avoid N+1.
-    All datetimes are UTC-aware ISO-8601 strings.
+    Returns a structured dict with three keys:
+        orders              — priority-sorted list of active orders with
+                              per-order decision signals and action hints
+        kitchen_load        — load level, counts, average age, explanation
+        batching_suggestions — ingredient-grouped batch opportunities
+
+    All datetimes are UTC ISO-8601 strings.
+    Eager-loads items → ingredients (no N+1).
     """
     now = datetime.now(timezone.utc)
 
-    orders = (
+    db_orders = (
         db.query(Order)
         .options(
             selectinload(Order.items)
@@ -158,24 +410,28 @@ def get_kitchen_orders(db: Session, store_id: int = 1) -> list[dict]:
     )
 
     # Batch-load products and ingredients to avoid per-row queries
-    product_ids = {item.product_id for o in orders for item in o.items}
+    product_ids = {item.product_id for o in db_orders for item in o.items}
     ingredient_ids = {
         oii.ingredient_id
-        for o in orders
+        for o in db_orders
         for item in o.items
         for oii in item.ingredients
     }
 
     products = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()}
-    ingredients = {i.id: i for i in db.query(Ingredient).filter(Ingredient.id.in_(ingredient_ids)).all()}
+    ingredients_map = {
+        i.id: i
+        for i in db.query(Ingredient).filter(Ingredient.id.in_(ingredient_ids)).all()
+    }
 
-    result = []
-    for order in orders:
+    # ── Build order list with scoring ─────────────────────────────────────
+    result: list[dict] = []
+    for order in db_orders:
         created_utc = _to_utc(order.created_at)
         age_minutes = round((now - created_utc).total_seconds() / 60, 1)
 
         items_list = []
-        ingredient_slot_count = 0  # distinct OII rows, not quantity sum
+        ingredient_slot_count = 0
 
         for item in order.items:
             product = products.get(item.product_id)
@@ -184,11 +440,11 @@ def get_kitchen_orders(db: Session, store_id: int = 1) -> list[dict]:
                 ing_list.append({
                     "id": oii.id,
                     "ingredient_id": oii.ingredient_id,
-                    "ingredient_name": ingredients[oii.ingredient_id].name
-                    if oii.ingredient_id in ingredients else "Bilinmiyor",
+                    "ingredient_name": ingredients_map[oii.ingredient_id].name
+                    if oii.ingredient_id in ingredients_map else "Bilinmiyor",
                     "quantity": oii.quantity,
                 })
-                ingredient_slot_count += 1  # one prep step per distinct ingredient row
+                ingredient_slot_count += 1
 
             items_list.append({
                 "id": item.id,
@@ -200,22 +456,55 @@ def get_kitchen_orders(db: Session, store_id: int = 1) -> list[dict]:
 
         severity = _sla_severity(age_minutes)
         score = _priority_score(age_minutes, ingredient_slot_count, order.status)
+        should_start, urgency_reason = _decision_signals(age_minutes, order.status, severity)
 
         result.append({
             "id": order.id,
             "store_id": order.store_id,
             "table_id": order.table_id,
             "status": order.status,
-            "created_at": created_utc.isoformat(),  # always UTC ISO-8601
+            "created_at": created_utc.isoformat(),
             "computed_age_minutes": age_minutes,
             "priority_score": score,
             "sla_severity": severity,
+            "should_be_started": should_start,
+            "urgency_reason": urgency_reason,
+            "action_hint": "",           # filled in after batching is computed
             "items": items_list,
         })
 
     # Highest urgency first
     result.sort(key=lambda o: o["priority_score"], reverse=True)
-    return result
+
+    # ── Batching suggestions (needs sorted result) ─────────────────────────
+    suggestions = _batching_suggestions(result)
+
+    # Build order_id → batch partner IDs map (for action_hint)
+    order_to_partners: dict[int, list[int]] = {}
+    for suggestion in suggestions:
+        for oid in suggestion["grouped_order_ids"]:
+            partners = [x for x in suggestion["grouped_order_ids"] if x != oid]
+            order_to_partners[oid] = partners
+
+    # Fill action_hint now that batch info is available
+    for order in result:
+        partners = order_to_partners.get(order["id"], [])
+        order["action_hint"] = _action_hint(
+            order["id"],
+            order["status"],
+            order["sla_severity"],
+            order["computed_age_minutes"],
+            partners,
+        )
+
+    # ── Kitchen load ───────────────────────────────────────────────────────
+    load = _kitchen_load(result)
+
+    return {
+        "orders": result,
+        "kitchen_load": load,
+        "batching_suggestions": suggestions,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +612,10 @@ def update_order_status(
 
     now_utc = datetime.now(timezone.utc)
     age_min = round((now_utc - _to_utc(order.created_at)).total_seconds() / 60, 1)
+    sla_sev = _sla_severity(age_min)
+    should_start, urgency_reason = _decision_signals(age_min, new_status, sla_sev)
+    # batch_partner_ids unavailable in broadcast context — clients use REST for full dashboard
+    hint = _action_hint(order.id, new_status, sla_sev, age_min, [])
 
     background_tasks.add_task(
         kitchen_ws_manager.broadcast_kitchen_event,
@@ -333,7 +626,10 @@ def update_order_status(
             "from_status": old_status,
             "to_status": new_status,
             "computed_age_minutes": age_min,
-            "sla_severity": _sla_severity(age_min),
+            "sla_severity": sla_sev,
+            "should_be_started": should_start,
+            "urgency_reason": urgency_reason,
+            "action_hint": hint,
             "updated_at": now_utc.isoformat(),
         },
     )
