@@ -270,6 +270,12 @@ in this branch (no deletions, no revision-id changes, no squash, no merge migrat
 `down_revision` edits). The graph will be linearized in the follow-up branch
 `fix/alembic-single-head`.
 
+> **Update (follow-up branch `fix/alembic-single-head`):** the two heads above were
+> subsequently joined by a no-op Alembic merge revision (`4299b615f7aa`), leaving a single
+> head. That work does not modify any of the migrations described in this report. See
+> [`ALEMBIC_SINGLE_HEAD_RESOLUTION.md`](ALEMBIC_SINGLE_HEAD_RESOLUTION.md) for the full
+> resolution, graph, and verification.
+
 ---
 
 ## 11. Problems intentionally excluded from this branch
