@@ -13,3 +13,8 @@ class Table(Base):
     
     store = relationship("Store", back_populates="tables")
     orders = relationship("Order", back_populates="table")
+    qr_tokens = relationship(
+        "TableQrToken",
+        back_populates="table",
+        order_by="TableQrToken.created_at",
+    )

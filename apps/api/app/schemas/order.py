@@ -22,7 +22,13 @@ class OrderItemCreate(BaseModel):
     ingredients: List[OrderItemIngredientCreate] = []
 
 class OrderCreateRequest(BaseModel):
-    store_id: int
+    # Opaque QR token — the trusted source of store/table context. The backend
+    # resolves it server-side and derives store_id/table_id from it; any
+    # client-supplied store_id/table_id below are IGNORED whenever qr_token is
+    # present. The legacy fields remain only for the non-production transition
+    # mode (settings.ALLOW_LEGACY_ORDER_CONTEXT) and are never trusted in prod.
+    qr_token: Optional[str] = None
+    store_id: Optional[int] = None
     table_id: Optional[int] = None
     items: List[OrderItemCreate]
 

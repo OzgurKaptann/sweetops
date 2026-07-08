@@ -1,18 +1,21 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   fetchMenu,
   fetchUpsell,
   createOrder,
+  resolveQrContext,
   OrderRequestError,
+  QrResolveError,
   EnrichedIngredient,
   EnrichedMenuResponse,
   UpsellSuggestion,
 } from "@/lib/api";
-import type { OrderCreateRequest } from "@sweetops/types";
+import type { OrderCreateRequest, QrContextResponse } from "@sweetops/types";
 import { fingerprintOrder, orderIdempotency } from "@/lib/order-idempotency";
+import { acquireQrToken, clearQrToken } from "@/lib/qr-session";
 
 const MAX_TOPPINGS = 6;
 const MAX_SAUCES = 2;
@@ -300,20 +303,33 @@ function PopularSection({
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
+// Phases of the QR-gated menu screen. Plain query params (?store, ?table) are
+// intentionally never read — only the opaque ?qr token is trusted.
+type QrPhase =
+  | "loading" // resolving the token / loading the menu
+  | "missing" // no ?qr in the URL
+  | "invalid" // token unknown / revoked / malformed
+  | "unavailable" // valid token but table/store not open to ordering
+  | "network" // transient failure — retry is meaningful
+  | "ready"; // context resolved and menu loaded
+
 export default function CustomerMenuPageClient() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const storeId = Number(searchParams?.get("store") || 1);
-  const tableId = searchParams?.get("table")
-    ? Number(searchParams.get("table"))
-    : undefined;
 
+  // The ONLY trusted context source is an opaque QR token delivered in the URL
+  // *fragment* (`#qr=<token>`), captured client-side, then scrubbed from the
+  // address bar. Legacy `?qr=` / `?store=` / `?table=` query params are never
+  // read. `qrToken` starts null and is populated once, on mount, below.
+  const [qrToken, setQrToken] = useState<string | null>(null);
+  const [tokenAcquired, setTokenAcquired] = useState(false);
+
+  const [phase, setPhase] = useState<QrPhase>("loading");
+  const [qrErrorMessage, setQrErrorMessage] = useState<string | null>(null);
+  const [context, setContext] = useState<QrContextResponse | null>(null);
   const [menu, setMenu] = useState<EnrichedMenuResponse | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [upsell, setUpsell] = useState<UpsellSuggestion[]>([]);
-  const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   // Synchronous double-click guard: React state updates are async, so a second
   // click can fire before `submitting` re-renders. A ref blocks it immediately.
@@ -321,13 +337,71 @@ export default function CustomerMenuPageClient() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const upsellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load menu
+  // Capture the QR token from the URL fragment (or this session's storage)
+  // exactly once, client-side. `acquireQrToken` also scrubs the token out of
+  // the visible address bar. A same-tab refresh re-reads it from sessionStorage
+  // (the fragment is gone by then); a new tab opened without scanning finds no
+  // token and lands on the "missing" state.
   useEffect(() => {
-    fetchMenu()
-      .then(setMenu)
-      .catch(() => setError("Menü yüklenemedi. Lütfen tekrar deneyin."))
-      .finally(() => setLoading(false));
+    setQrToken(acquireQrToken());
+    setTokenAcquired(true);
   }, []);
+
+  // Resolve the QR token → context → menu. No default store is ever assumed;
+  // without a valid token the menu is never loaded and ordering is impossible.
+  useEffect(() => {
+    // Wait until the fragment/session read has happened, else a transient
+    // "missing" would flash before the token is acquired.
+    if (!tokenAcquired) return;
+
+    let cancelled = false;
+
+    if (!qrToken) {
+      setPhase("missing");
+      return;
+    }
+
+    setPhase("loading");
+    setQrErrorMessage(null);
+
+    (async () => {
+      try {
+        const ctx = await resolveQrContext(qrToken);
+        if (cancelled) return;
+        setContext(ctx);
+        const loadedMenu = await fetchMenu(qrToken);
+        if (cancelled) return;
+        setMenu(loadedMenu);
+        setPhase("ready");
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof QrResolveError) {
+          setQrErrorMessage(err.userMessage ?? null);
+          if (err.kind === "invalid") {
+            // Definitive: the stored token is dead (unknown / revoked /
+            // rotated). Forget it so a same-tab refresh does not keep retrying
+            // a token that can never resolve.
+            clearQrToken();
+            setPhase("invalid");
+          } else if (err.kind === "unavailable") {
+            // Valid token, table/store temporarily closed — keep the token.
+            setPhase("unavailable");
+          } else {
+            // Network: outcome unknown. Keep the token so a retry can succeed.
+            setPhase("network");
+          }
+        } else {
+          // Menu load or unexpected failure after a valid token — transient.
+          // The token stays; a retry may succeed.
+          setPhase("network");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [qrToken, tokenAcquired]);
 
   // Debounced upsell fetch when selection changes
   useEffect(() => {
@@ -423,6 +497,8 @@ export default function CustomerMenuPageClient() {
   const handleSubmit = async () => {
     // Hard double-click / re-entrancy guard (synchronous, not state-based).
     if (submittingRef.current) return;
+    // Ordering requires a resolved QR context — never a default store.
+    if (!qrToken || phase !== "ready") return;
     if (selected.size === 0) {
       showToast("En az 1 malzeme seçmelisiniz");
       return;
@@ -431,9 +507,9 @@ export default function CustomerMenuPageClient() {
 
     // Build the logical order payload, then derive one idempotency key for it.
     // A retry of the same selection reuses the key; any change mints a new one.
+    // The QR token is the trusted context — no numeric store/table is sent.
     const payload: OrderCreateRequest = {
-      store_id: storeId,
-      table_id: tableId,
+      qr_token: qrToken,
       items: [
         {
           product_id: product.id,
@@ -476,21 +552,58 @@ export default function CustomerMenuPageClient() {
     }
   };
 
-  // ── Loading / error ────────────────────────────────────────────────────────
+  // ── QR gate: loading / missing / invalid / unavailable / network ────────────
 
-  if (loading) {
+  if (phase === "loading") {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3">
         <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-gray-400">Menü yükleniyor…</p>
+        <p className="text-sm text-gray-400">QR kod doğrulanıyor…</p>
       </div>
     );
   }
 
-  if (error) {
+  if (phase === "missing") {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
-        <p className="text-gray-500 text-sm">{error}</p>
+        <span className="text-3xl">📷</span>
+        <p className="text-gray-700 text-sm font-medium">
+          QR kod bilgisi bulunamadı. Lütfen masadaki QR kodu yeniden okut.
+        </p>
+      </div>
+    );
+  }
+
+  if (phase === "invalid") {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
+        <span className="text-3xl">⚠️</span>
+        <p className="text-gray-700 text-sm font-medium">
+          {qrErrorMessage ??
+            "Bu QR kod geçerli değil. Lütfen masadaki güncel QR kodu kullan."}
+        </p>
+      </div>
+    );
+  }
+
+  if (phase === "unavailable") {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
+        <span className="text-3xl">🔒</span>
+        <p className="text-gray-700 text-sm font-medium">
+          {qrErrorMessage ??
+            "Bu masa şu anda siparişe açık değil. Lütfen işletme personelinden yardım iste."}
+        </p>
+      </div>
+    );
+  }
+
+  if (phase === "network") {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
+        <p className="text-gray-500 text-sm">
+          Bağlantı kurulamadı. Lütfen tekrar dene.
+        </p>
         <button
           onClick={() => window.location.reload()}
           className="text-sm font-semibold text-amber-600 hover:underline"
@@ -513,8 +626,10 @@ export default function CustomerMenuPageClient() {
       {/* Header */}
       <header className="px-4 pt-6 pb-4 border-b border-gray-100">
         <h1 className="text-xl font-bold text-gray-900">Waffle'ını Oluştur</h1>
-        {tableId && (
-          <p className="text-xs text-gray-400 mt-0.5">Masa {tableId}</p>
+        {context && (
+          <p className="text-xs text-gray-400 mt-0.5">
+            {context.store.name} · {context.table.name}
+          </p>
         )}
       </header>
 

@@ -14,10 +14,16 @@
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-/** The logical shape of an order request that must map 1:1 to an idempotency key. */
+/**
+ * The logical shape of an order request that must map 1:1 to an idempotency key.
+ *
+ * Context is identified by the opaque `qr_token`, not by client-trusted numeric
+ * store/table ids. A different QR token (a different physical table, or a
+ * rotated sticker) therefore yields a different fingerprint and a fresh
+ * idempotency attempt; the same token with an unchanged cart reuses the key.
+ */
 export interface OrderFingerprintInput {
-  store_id: number;
-  table_id?: number | null;
+  qr_token?: string | null;
   items: Array<{
     product_id: number;
     quantity: number;
@@ -82,8 +88,7 @@ export function fingerprintOrder(input: OrderFingerprintInput): string {
     );
 
   return JSON.stringify({
-    store_id: input.store_id,
-    table_id: input.table_id ?? null,
+    qr_token: input.qr_token ?? null,
     items,
   });
 }

@@ -17,6 +17,9 @@ from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core import messages
+from app.core.config import settings
+from app.services.qr_token_service import resolve_token, QrTableUnavailable
 from app.models.audit_log import AuditLog  # noqa — ensure model registered
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
@@ -88,6 +91,14 @@ def create_order(
             logger.info("idempotency_hit order_id=%s key=%s", existing.id, idempotency_key)
             return _build_response(existing)
 
+    # ── 1b. Derive trusted store/table context from the QR token ─────────
+    # The QR token is the ONLY trusted source of store/table. It is resolved
+    # inside this transaction with a row lock (`for_update`) so a concurrent
+    # revoke/rotate serializes behind us — an order can never be created on a
+    # token that was revoked before this transaction validated it. Any
+    # client-supplied store_id/table_id are ignored whenever a token is present.
+    store_id, table_id = _derive_order_context(db, order_data)
+
     # ── 2. Resolve products & ingredients (outside lock — read-only) ─────
     ingredient_ids: list[int] = []
     for item in order_data.items:
@@ -154,8 +165,8 @@ def create_order(
 
     # ── 5. Build order inside transaction ────────────────────────────────
     new_order = Order(
-        store_id=order_data.store_id,
-        table_id=order_data.table_id,
+        store_id=store_id,
+        table_id=table_id,
         status="NEW",
         total_amount=Decimal("0.00"),
         idempotency_key=idempotency_key,
@@ -274,6 +285,34 @@ def create_order(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _derive_order_context(
+    db: Session, order_data: OrderCreateRequest
+) -> tuple[int, int | None]:
+    """
+    Determine the trusted (store_id, table_id) for an order.
+
+    Priority:
+      1. If a qr_token is present, resolve it (row-locked) and derive both ids
+         from it — client-supplied store_id/table_id are ignored entirely.
+      2. Otherwise, only if settings.ALLOW_LEGACY_ORDER_CONTEXT is enabled
+         (non-production transition mode) fall back to the client store_id.
+      3. Otherwise reject: production never trusts client-supplied context.
+    """
+    if order_data.qr_token:
+        try:
+            ctx = resolve_token(db, order_data.qr_token, touch=True, for_update=True)
+        except QrTableUnavailable:
+            raise HTTPException(status_code=409, detail=messages.QR_UNAVAILABLE)
+        if ctx is None:
+            raise HTTPException(status_code=404, detail=messages.QR_INVALID)
+        return ctx.store_id, ctx.table_id
+
+    if settings.ALLOW_LEGACY_ORDER_CONTEXT and order_data.store_id is not None:
+        return order_data.store_id, order_data.table_id
+
+    raise HTTPException(status_code=400, detail=messages.QR_REQUIRED)
+
 
 def _deduct_stock(
     db: Session,

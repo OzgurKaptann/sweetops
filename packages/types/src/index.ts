@@ -38,9 +38,35 @@ export interface OrderItemCreate {
 }
 
 export interface OrderCreateRequest {
-  store_id: number;
+  /**
+   * Opaque QR token — the trusted source of store/table context. The backend
+   * derives store_id/table_id from it server-side. The public customer client
+   * must send this and must NOT send trusted numeric store/table ids.
+   */
+  qr_token?: string;
+  /** @deprecated Legacy/transition only — never trusted in production. */
+  store_id?: number;
+  /** @deprecated Legacy/transition only — never trusted in production. */
   table_id?: number;
   items: OrderItemCreate[];
+}
+
+// ── Secure QR store/table context ────────────────────────────────────────────
+
+export interface QrContextStore {
+  id: number;
+  name: string;
+}
+
+export interface QrContextTable {
+  id: number;
+  name: string;
+}
+
+export interface QrContextResponse {
+  store: QrContextStore;
+  table: QrContextTable;
+  context_version: number;
 }
 
 export interface OrderCreatedResponse {

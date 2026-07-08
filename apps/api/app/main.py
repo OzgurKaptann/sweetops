@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import health, public_menu, public_orders, kitchen_orders, owner_analytics, owner_insights, owner_metrics, ws
+from app.routers import health, public_menu, public_orders, public_qr, kitchen_orders, owner_analytics, owner_insights, owner_metrics, ws
 
 app = FastAPI(title="SweetOps API", version="1.0.0")
 
@@ -22,6 +22,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(public_menu.router)
+app.include_router(public_qr.router)
 app.include_router(public_orders.router)
 app.include_router(kitchen_orders.router)
 app.include_router(owner_analytics.router)
