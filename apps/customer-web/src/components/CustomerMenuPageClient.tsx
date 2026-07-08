@@ -6,10 +6,13 @@ import {
   fetchMenu,
   fetchUpsell,
   createOrder,
+  OrderRequestError,
   EnrichedIngredient,
   EnrichedMenuResponse,
   UpsellSuggestion,
 } from "@/lib/api";
+import type { OrderCreateRequest } from "@sweetops/types";
+import { fingerprintOrder, orderIdempotency } from "@/lib/order-idempotency";
 
 const MAX_TOPPINGS = 6;
 const MAX_SAUCES = 2;
@@ -312,6 +315,9 @@ export default function CustomerMenuPageClient() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Synchronous double-click guard: React state updates are async, so a second
+  // click can fire before `submitting` re-renders. A ref blocks it immediately.
+  const submittingRef = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const upsellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -415,31 +421,57 @@ export default function CustomerMenuPageClient() {
 
   // Submit
   const handleSubmit = async () => {
+    // Hard double-click / re-entrancy guard (synchronous, not state-based).
+    if (submittingRef.current) return;
     if (selected.size === 0) {
       showToast("En az 1 malzeme seçmelisiniz");
       return;
     }
     if (!product) return;
 
+    // Build the logical order payload, then derive one idempotency key for it.
+    // A retry of the same selection reuses the key; any change mints a new one.
+    const payload: OrderCreateRequest = {
+      store_id: storeId,
+      table_id: tableId,
+      items: [
+        {
+          product_id: product.id,
+          quantity: 1,
+          ingredients: Array.from(selected).map((id) => ({
+            ingredient_id: id,
+            quantity: 1,
+          })),
+        },
+      ],
+    };
+    const idempotencyKey = orderIdempotency.getOrCreateKey(
+      fingerprintOrder(payload),
+    );
+
+    submittingRef.current = true;
     setSubmitting(true);
     try {
-      const res = await createOrder({
-        store_id: storeId,
-        table_id: tableId,
-        items: [
-          {
-            product_id: product.id,
-            quantity: 1,
-            ingredients: Array.from(selected).map((id) => ({
-              ingredient_id: id,
-              quantity: 1,
-            })),
-          },
-        ],
-      });
+      const res = await createOrder(payload, idempotencyKey);
+      // Confirmed success (new order OR the same order returned for this key):
+      // retire the attempt and reset the cart so it can never be resubmitted.
+      orderIdempotency.clear();
+      setSelected(new Set());
+      // Keep the button disabled through navigation — do not reset the guard.
       router.push(`/success?order_id=${res.order_id}&amount=${res.total_amount}`);
-    } catch {
-      showToast("Sipariş gönderilemedi. Tekrar deneyin.");
+    } catch (err) {
+      if (err instanceof OrderRequestError && err.isUncertain) {
+        // Network/server uncertainty: the order may already exist. Preserve the
+        // key and cart so a retry is safe and never duplicates.
+        showToast(
+          "Sipariş sonucu doğrulanamadı. Tekrar deneyebilirsin; siparişin iki kez oluşturulmayacak.",
+        );
+      } else {
+        // Deterministic rejection (e.g. out of stock): keep the cart so the
+        // customer can adjust; changing the selection generates a new key.
+        showToast("Sipariş oluşturulamadı. Lütfen seçimlerini kontrol et.");
+      }
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
