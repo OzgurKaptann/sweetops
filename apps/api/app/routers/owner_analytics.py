@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.core.db import get_db
+from app.core.deps import require_permission
+from app.core.permissions import PERM_OWNER_READ, PERM_OWNER_DECISIONS_WRITE
 from app.schemas.owner_analytics import (
     KPIsResponse, TopIngredientsResponse,
     HourlyDemandResponse, DailySalesResponse,
@@ -8,50 +10,70 @@ from app.schemas.owner_analytics import (
     OwnerDecision, OwnerDecisionsResponse, DecisionActionRequest,
 )
 from app.services import owner_analytics_service as service
+from app.services.auth_service import CurrentStaff
 from app.services.decision_engine import apply_decision_action, get_owner_decisions
+from app.services.inventory_guard import assert_single_operational_store
 from app.services.operational_context_service import compute_operational_context, context_to_dict
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock
 
 router = APIRouter(prefix="/owner", tags=["Owner Analytics"])
 
+
 @router.get("/kpis", response_model=KPIsResponse)
-def get_kpis(db: Session = Depends(get_db)):
-    return service.fetch_kpis(db)
+def get_kpis(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
+    return service.fetch_kpis(db, staff.store_id)
+
 
 @router.get("/top-ingredients", response_model=TopIngredientsResponse)
-def get_top_ingredients(db: Session = Depends(get_db)):
-    return service.fetch_top_ingredients(db, limit=5)
+def get_top_ingredients(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
+    return service.fetch_top_ingredients(db, staff.store_id, limit=5)
+
 
 @router.get("/hourly-demand", response_model=HourlyDemandResponse)
-def get_hourly_demand(db: Session = Depends(get_db)):
-    return service.fetch_hourly_demand(db)
+def get_hourly_demand(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
+    return service.fetch_hourly_demand(db, staff.store_id)
+
 
 @router.get("/daily-sales", response_model=DailySalesResponse)
-def get_daily_sales(db: Session = Depends(get_db)):
-    return service.fetch_daily_sales(db)
+def get_daily_sales(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
+    return service.fetch_daily_sales(db, staff.store_id)
+
 
 @router.get("/ingredient-forecast", response_model=IngredientForecastResponse)
-def get_ingredient_forecast(db: Session = Depends(get_db)):
-    return service.fetch_ingredient_forecast(db)
+def get_ingredient_forecast(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
+    return service.fetch_ingredient_forecast(db, staff.store_id)
 
 
 @router.get("/decisions/", response_model=OwnerDecisionsResponse)
-def get_decisions(db: Session = Depends(get_db)):
+def get_decisions(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
     """
-    Owner decision command centre.
+    Owner decision command centre for the authenticated store.
 
-    Returns actionable signals across five categories:
-      stock_risk      — velocity-based stockout prediction
-      demand_spike    — last-1h order rate vs 23h baseline
-      slow_moving     — ingredients with stock but no recent demand
-      sla_risk        — orders breaching SLA thresholds
-      revenue_anomaly — hourly revenue vs baseline
-
-    Results are sorted high → medium → low severity.
-    All computations use raw transactional data (no dbt dependency).
+    Order-derived signals (demand_spike, sla_risk, revenue_anomaly) are scoped
+    to the store. Inventory-derived signals (stock_risk, slow_moving) rely on
+    the global inventory tables and are only produced while a single operational
+    store exists (fail-closed otherwise).
     """
-    return get_owner_decisions(db)
+    return get_owner_decisions(db, staff.store_id)
 
 
 @router.patch("/decisions/{decision_id}", response_model=OwnerDecision)
@@ -59,25 +81,22 @@ def patch_decision(
     decision_id: str,
     body: DecisionActionRequest,
     db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_DECISIONS_WRITE)),
 ):
     """
     Transition a decision through its lifecycle.
 
-    Actions:
-      acknowledge — pending → acknowledged  (owner has seen it)
-      complete    — pending | acknowledged → completed  (action taken)
-      dismiss     — pending | acknowledged → dismissed  (owner chose to ignore)
-
-    Errors:
-      404 — decision not found
-      409 — invalid transition for current status
+    Store isolation: the decision must belong to the authenticated store or a
+    404 is returned. The lifecycle actor is the authenticated user — any
+    client-supplied actor_id in the body is ignored.
     """
     try:
         return apply_decision_action(
             db,
+            store_id=staff.store_id,
             decision_id=decision_id,
             action=body.action,
-            actor_id=body.actor_id,
+            actor_id=str(staff.user_id),
             resolution_note=body.resolution_note,
             resolution_quality=body.resolution_quality,
             estimated_revenue_saved=body.estimated_revenue_saved,
@@ -89,23 +108,28 @@ def patch_decision(
 
 
 @router.get("/operational-context")
-def get_operational_context(db: Session = Depends(get_db)):
-    """
-    Current operational mode derived from today's metrics.
-
-    Mode hierarchy (highest priority wins):
-      sla_critical      — sla_breach_rate > 35%: kitchen severely overloaded
-      high_kitchen_load — sla_breach_rate > 20% or avg_prep > 9min: reduce order complexity
-      boost_combos      — combo_usage_rate < 30% or upsell_acceptance < 15%: increase combo visibility
-      normal            — all metrics within expected thresholds
-    """
-    ctx = compute_operational_context(db)
+def get_operational_context(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
+    """Current operational mode derived from this store's metrics."""
+    ctx = compute_operational_context(db, store_id=staff.store_id)
     return context_to_dict(ctx)
 
 
 @router.get("/stock-status")
-def get_stock_status(db: Session = Depends(get_db)):
-    """Return stock status for all ingredients with severity levels."""
+def get_stock_status(
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+):
+    """
+    Return stock status for all ingredients with severity levels.
+
+    Inventory is global in the current schema, so this fails closed with a
+    Turkish error when more than one operational store exists.
+    """
+    assert_single_operational_store(db)
+
     stocks = db.query(
         Ingredient.id,
         Ingredient.name,

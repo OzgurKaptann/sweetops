@@ -516,11 +516,16 @@ def update_order_status(
     order_id: int,
     new_status: str,
     background_tasks: BackgroundTasks,
+    store_id: int | None = None,
     actor_type: str = "STAFF",
     actor_id: str | None = None,
 ) -> Order:
     """
     Transition an order to new_status.
+
+    Store isolation:
+      When store_id is provided, an order belonging to a different store is
+      treated as non-existent (404) so cross-store existence is not disclosed.
 
     Guards:
       - Terminal state → 409
@@ -531,6 +536,11 @@ def update_order_status(
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
+        raise HTTPException(status_code=404, detail="Order not found.")
+
+    # Non-disclosing cross-store guard: a Store-A user must not be able to
+    # distinguish "order belongs to Store B" from "order does not exist".
+    if store_id is not None and order.store_id != store_id:
         raise HTTPException(status_code=404, detail="Order not found.")
 
     old_status = order.status
@@ -619,6 +629,7 @@ def update_order_status(
 
     background_tasks.add_task(
         kitchen_ws_manager.broadcast_kitchen_event,
+        store_id=order.store_id,
         event="order_status_updated",
         data={
             "order_id": order.id,

@@ -1,6 +1,7 @@
 from .base import Base
 from .role import Role
 from .user import User
+from .auth_session import AuthSession
 from .store import Store
 from .table import Table
 from .table_qr_token import TableQrToken
@@ -19,6 +20,7 @@ __all__ = [
     "Base",
     "Role",
     "User",
+    "AuthSession",
     "Store",
     "Table",
     "TableQrToken",

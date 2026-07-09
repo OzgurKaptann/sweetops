@@ -19,18 +19,28 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import SessionLocal, engine
+from app.core.permissions import CANONICAL_ROLES
+from app.core.security import hash_password
 from app.main import app
+from app.models.auth_session import AuthSession
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_item_ingredient import OrderItemIngredient
 from app.models.order_status_event import OrderStatusEvent
+from app.models.owner_decision import OwnerDecision
+from app.models.role import Role
 from app.models.store import Store
 from app.models.table import Table
 from app.models.table_qr_token import TableQrToken
+from app.models.user import User
 from app.models.audit_log import AuditLog  # noqa — ensure registered
-from app.services import qr_token_service
+from app.services import auth_service, qr_token_service
+
+# Store id used by the legacy order path in the pre-existing test suite.
+DEFAULT_STORE_ID = 1
+DEFAULT_PASSWORD = "testpassw0rd"
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +318,134 @@ def qr_order_payload(
         ],
     }
     return payload, headers
+
+
+# ---------------------------------------------------------------------------
+# Staff auth fixtures
+# ---------------------------------------------------------------------------
+
+def _ensure_role(db: Session, name: str) -> Role:
+    role = db.query(Role).filter(Role.name == name).first()
+    if role is None:
+        role = Role(name=name)
+        db.add(role)
+        db.commit()
+        db.refresh(role)
+    return role
+
+
+@pytest.fixture()
+def ensure_roles(db: Session):
+    """Ensure the canonical staff roles exist (idempotent)."""
+    for name in CANONICAL_ROLES:
+        _ensure_role(db, name)
+    return CANONICAL_ROLES
+
+
+@pytest.fixture()
+def make_staff(db: Session):
+    """
+    Factory: create a staff User with a hashed password. Tracks created users
+    and sessions and cleans them up afterwards.
+    """
+    created_user_ids: list[int] = []
+
+    def _make(
+        role_name: str,
+        *,
+        store_id: int | None = DEFAULT_STORE_ID,
+        username: str | None = None,
+        password: str = DEFAULT_PASSWORD,
+        is_active: bool = True,
+    ) -> User:
+        role = _ensure_role(db, role_name)
+        uname = username if username is not None else f"user_{uuid.uuid4().hex[:10]}"
+        user = User(
+            username=uname,
+            password_hash=hash_password(password),
+            role_id=role.id,
+            store_id=store_id,
+            is_active=is_active,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        created_user_ids.append(user.id)
+        return user
+
+    yield _make
+
+    for uid in created_user_ids:
+        db.query(AuthSession).filter(AuthSession.user_id == uid).delete(synchronize_session=False)
+        db.query(User).filter(User.id == uid).delete(synchronize_session=False)
+    db.commit()
+
+
+def make_authed_client(db: Session, user: User) -> TestClient:
+    """
+    Build a TestClient carrying a valid session for `user`. The raw CSRF token is
+    preset as the default X-CSRF-Token header so state-changing calls pass the
+    double-submit check. Tests that exercise CSRF rejection craft their own.
+    """
+    _session, raw_token, raw_csrf = auth_service.create_session(db, user)
+    client = TestClient(app)
+    client.cookies.set(settings.SESSION_COOKIE_NAME, raw_token)
+    client.cookies.set(settings.CSRF_COOKIE_NAME, raw_csrf)
+    client.headers.update({"X-CSRF-Token": raw_csrf})
+    return client
+
+
+@pytest.fixture()
+def make_store(db: Session):
+    """
+    Factory: create an extra Store for multi-store isolation tests. On teardown
+    it removes everything anchored to that store (sessions, users, decisions,
+    order chain) so foreign keys never block cleanup.
+    """
+    created_ids: list[int] = []
+
+    def _make(name: str | None = None) -> Store:
+        store = Store(
+            name=name if name is not None else f"Store_{uuid.uuid4().hex[:8]}",
+            location="Test",
+        )
+        db.add(store)
+        db.commit()
+        db.refresh(store)
+        created_ids.append(store.id)
+        return store
+
+    yield _make
+
+    for sid in created_ids:
+        user_ids = [u.id for u in db.query(User).filter(User.store_id == sid).all()]
+        if user_ids:
+            db.query(AuthSession).filter(AuthSession.user_id.in_(user_ids)).delete(synchronize_session=False)
+            db.query(User).filter(User.id.in_(user_ids)).delete(synchronize_session=False)
+        db.query(OwnerDecision).filter(OwnerDecision.store_id == sid).delete(synchronize_session=False)
+        order_ids = [o.id for o in db.query(Order).filter(Order.store_id == sid).all()]
+        if order_ids:
+            oi_ids = [oi.id for oi in db.query(OrderItem).filter(OrderItem.order_id.in_(order_ids)).all()]
+            if oi_ids:
+                db.query(OrderItemIngredient).filter(
+                    OrderItemIngredient.order_item_id.in_(oi_ids)
+                ).delete(synchronize_session=False)
+                db.query(OrderItem).filter(OrderItem.id.in_(oi_ids)).delete(synchronize_session=False)
+            db.query(OrderStatusEvent).filter(
+                OrderStatusEvent.order_id.in_(order_ids)
+            ).delete(synchronize_session=False)
+            db.query(Order).filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+        db.query(Store).filter(Store.id == sid).delete(synchronize_session=False)
+    db.commit()
+
+
+@pytest.fixture()
+def owner_client(db: Session, make_staff) -> TestClient:
+    user = make_staff("OWNER", store_id=DEFAULT_STORE_ID)
+    return make_authed_client(db, user)
+
+
+@pytest.fixture()
+def kitchen_client(db: Session, make_staff) -> TestClient:
+    user = make_staff("KITCHEN", store_id=DEFAULT_STORE_ID)
+    return make_authed_client(db, user)

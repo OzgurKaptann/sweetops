@@ -58,7 +58,10 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
+from app.core.deps import require_permission
+from app.core.permissions import PERM_OWNER_READ
 from app.schemas.metrics import DailyMetricsResponse, MetricDictionaryResponse
+from app.services.auth_service import CurrentStaff
 from app.services.metrics_service import fetch_daily_metrics
 from app.services.metric_definitions import get_metric_dictionary
 
@@ -75,6 +78,7 @@ def get_metrics(
         example="2026-04-02",
     ),
     db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
 ) -> DailyMetricsResponse:
     """
     Measurement layer — four metric groups for one day.
@@ -112,7 +116,7 @@ def get_metrics(
         )
 
     try:
-        return fetch_daily_metrics(db, target_date)
+        return fetch_daily_metrics(db, target_date, store_id=staff.store_id)
     except OperationalError as exc:
         # DB is unreachable — not a metrics data issue, a real infrastructure failure
         logger.error("metrics DB unreachable: %s", exc)
@@ -138,7 +142,9 @@ def get_metrics(
 
 
 @router.get("/metrics/dictionary", response_model=MetricDictionaryResponse)
-def get_metrics_dictionary() -> MetricDictionaryResponse:
+def get_metrics_dictionary(
+    staff: CurrentStaff = Depends(require_permission(PERM_OWNER_READ)),
+) -> MetricDictionaryResponse:
     """
     Formal metric dictionary — definitions, calculations, edge cases, and
     decision implications for every metric in the measurement layer.

@@ -28,8 +28,8 @@ def create_order_and_get_id(client, ingredient_id: int) -> int:
     return r.json()["order_id"]
 
 
-def patch_status(client, order_id: int, status: str) -> "requests.Response":  # type: ignore[name-defined]
-    return client.patch(
+def patch_status(kitchen_client, order_id: int, status: str) -> "requests.Response":  # type: ignore[name-defined]
+    return kitchen_client.patch(
         f"/kitchen/orders/{order_id}/status",
         json={"status": status},
     )
@@ -37,56 +37,56 @@ def patch_status(client, order_id: int, status: str) -> "requests.Response":  # 
 
 class TestValidTransitions:
 
-    def test_new_to_in_prep(self, db, client):
+    def test_new_to_in_prep(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        r = patch_status(client, oid, "IN_PREP")
+        r = patch_status(kitchen_client, oid, "IN_PREP")
         assert r.status_code == 200
         assert r.json()["new_status"] == "IN_PREP"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_in_prep_to_ready(self, db, client):
+    def test_in_prep_to_ready(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        patch_status(client, oid, "IN_PREP")
-        r = patch_status(client, oid, "READY")
+        patch_status(kitchen_client, oid, "IN_PREP")
+        r = patch_status(kitchen_client, oid, "READY")
         assert r.status_code == 200
         assert r.json()["new_status"] == "READY"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_ready_to_delivered(self, db, client):
+    def test_ready_to_delivered(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        patch_status(client, oid, "IN_PREP")
-        patch_status(client, oid, "READY")
-        r = patch_status(client, oid, "DELIVERED")
+        patch_status(kitchen_client, oid, "IN_PREP")
+        patch_status(kitchen_client, oid, "READY")
+        r = patch_status(kitchen_client, oid, "DELIVERED")
         assert r.status_code == 200
         assert r.json()["new_status"] == "DELIVERED"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_new_to_cancelled(self, db, client):
+    def test_new_to_cancelled(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        r = patch_status(client, oid, "CANCELLED")
+        r = patch_status(kitchen_client, oid, "CANCELLED")
         assert r.status_code == 200
         assert r.json()["new_status"] == "CANCELLED"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_status_events_written_for_each_transition(self, db, client):
+    def test_status_events_written_for_each_transition(self, db, client, kitchen_client):
         """Every transition must produce an OrderStatusEvent record."""
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        patch_status(client, oid, "IN_PREP")
-        patch_status(client, oid, "READY")
+        patch_status(kitchen_client, oid, "IN_PREP")
+        patch_status(kitchen_client, oid, "READY")
 
         events = (
             db.query(OrderStatusEvent)
@@ -112,7 +112,7 @@ class TestInvalidTransitions:
         ("READY",   "NEW"),         # far backwards
         ("READY",   "IN_PREP"),     # backwards (undo handled separately)
     ])
-    def test_invalid_forward_transition_returns_409(self, db, client, from_status, to_status):
+    def test_invalid_forward_transition_returns_409(self, db, client, kitchen_client, from_status, to_status):
         """
         Backend must reject any skip or invalid forward transition with 409
         and a structured error body.
@@ -131,22 +131,22 @@ class TestInvalidTransitions:
             "READY": ["IN_PREP", "READY"],
         }
         for s in path.get(from_status, []):
-            patch_status(client, oid, s)
+            patch_status(kitchen_client, oid, s)
 
         # Expire the undo window so backward transitions fail via invalid_transition
         # (not undo_window_expired) — gives us the 409 we want
         if to_status in ("NEW", "IN_PREP") and from_status in ("IN_PREP", "READY"):
             _expire_undo_window(db, oid, from_status)
 
-        r = patch_status(client, oid, to_status)
+        r = patch_status(kitchen_client, oid, to_status)
         assert r.status_code in (409, 410), (
             f"{from_status}→{to_status} must be rejected. Got {r.status_code}: {r.json()}"
         )
 
         cleanup_ingredient(db, ing.id)
 
-    def test_unknown_order_returns_404(self, db, client):
-        r = patch_status(client, 999_999_999, "IN_PREP")
+    def test_unknown_order_returns_404(self, db, client, kitchen_client):
+        r = patch_status(kitchen_client, 999_999_999, "IN_PREP")
         assert r.status_code == 404
 
 
@@ -154,7 +154,7 @@ class TestTerminalStateImmutability:
 
     @pytest.mark.parametrize("terminal", ["DELIVERED", "CANCELLED"])
     @pytest.mark.parametrize("attempted", ["NEW", "IN_PREP", "READY", "DELIVERED", "CANCELLED"])
-    def test_terminal_state_rejects_all_transitions(self, db, client, terminal, attempted):
+    def test_terminal_state_rejects_all_transitions(self, db, client, kitchen_client, terminal, attempted):
         """
         Once in a terminal state, NO further transition is permitted.
         This covers all 10 combinations (2 terminals × 5 attempted statuses).
@@ -164,13 +164,13 @@ class TestTerminalStateImmutability:
 
         # Reach terminal state
         if terminal == "DELIVERED":
-            patch_status(client, oid, "IN_PREP")
-            patch_status(client, oid, "READY")
-            patch_status(client, oid, "DELIVERED")
+            patch_status(kitchen_client, oid, "IN_PREP")
+            patch_status(kitchen_client, oid, "READY")
+            patch_status(kitchen_client, oid, "DELIVERED")
         else:  # CANCELLED
-            patch_status(client, oid, "CANCELLED")
+            patch_status(kitchen_client, oid, "CANCELLED")
 
-        r = patch_status(client, oid, attempted)
+        r = patch_status(kitchen_client, oid, attempted)
         assert r.status_code == 409, (
             f"Terminal {terminal} must reject {attempted}. Got {r.status_code}: {r.json()}"
         )
@@ -181,34 +181,34 @@ class TestTerminalStateImmutability:
 
 class TestUndoWindow:
 
-    def test_undo_in_prep_within_window(self, db, client):
+    def test_undo_in_prep_within_window(self, db, client, kitchen_client):
         """IN_PREP → NEW must succeed immediately (within window)."""
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        patch_status(client, oid, "IN_PREP")
-        r = patch_status(client, oid, "NEW")
+        patch_status(kitchen_client, oid, "IN_PREP")
+        r = patch_status(kitchen_client, oid, "NEW")
 
         assert r.status_code == 200, f"Undo must succeed within window. Got: {r.json()}"
         assert r.json()["new_status"] == "NEW"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_undo_ready_within_window(self, db, client):
+    def test_undo_ready_within_window(self, db, client, kitchen_client):
         """READY → IN_PREP must succeed immediately (within window)."""
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        patch_status(client, oid, "IN_PREP")
-        patch_status(client, oid, "READY")
-        r = patch_status(client, oid, "IN_PREP")
+        patch_status(kitchen_client, oid, "IN_PREP")
+        patch_status(kitchen_client, oid, "READY")
+        r = patch_status(kitchen_client, oid, "IN_PREP")
 
         assert r.status_code == 200, f"Undo must succeed within window. Got: {r.json()}"
         assert r.json()["new_status"] == "IN_PREP"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_undo_expires_after_window(self, db, client):
+    def test_undo_expires_after_window(self, db, client, kitchen_client):
         """
         Undo must be rejected with 410 after UNDO_WINDOW_SECONDS.
         We manipulate the OrderStatusEvent.created_at to simulate elapsed time
@@ -217,12 +217,12 @@ class TestUndoWindow:
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        patch_status(client, oid, "IN_PREP")
+        patch_status(kitchen_client, oid, "IN_PREP")
 
         # Backdate the IN_PREP event by 61 seconds
         _expire_undo_window(db, oid, "IN_PREP")
 
-        r = patch_status(client, oid, "NEW")
+        r = patch_status(kitchen_client, oid, "NEW")
 
         assert r.status_code == 410, (
             f"Undo must be rejected with 410 after window. Got {r.status_code}: {r.json()}"
@@ -231,16 +231,16 @@ class TestUndoWindow:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_undo_after_window_leaves_order_in_original_state(self, db, client):
+    def test_undo_after_window_leaves_order_in_original_state(self, db, client, kitchen_client):
         """If undo is rejected, the order must remain in the current state."""
         from app.models.order import Order
 
         ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
-        patch_status(client, oid, "IN_PREP")
+        patch_status(kitchen_client, oid, "IN_PREP")
         _expire_undo_window(db, oid, "IN_PREP")
-        patch_status(client, oid, "NEW")  # will fail with 410
+        patch_status(kitchen_client, oid, "NEW")  # will fail with 410
 
         db.expire_all()
         order = db.query(Order).filter_by(id=oid).first()
@@ -253,7 +253,7 @@ class TestUndoWindow:
 
 class TestCancellationStockReturn:
 
-    def test_cancellation_returns_stock_once(self, db, client):
+    def test_cancellation_returns_stock_once(self, db, client, kitchen_client):
         """
         Cancelling an order must return stock to exactly the original level.
         """
@@ -274,7 +274,7 @@ class TestCancellationStockReturn:
         assert after_order.stock_quantity == initial - Decimal("10.00")
 
         # Cancel the order
-        r = patch_status(client, oid, "CANCELLED")
+        r = patch_status(kitchen_client, oid, "CANCELLED")
         assert r.status_code == 200
 
         db.expire_all()
@@ -285,7 +285,7 @@ class TestCancellationStockReturn:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_cancelled_order_cannot_be_cancelled_again(self, db, client):
+    def test_cancelled_order_cannot_be_cancelled_again(self, db, client, kitchen_client):
         """
         CANCELLED is a terminal state — a second cancellation must return 409.
         Stock must not be double-returned.
@@ -302,14 +302,14 @@ class TestCancellationStockReturn:
         oid = create_order_and_get_id(client, ing.id)
 
         # First cancellation — succeeds
-        patch_status(client, oid, "CANCELLED")
+        patch_status(kitchen_client, oid, "CANCELLED")
 
         db.expire_all()
         after_first_cancel = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
         assert after_first_cancel.stock_quantity == initial
 
         # Second cancellation — must be rejected
-        r2 = patch_status(client, oid, "CANCELLED")
+        r2 = patch_status(kitchen_client, oid, "CANCELLED")
         assert r2.status_code == 409
         assert r2.json()["detail"]["error"] == "terminal_state"
 
@@ -322,7 +322,7 @@ class TestCancellationStockReturn:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_in_prep_cancellation_returns_stock(self, db, client):
+    def test_in_prep_cancellation_returns_stock(self, db, client, kitchen_client):
         """
         An order that reached IN_PREP before being cancelled must also
         have its stock returned (stock was deducted at creation).
@@ -337,9 +337,9 @@ class TestCancellationStockReturn:
         )
 
         oid = create_order_and_get_id(client, ing.id)
-        patch_status(client, oid, "IN_PREP")
+        patch_status(kitchen_client, oid, "IN_PREP")
 
-        r = patch_status(client, oid, "CANCELLED")
+        r = patch_status(kitchen_client, oid, "CANCELLED")
         assert r.status_code == 200
 
         db.expire_all()
@@ -350,7 +350,7 @@ class TestCancellationStockReturn:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_cancellation_return_movement_recorded(self, db, client):
+    def test_cancellation_return_movement_recorded(self, db, client, kitchen_client):
         """
         A CANCELLATION_RETURN movement must exist after cancel.
         Exactly one — not zero, not two.
@@ -364,7 +364,7 @@ class TestCancellationStockReturn:
         )
 
         oid = create_order_and_get_id(client, ing.id)
-        patch_status(client, oid, "CANCELLED")
+        patch_status(kitchen_client, oid, "CANCELLED")
 
         returns = (
             db.query(IngredientStockMovement)

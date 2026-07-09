@@ -150,9 +150,26 @@ def _trend(
     )
 
 
+# ── Store-scope helpers ───────────────────────────────────────────────────────
+
+def _store_and(store_id: Optional[int], alias: str = "o") -> str:
+    """SQL fragment restricting to a store, or empty for the global (single-store
+    public operational-context) case."""
+    return f" AND {alias}.store_id = :store_id" if store_id is not None else ""
+
+
+def _params(target_date: date, store_id: Optional[int], **extra) -> dict:
+    p: dict = {"target_date": str(target_date), **extra}
+    if store_id is not None:
+        p["store_id"] = store_id
+    return p
+
+
 # ── Conversion ────────────────────────────────────────────────────────────────
 
-_CONVERSION_SQL = text("""
+def _conversion_sql(store_id: Optional[int]):
+    s = _store_and(store_id, "o")
+    return text(f"""
 WITH item_ing_counts AS (
     -- count distinct ingredients per order_item for the target date
     SELECT
@@ -163,7 +180,7 @@ WITH item_ing_counts AS (
     JOIN order_items oi ON oi.id = oii.order_item_id
     JOIN orders o        ON o.id  = oi.order_id
     WHERE o.created_at::date = :target_date
-      AND o.status <> 'CANCELLED'
+      AND o.status <> 'CANCELLED'{s}
     GROUP BY oi.order_id, oii.order_item_id
 ),
 order_combo_flag AS (
@@ -180,7 +197,7 @@ order_totals AS (
     FROM orders o
     LEFT JOIN order_combo_flag cf ON cf.order_id = o.id
     WHERE o.created_at::date = :target_date
-      AND o.status <> 'CANCELLED'
+      AND o.status <> 'CANCELLED'{s}
 ),
 item_level AS (
     -- item-level for upsell_acceptance_rate
@@ -202,9 +219,11 @@ FROM order_totals
 """)
 
 
-def _fetch_conversion_raw(db: Session, target_date: date) -> dict:
+def _fetch_conversion_raw(db: Session, target_date: date, store_id: Optional[int]) -> dict:
     try:
-        row = db.execute(_CONVERSION_SQL, {"target_date": str(target_date)}).fetchone()
+        row = db.execute(
+            _conversion_sql(store_id), _params(target_date, store_id)
+        ).fetchone()
     except Exception:
         logger.exception("conversion query failed for %s", target_date)
         return _empty_conversion()
@@ -237,9 +256,10 @@ def _compute_conversion(
     target: date,
     prev: date,
     errors: list[str],
+    store_id: Optional[int],
 ) -> ConversionMetrics:
-    cur = _fetch_conversion_raw(db, target)
-    prv = _fetch_conversion_raw(db, prev)
+    cur = _fetch_conversion_raw(db, target, store_id)
+    prv = _fetch_conversion_raw(db, prev, store_id)
 
     if not cur["ok"]:
         errors.append(f"conversion: query failed for {target}")
@@ -288,7 +308,9 @@ def _compute_conversion(
 
 # ── Decisions ─────────────────────────────────────────────────────────────────
 
-_DECISION_SQL = text("""
+def _decision_sql(store_id: Optional[int]):
+    s = " AND store_id = :store_id" if store_id is not None else ""
+    return text(f"""
 SELECT
     COUNT(*) FILTER (
         WHERE acknowledged_at::date = :target_date
@@ -301,15 +323,17 @@ SELECT
           AND updated_at::date = :target_date
     )                                             AS dismissed
 FROM owner_decisions
-WHERE acknowledged_at::date    = :target_date
+WHERE (acknowledged_at::date    = :target_date
    OR completed_at::date        = :target_date
-   OR (status = 'dismissed' AND updated_at::date = :target_date)
+   OR (status = 'dismissed' AND updated_at::date = :target_date)){s}
 """)
 
 
-def _fetch_decision_raw(db: Session, target_date: date) -> dict:
+def _fetch_decision_raw(db: Session, target_date: date, store_id: Optional[int]) -> dict:
     try:
-        row = db.execute(_DECISION_SQL, {"target_date": str(target_date)}).fetchone()
+        row = db.execute(
+            _decision_sql(store_id), _params(target_date, store_id)
+        ).fetchone()
     except Exception:
         logger.exception("decision query failed for %s", target_date)
         return {"acknowledged": 0, "completed": 0, "dismissed": 0, "ok": False}
@@ -325,9 +349,10 @@ def _compute_decisions(
     target: date,
     prev: date,
     errors: list[str],
+    store_id: Optional[int],
 ) -> DecisionMetrics:
-    cur = _fetch_decision_raw(db, target)
-    prv = _fetch_decision_raw(db, prev)
+    cur = _fetch_decision_raw(db, target, store_id)
+    prv = _fetch_decision_raw(db, prev, store_id)
 
     if not cur["ok"]:
         errors.append(f"decisions: query failed for {target}")
@@ -359,7 +384,9 @@ def _compute_decisions(
 
 # ── Kitchen ───────────────────────────────────────────────────────────────────
 
-_KITCHEN_SQL = text("""
+def _kitchen_sql(store_id: Optional[int]):
+    s = _store_and(store_id, "o")
+    return text(f"""
 WITH ready_events AS (
     -- first READY event per order
     SELECT order_id, MIN(created_at) AS ready_at
@@ -376,7 +403,7 @@ prep_times AS (
     FROM orders o
     JOIN ready_events re ON re.order_id = o.id
     WHERE o.created_at::date = :target_date
-      AND o.status NOT IN ('NEW', 'IN_PREP', 'CANCELLED')
+      AND o.status NOT IN ('NEW', 'IN_PREP', 'CANCELLED'){s}
 )
 SELECT
     COUNT(*)                                                          AS n,
@@ -394,12 +421,12 @@ FROM prep_times
 """)
 
 
-def _fetch_kitchen_raw(db: Session, target_date: date) -> dict:
+def _fetch_kitchen_raw(db: Session, target_date: date, store_id: Optional[int]) -> dict:
     try:
-        row = db.execute(_KITCHEN_SQL, {
-            "target_date": str(target_date),
-            "sla_threshold": SLA_THRESHOLD_MINUTES,
-        }).fetchone()
+        row = db.execute(
+            _kitchen_sql(store_id),
+            _params(target_date, store_id, sla_threshold=SLA_THRESHOLD_MINUTES),
+        ).fetchone()
     except Exception:
         logger.exception("kitchen query failed for %s", target_date)
         return {"n": 0, "avg": 0.0, "p90": 0.0, "breach": 0.0, "ok": False}
@@ -418,9 +445,10 @@ def _compute_kitchen(
     target: date,
     prev: date,
     errors: list[str],
+    store_id: Optional[int],
 ) -> KitchenMetrics:
-    cur = _fetch_kitchen_raw(db, target)
-    prv = _fetch_kitchen_raw(db, prev)
+    cur = _fetch_kitchen_raw(db, target, store_id)
+    prv = _fetch_kitchen_raw(db, prev, store_id)
 
     if not cur["ok"]:
         errors.append(f"kitchen: query failed for {target}")
@@ -449,7 +477,9 @@ def _compute_kitchen(
 
 # ── Revenue Protection ────────────────────────────────────────────────────────
 
-_REVPROT_SQL = text("""
+def _revprot_sql(store_id: Optional[int]):
+    s = " AND store_id = :store_id" if store_id is not None else ""
+    return text(f"""
 SELECT
     -- triggered today (new signals)
     COUNT(*) FILTER (
@@ -494,7 +524,7 @@ WHERE type = 'stock_risk'
   AND (
       created_at::date = :target_date
       OR (status = 'completed' AND completed_at::date = :target_date)
-  )
+  ){s}
 """)
 
 
@@ -502,9 +532,12 @@ def _compute_revenue_protection(
     db: Session,
     target: date,
     errors: list[str],
+    store_id: Optional[int],
 ) -> RevenueProtectionMetrics:
     try:
-        row = db.execute(_REVPROT_SQL, {"target_date": str(target)}).fetchone()
+        row = db.execute(
+            _revprot_sql(store_id), _params(target, store_id)
+        ).fetchone()
     except Exception:
         logger.exception("revenue_protection query failed for %s", target)
         errors.append(f"revenue_protection: query failed for {target}")
@@ -609,9 +642,16 @@ def _run_consistency_checks(
 def fetch_daily_metrics(
     db: Session,
     target_date: Optional[date] = None,
+    store_id: Optional[int] = None,
 ) -> DailyMetricsResponse:
     """
     Return all four metric groups for target_date (defaults to today UTC).
+
+    Store scoping:
+      When store_id is provided every order-derived and decision-derived metric
+      is filtered to that store. store_id=None computes globally and is used
+      only by the public operational-context path under the single-store
+      inventory assumption.
 
     Always returns a complete DailyMetricsResponse.
     Non-fatal errors are captured in meta.errors — never raises for data issues.
@@ -623,10 +663,10 @@ def fetch_daily_metrics(
     errors: list[str] = []
     t_start = time.monotonic()
 
-    conversion        = _compute_conversion(db, target_date, prev_date, errors)
-    decisions         = _compute_decisions(db, target_date, prev_date, errors)
-    kitchen           = _compute_kitchen(db, target_date, prev_date, errors)
-    revenue_protection = _compute_revenue_protection(db, target_date, errors)
+    conversion        = _compute_conversion(db, target_date, prev_date, errors, store_id)
+    decisions         = _compute_decisions(db, target_date, prev_date, errors, store_id)
+    kitchen           = _compute_kitchen(db, target_date, prev_date, errors, store_id)
+    revenue_protection = _compute_revenue_protection(db, target_date, errors, store_id)
 
     computed_at = _now_utc()
     computation_ms = int((time.monotonic() - t_start) * 1000)

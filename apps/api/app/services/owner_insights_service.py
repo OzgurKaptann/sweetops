@@ -15,10 +15,13 @@ from app.models.ingredient_stock import IngredientStock
 from app.models.order_status_event import OrderStatusEvent
 
 
-def fetch_critical_alerts(db: Session):
+def fetch_critical_alerts(db: Session, store_id: int):
     """
     Low stock alerts with estimated lost revenue.
     If an ingredient runs out, how much ₺/day does the owner lose?
+
+    Demand is derived from this store's orders; stock levels come from the
+    global inventory tables (see inventory_guard fail-closed rule).
     """
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
@@ -41,10 +44,11 @@ def fetch_critical_alerts(db: Session):
         JOIN ingredients i ON oi.ingredient_id = i.id
         LEFT JOIN ingredient_stock s ON s.ingredient_id = i.id
         WHERE o.created_at >= :since
+          AND o.store_id = :store_id
           AND o.status IN ('DELIVERED', 'READY', 'IN_PREP', 'NEW')
         GROUP BY oi.ingredient_id, i.name, i.category, i.unit, s.stock_quantity, s.reorder_level
         ORDER BY stock_qty ASC
-    """), {"since": seven_days_ago}).fetchall()
+    """), {"since": seven_days_ago, "store_id": store_id}).fetchall()
 
     alerts = []
     for row in daily_stats:
@@ -111,9 +115,10 @@ def fetch_critical_alerts(db: Session):
     }
 
 
-def fetch_prep_time_stats(db: Session):
+def fetch_prep_time_stats(db: Session, store_id: int):
     """
-    Calculate average prep time from IN_PREP → READY status transitions.
+    Calculate average prep time from IN_PREP → READY status transitions,
+    scoped to this store's orders.
     """
     # Get pairs of IN_PREP and READY events for the same order
     prep_events = db.execute(text("""
@@ -124,12 +129,14 @@ def fetch_prep_time_stats(db: Session):
             EXTRACT(EPOCH FROM (e2.created_at - e1.created_at)) as prep_seconds
         FROM order_status_events e1
         JOIN order_status_events e2 ON e1.order_id = e2.order_id
+        JOIN orders o ON o.id = e1.order_id
         WHERE e1.status_to = 'IN_PREP'
           AND e2.status_to = 'READY'
           AND e2.created_at > e1.created_at
+          AND o.store_id = :store_id
         ORDER BY e2.created_at DESC
         LIMIT 50
-    """)).fetchall()
+    """), {"store_id": store_id}).fetchall()
 
     if not prep_events:
         return {
@@ -175,9 +182,9 @@ def fetch_prep_time_stats(db: Session):
     }
 
 
-def fetch_trending_ingredients(db: Session):
+def fetch_trending_ingredients(db: Session, store_id: int):
     """
-    Compare this week vs last week ingredient usage.
+    Compare this week vs last week ingredient usage for this store.
     """
     now = datetime.now(timezone.utc)
     this_week_start = now - timedelta(days=7)
@@ -195,8 +202,9 @@ def fetch_trending_ingredients(db: Session):
             JOIN orders o ON it.order_id = o.id
             JOIN ingredients i ON oi.ingredient_id = i.id
             WHERE o.created_at >= :start AND o.created_at < :end
+              AND o.store_id = :store_id
             GROUP BY oi.ingredient_id, i.name, i.category
-        """), {"start": start, "end": end}).fetchall()
+        """), {"start": start, "end": end, "store_id": store_id}).fetchall()
         return {row[0]: {"name": row[1], "category": row[2], "count": int(row[3])} for row in rows}
 
     this_week = usage_in_range(this_week_start, now)
@@ -254,9 +262,9 @@ def fetch_trending_ingredients(db: Session):
     }
 
 
-def fetch_popular_combinations(db: Session, limit: int = 5):
+def fetch_popular_combinations(db: Session, store_id: int, limit: int = 5):
     """
-    Find which ingredient pairs are most commonly ordered together.
+    Find which ingredient pairs are most commonly ordered together in this store.
     """
     # Self-join order_item_ingredients to find co-occurring pairs within the same order_item
     combos = db.execute(text("""
@@ -268,13 +276,16 @@ def fetch_popular_combinations(db: Session, limit: int = 5):
         JOIN order_item_ingredients oi2
             ON oi1.order_item_id = oi2.order_item_id
             AND oi1.ingredient_id < oi2.ingredient_id
+        JOIN order_items it ON oi1.order_item_id = it.id
+        JOIN orders o ON it.order_id = o.id
         JOIN ingredients i1 ON oi1.ingredient_id = i1.id
         JOIN ingredients i2 ON oi2.ingredient_id = i2.id
+        WHERE o.store_id = :store_id
         GROUP BY i1.name, i2.name
         HAVING COUNT(*) >= 2
         ORDER BY combo_count DESC
         LIMIT :limit
-    """), {"limit": limit}).fetchall()
+    """), {"limit": limit, "store_id": store_id}).fetchall()
 
     pairs = []
     for row in combos:
@@ -295,14 +306,17 @@ def fetch_popular_combinations(db: Session, limit: int = 5):
             ON oi1.order_item_id = oi2.order_item_id AND oi1.ingredient_id < oi2.ingredient_id
         JOIN order_item_ingredients oi3
             ON oi1.order_item_id = oi3.order_item_id AND oi2.ingredient_id < oi3.ingredient_id
+        JOIN order_items it ON oi1.order_item_id = it.id
+        JOIN orders o ON it.order_id = o.id
         JOIN ingredients i1 ON oi1.ingredient_id = i1.id
         JOIN ingredients i2 ON oi2.ingredient_id = i2.id
         JOIN ingredients i3 ON oi3.ingredient_id = i3.id
+        WHERE o.store_id = :store_id
         GROUP BY i1.name, i2.name, i3.name
         HAVING COUNT(*) >= 2
         ORDER BY combo_count DESC
         LIMIT 3
-    """)).fetchall()
+    """), {"store_id": store_id}).fetchall()
 
     top_triples = []
     for row in triples:
@@ -318,10 +332,10 @@ def fetch_popular_combinations(db: Session, limit: int = 5):
     }
 
 
-def fetch_value_summary(db: Session):
+def fetch_value_summary(db: Session, store_id: int):
     """
     One-screen value proof for the owner.
-    Shows ₺ protected, ₺ at risk, and top insights.
+    Shows ₺ protected, ₺ at risk, and top insights — scoped to this store.
     """
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
@@ -334,8 +348,9 @@ def fetch_value_summary(db: Session):
             COALESCE(SUM(total_amount), 0) as revenue
         FROM orders
         WHERE created_at >= :since
+          AND store_id = :store_id
           AND status IN ('DELIVERED', 'READY', 'IN_PREP', 'NEW')
-    """), {"since": seven_days_ago}).fetchone()
+    """), {"since": seven_days_ago, "store_id": store_id}).fetchone()
 
     this_week_orders = int(rev_result[0]) if rev_result else 0
     this_week_revenue = float(rev_result[1]) if rev_result else 0
@@ -345,8 +360,9 @@ def fetch_value_summary(db: Session):
         SELECT COALESCE(SUM(total_amount), 0)
         FROM orders
         WHERE created_at >= :start AND created_at < :end
+          AND store_id = :store_id
           AND status IN ('DELIVERED', 'READY', 'IN_PREP', 'NEW')
-    """), {"start": fourteen_days_ago, "end": seven_days_ago}).fetchone()
+    """), {"start": fourteen_days_ago, "end": seven_days_ago, "store_id": store_id}).fetchone()
 
     last_week_revenue = float(last_rev[0]) if last_rev else 0
 
@@ -355,7 +371,7 @@ def fetch_value_summary(db: Session):
         revenue_change_pct = ((this_week_revenue - last_week_revenue) / last_week_revenue) * 100
 
     # === Stock risk (₺ at risk per day) ===
-    alerts_data = fetch_critical_alerts(db)
+    alerts_data = fetch_critical_alerts(db, store_id)
     daily_risk = alerts_data["total_daily_risk"]
     weekly_risk = daily_risk * 7
 
@@ -365,16 +381,16 @@ def fetch_value_summary(db: Session):
     prevented_estimate = daily_risk * 2  # "2 days of risk avoided this week"
 
     # === Prep time ===
-    prep_data = fetch_prep_time_stats(db)
+    prep_data = fetch_prep_time_stats(db, store_id)
     avg_prep = prep_data.get("avg_prep_display", "—")
 
     # === Top trending ===
-    trend_data = fetch_trending_ingredients(db)
+    trend_data = fetch_trending_ingredients(db, store_id)
     top_rising_name = trend_data["top_rising"][0]["ingredient_name"] if trend_data["top_rising"] else None
     top_rising_pct = trend_data["top_rising"][0]["change_pct"] if trend_data["top_rising"] else 0
 
     # === Top combo ===
-    combo_data = fetch_popular_combinations(db, limit=1)
+    combo_data = fetch_popular_combinations(db, store_id, limit=1)
     top_combo = combo_data["top_pairs"][0]["display"] if combo_data["top_pairs"] else None
 
     # === Build value items ===

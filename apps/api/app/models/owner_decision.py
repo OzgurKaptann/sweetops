@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, Float, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 
@@ -13,12 +13,23 @@ class OwnerDecision(Base):
     lifecycle transitions (status, actor_id, timestamps), and cooldown resets.
 
     The decision_id is the stable natural key emitted by the signal functions
-    (e.g. "stock_risk_42", "sla_risk_current").  It is the PK so that upserts
-    use a simple ON CONFLICT (decision_id) DO UPDATE pattern via SQLAlchemy.
+    (e.g. "stock_risk_42", "sla_risk_current"). Because the same natural key can
+    legitimately recur in different stores, the primary key is COMPOSITE
+    (store_id, decision_id): decisions never collide across stores and every
+    lookup/mutation is scoped to the authenticated store.
     """
     __tablename__ = "owner_decisions"
 
-    # Natural / stable key — also the primary key
+    # Store scope — part of the composite primary key.
+    store_id = Column(
+        Integer,
+        ForeignKey("stores.id"),
+        primary_key=True,
+        nullable=False,
+        index=True,
+    )
+
+    # Natural / stable key — second half of the composite primary key.
     decision_id = Column(String(128), primary_key=True, nullable=False)
 
     # Signal classification

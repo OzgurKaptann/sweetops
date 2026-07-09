@@ -2,12 +2,23 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchKitchenOrders, updateOrderStatus } from "@/lib/api";
+import { UnauthorizedError } from "@/lib/auth";
+import AuthGate, { useAuth } from "@/components/AuthGate";
 import { KitchenOrder } from "@sweetops/types";
 
 // Connection States
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 
-export default function KitchenDashboard() {
+export default function KitchenPage() {
+  return (
+    <AuthGate>
+      <KitchenDashboard />
+    </AuthGate>
+  );
+}
+
+function KitchenDashboard() {
+  const { user, logout, reportUnauthorized } = useAuth();
   const [orders, setOrders] = useState<KitchenOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -21,12 +32,16 @@ export default function KitchenDashboard() {
       setOrders(data);
       setError(false);
     } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        reportUnauthorized();
+        return;
+      }
       console.error("Failed to fetch kitchen orders:", err);
       setError(true);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [reportUnauthorized]);
 
   // Connect WebSocket
   useEffect(() => {
@@ -109,6 +124,10 @@ export default function KitchenDashboard() {
     try {
       await updateOrderStatus(orderId, nextStatus);
     } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          reportUnauthorized();
+          return;
+        }
         alert("Güncelleme sırasında hata oluştu.");
     }
   };
@@ -134,7 +153,7 @@ export default function KitchenDashboard() {
         <div className="flex items-center gap-4">
             {getConnectionBadge()}
             {connectionState !== 'connected' && (
-                <button 
+                <button
                   onClick={loadOrders}
                   className="px-3 py-1 bg-blue-50 text-blue-600 rounded text-sm hover:bg-blue-100 transition-colors"
                 >
@@ -142,6 +161,17 @@ export default function KitchenDashboard() {
 
                 </button>
             )}
+            {user && (
+              <span className="text-sm text-gray-500 hidden sm:inline">
+                {user.username}
+              </span>
+            )}
+            <button
+              onClick={logout}
+              className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-sm hover:bg-gray-200 transition-colors"
+            >
+              Çıkış Yap
+            </button>
         </div>
       </header>
 

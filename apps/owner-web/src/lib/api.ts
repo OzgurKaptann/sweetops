@@ -1,4 +1,5 @@
 // Types are defined locally in this file
+import { UnauthorizedError, csrfHeaders } from './auth';
 
 // ── Decision Engine ──────────────────────────────────────────────────────────
 
@@ -141,19 +142,22 @@ export interface HourlyDemandData {
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 export async function fetchKPIs(): Promise<DashboardKPIs> {
-  const res = await fetch(`${API_BASE}/owner/kpis`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/kpis`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
 
 export async function fetchTopIngredients(): Promise<TopIngredientsData> {
-  const res = await fetch(`${API_BASE}/owner/top-ingredients`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/top-ingredients`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
 
 export async function fetchHourlyDemand(): Promise<HourlyDemandData> {
-  const res = await fetch(`${API_BASE}/owner/hourly-demand`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/hourly-demand`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
@@ -175,7 +179,8 @@ export interface IngredientForecastData {
 }
 
 export async function fetchIngredientForecast(): Promise<IngredientForecastData> {
-  const res = await fetch(`${API_BASE}/owner/ingredient-forecast`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/ingredient-forecast`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
@@ -199,7 +204,8 @@ export interface StockStatusData {
 }
 
 export async function fetchStockStatus(): Promise<StockStatusData> {
-  const res = await fetch(`${API_BASE}/owner/stock-status`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/stock-status`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
@@ -207,31 +213,36 @@ export async function fetchStockStatus(): Promise<StockStatusData> {
 // --- Owner Insights ---
 
 export async function fetchCriticalAlerts(): Promise<any> {
-  const res = await fetch(`${API_BASE}/owner/insights/critical-alerts`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/insights/critical-alerts`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
 
 export async function fetchPrepTime(): Promise<any> {
-  const res = await fetch(`${API_BASE}/owner/insights/prep-time`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/insights/prep-time`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
 
 export async function fetchTrendingIngredients(): Promise<any> {
-  const res = await fetch(`${API_BASE}/owner/insights/trending-ingredients`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/insights/trending-ingredients`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
 
 export async function fetchPopularCombos(): Promise<any> {
-  const res = await fetch(`${API_BASE}/owner/insights/popular-combos`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/insights/popular-combos`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
 
 export async function fetchValueSummary(): Promise<any> {
-  const res = await fetch(`${API_BASE}/owner/insights/value-summary`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/insights/value-summary`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
@@ -248,7 +259,8 @@ export interface DailySalesData {
 }
 
 export async function fetchDailySales(): Promise<DailySalesData> {
-  const res = await fetch(`${API_BASE}/owner/daily-sales`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/daily-sales`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
@@ -333,7 +345,7 @@ export async function fetchMetrics(targetDate?: string): Promise<DailyMetricsDat
   const url = targetDate
     ? `${API_BASE}/owner/metrics/?date=${targetDate}`
     : `${API_BASE}/owner/metrics/`;
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetch(url, { cache: "no-store", credentials: "include" });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
     throw Object.assign(new Error("Metrics API Error"), {
@@ -345,7 +357,7 @@ export async function fetchMetrics(targetDate?: string): Promise<DailyMetricsDat
 }
 
 export async function fetchMetricDictionary(): Promise<MetricDictionaryData> {
-  const res = await fetch(`${API_BASE}/owner/metrics/dictionary`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}/owner/metrics/dictionary`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error("Metric dictionary unavailable");
   return res.json();
 }
@@ -384,7 +396,7 @@ export interface OperationalContextData {
 }
 
 export async function fetchOperationalContext(): Promise<OperationalContextData> {
-  const res = await fetch(`${API_BASE}/owner/operational-context`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}/owner/operational-context`, { cache: "no-store", credentials: "include" });
   if (!res.ok) throw new Error("Operational context unavailable");
   return res.json();
 }
@@ -448,12 +460,12 @@ export interface StatusUpdateResponse {
   updated_at: string;
 }
 
-export async function fetchKitchenOrders(
-  storeId = 1,
-): Promise<KitchenDashboardResponse> {
-  const res = await fetch(`${API_BASE}/kitchen/orders/?store_id=${storeId}`, {
+export async function fetchKitchenOrders(): Promise<KitchenDashboardResponse> {
+  const res = await fetch(`${API_BASE}/kitchen/orders/`, {
     cache: "no-store",
+    credentials: "include",
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error("Kitchen API Error");
   return res.json();
 }
@@ -461,23 +473,27 @@ export async function fetchKitchenOrders(
 export async function patchOrderStatus(
   orderId: number,
   status: OrderStatus,
-  actorId?: string,
 ): Promise<StatusUpdateResponse> {
+  // The audit actor is derived from the authenticated session server-side.
+  // The client no longer sends any actor identity (X-Actor-Id is not trusted).
   const res = await fetch(`${API_BASE}/kitchen/orders/${orderId}/status`, {
     method: "PATCH",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(actorId ? { "X-Actor-Id": actorId } : {}),
+      ...csrfHeaders(),
     },
     body: JSON.stringify({ status }),
     cache: "no-store",
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error("Status update failed");
   return res.json();
 }
 
 export async function fetchDecisions(): Promise<OwnerDecisionsResponse> {
-  const res = await fetch(`${API_BASE}/owner/decisions/`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/owner/decisions/`, { cache: 'no-store', credentials: 'include' });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error('API Error');
   return res.json();
 }
@@ -497,10 +513,12 @@ export async function patchDecision(
   if (estimatedRevenueSaved !== undefined) body.estimated_revenue_saved = estimatedRevenueSaved;
   const res = await fetch(`${API_BASE}/owner/decisions/${decisionId}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...csrfHeaders() },
     body: JSON.stringify(body),
     cache: 'no-store',
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw Object.assign(new Error('Decision patch failed'), { status: res.status, detail: err });

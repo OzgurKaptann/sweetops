@@ -266,6 +266,7 @@ def create_order(
         created_utc = created_utc.replace(tzinfo=timezone.utc)
     background_tasks.add_task(
         kitchen_ws_manager.broadcast_kitchen_event,
+        store_id=new_order.store_id,
         event="order_created",
         data={
             "order_id": new_order.id,

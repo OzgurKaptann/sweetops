@@ -7,5 +7,6 @@ pydantic-settings
 alembic
 websockets
 redis
+argon2-cffi
 pytest
 httpx
