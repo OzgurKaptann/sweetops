@@ -121,7 +121,7 @@ def _backdate_order(db, order_id: int, minutes_ago: float) -> None:
 
 class TestKitchenOrdersSorting:
 
-    def test_critical_age_order_leads_queue(self, db, client):
+    def test_critical_age_order_leads_queue(self, db, client, kitchen_client):
         """
         A 12-min-old NEW order with 1 ingredient must appear before a
         fresh NEW order with 5 ingredients despite the latter's complexity.
@@ -140,7 +140,7 @@ class TestKitchenOrdersSorting:
 
         _backdate_order(db, old_id, minutes_ago=12.0)
 
-        r = client.get("/kitchen/orders/?store_id=1")
+        r = kitchen_client.get("/kitchen/orders/")
         assert r.status_code == 200
         ids = [o["id"] for o in r.json()["orders"]]
 
@@ -151,7 +151,7 @@ class TestKitchenOrdersSorting:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_orders_sorted_by_priority_score_descending(self, db, client):
+    def test_orders_sorted_by_priority_score_descending(self, db, client, kitchen_client):
         """
         Three orders at 1 min, 8 min (warning), 11 min (critical).
         Expected ranking: critical → warning → ok.
@@ -176,7 +176,7 @@ class TestKitchenOrdersSorting:
         _backdate_order(db, warn_id, minutes_ago=8.0)
         _backdate_order(db, crit_id, minutes_ago=11.0)
 
-        r = client.get("/kitchen/orders/?store_id=1")
+        r = kitchen_client.get("/kitchen/orders/")
         assert r.status_code == 200
         orders = r.json()["orders"]
 
@@ -200,13 +200,13 @@ class TestKitchenOrdersSorting:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_priority_score_in_response_is_positive(self, db, client):
+    def test_priority_score_in_response_is_positive(self, db, client, kitchen_client):
         """Sanity: every order in response has a non-negative priority_score."""
         ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         client.post("/public/orders/", json=p, headers=h)
 
-        r = client.get("/kitchen/orders/?store_id=1")
+        r = kitchen_client.get("/kitchen/orders/")
         for order in r.json()["orders"]:
             assert order["priority_score"] >= 0, f"Negative score: {order}"
 
@@ -215,19 +215,19 @@ class TestKitchenOrdersSorting:
 
 class TestSlaSeverityInResponse:
 
-    def test_fresh_order_is_ok(self, db, client):
+    def test_fresh_order_is_ok(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
         assert our["sla_severity"] == "ok"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_aged_order_is_warning(self, db, client):
+    def test_aged_order_is_warning(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
@@ -235,13 +235,13 @@ class TestSlaSeverityInResponse:
 
         _backdate_order(db, oid, minutes_ago=SLA_WARNING_MINUTES + 0.5)
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
         assert our["sla_severity"] == "warning", f"Expected warning, got: {our['sla_severity']}"
 
         cleanup_ingredient(db, ing.id)
 
-    def test_breached_order_is_critical(self, db, client):
+    def test_breached_order_is_critical(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
@@ -249,7 +249,7 @@ class TestSlaSeverityInResponse:
 
         _backdate_order(db, oid, minutes_ago=SLA_CRITICAL_MINUTES + 1.0)
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
         assert our["sla_severity"] == "critical", f"Expected critical, got: {our['sla_severity']}"
 
@@ -258,7 +258,7 @@ class TestSlaSeverityInResponse:
 
 class TestTimestampConsistency:
 
-    def test_created_at_is_utc_iso8601_string(self, db, client):
+    def test_created_at_is_utc_iso8601_string(self, db, client, kitchen_client):
         """
         created_at in kitchen orders response must be a UTC ISO-8601 string
         with explicit timezone offset (not a naive datetime).
@@ -268,7 +268,7 @@ class TestTimestampConsistency:
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
 
         ts = our["created_at"]
@@ -287,7 +287,7 @@ class TestTimestampConsistency:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_created_at_matches_order_creation_response(self, db, client):
+    def test_created_at_matches_order_creation_response(self, db, client, kitchen_client):
         """
         The created_at returned by GET /kitchen/orders/ must refer to the
         same point in time as the order's actual creation.
@@ -298,7 +298,7 @@ class TestTimestampConsistency:
         oid = r.json()["order_id"]
 
         # Fetch from kitchen endpoint
-        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
 
         # Fetch raw from DB
@@ -320,9 +320,15 @@ class TestTimestampConsistency:
 # 6–8. Async: WebSocket lifecycle
 # ---------------------------------------------------------------------------
 
+def _register(manager, ws, store_id: int, conn_id: str = "x") -> None:
+    """Register a mock socket under a store without a real handshake."""
+    manager._by_store.setdefault(store_id, {})[ws] = conn_id
+    manager._store_of[ws] = store_id
+
+
 @pytest.mark.anyio
 async def test_broadcast_reaches_multiple_clients():
-    """All registered clients receive the same broadcast payload."""
+    """All clients in the SAME store receive the broadcast payload."""
     from app.services.websocket_manager import KitchenWebSocketManager
 
     manager = KitchenWebSocketManager()
@@ -331,17 +337,33 @@ async def test_broadcast_reaches_multiple_clients():
     ws2 = AsyncMock()
     ws3 = AsyncMock()
 
-    # Register without going through connect() to avoid WebSocket handshake
-    manager._connections[ws1] = "aaa"
-    manager._connections[ws2] = "bbb"
-    manager._connections[ws3] = "ccc"
+    _register(manager, ws1, 1, "aaa")
+    _register(manager, ws2, 1, "bbb")
+    _register(manager, ws3, 1, "ccc")
 
-    await manager.broadcast_kitchen_event("order_created", {"order_id": 42})
+    await manager.broadcast_kitchen_event(1, "order_created", {"order_id": 42})
 
     expected = json.dumps({"event": "order_created", "data": {"order_id": 42}})
     ws1.send_text.assert_called_once_with(expected)
     ws2.send_text.assert_called_once_with(expected)
     ws3.send_text.assert_called_once_with(expected)
+
+
+@pytest.mark.anyio
+async def test_broadcast_is_store_partitioned():
+    """A broadcast for store A must never reach a store-B connection."""
+    from app.services.websocket_manager import KitchenWebSocketManager
+
+    manager = KitchenWebSocketManager()
+    ws_a = AsyncMock()
+    ws_b = AsyncMock()
+    _register(manager, ws_a, 1, "a")
+    _register(manager, ws_b, 2, "b")
+
+    await manager.broadcast_kitchen_event(1, "order_created", {"order_id": 7})
+
+    ws_a.send_text.assert_called_once()
+    ws_b.send_text.assert_not_called()
 
 
 @pytest.mark.anyio
@@ -358,15 +380,15 @@ async def test_dead_socket_removed_after_broadcast():
     dead_ws.send_text.side_effect = RuntimeError("connection closed")
     live_ws = AsyncMock()
 
-    manager._connections[dead_ws] = "dead"
-    manager._connections[live_ws] = "live"
+    _register(manager, dead_ws, 1, "dead")
+    _register(manager, live_ws, 1, "live")
 
-    await manager.broadcast_kitchen_event("ping", {})
+    await manager.broadcast_kitchen_event(1, "ping", {})
 
     # Dead socket removed
-    assert dead_ws not in manager._connections
+    assert dead_ws not in manager.connections_for_store(1)
     # Live socket still registered and received the message
-    assert live_ws in manager._connections
+    assert live_ws in manager.connections_for_store(1)
     live_ws.send_text.assert_called_once()
 
 
@@ -383,10 +405,10 @@ async def test_all_dead_sockets_cleaned_no_crash():
     for i in range(3):
         ws = AsyncMock()
         ws.send_text.side_effect = Exception(f"dead-{i}")
-        manager._connections[ws] = f"dead-{i}"
+        _register(manager, ws, 1, f"dead-{i}")
 
     # Must not raise
-    await manager.broadcast_kitchen_event("test", {"x": 1})
+    await manager.broadcast_kitchen_event(1, "test", {"x": 1})
 
     assert manager.connection_count == 0
 
@@ -400,7 +422,7 @@ async def test_broadcast_with_zero_connections_is_noop():
     assert manager.connection_count == 0
 
     # No exception
-    await manager.broadcast_kitchen_event("test", {})
+    await manager.broadcast_kitchen_event(1, "test", {})
 
 
 @pytest.mark.anyio
@@ -410,7 +432,7 @@ async def test_disconnect_is_idempotent():
 
     manager = KitchenWebSocketManager()
     ws = AsyncMock()
-    manager._connections[ws] = "test"
+    _register(manager, ws, 1, "test")
 
     manager.disconnect(ws)
     manager.disconnect(ws)  # second call must be silent
@@ -680,26 +702,26 @@ class TestKitchenLoad:
 
 class TestKitchenDashboardAPI:
 
-    def test_dashboard_has_all_top_level_keys(self, db, client):
-        r = client.get("/kitchen/orders/?store_id=1")
+    def test_dashboard_has_all_top_level_keys(self, db, client, kitchen_client):
+        r = kitchen_client.get("/kitchen/orders/")
         assert r.status_code == 200
         body = r.json()
         assert set(body.keys()) >= {"orders", "kitchen_load", "batching_suggestions"}
 
-    def test_kitchen_load_has_all_fields(self, db, client):
-        r = client.get("/kitchen/orders/?store_id=1")
+    def test_kitchen_load_has_all_fields(self, db, client, kitchen_client):
+        r = kitchen_client.get("/kitchen/orders/")
         load = r.json()["kitchen_load"]
         for field in ("load_level", "active_orders_count", "in_prep_count",
                       "average_age_minutes", "explanation"):
             assert field in load, f"Missing load field: {field}"
         assert load["load_level"] in ("low", "medium", "high")
 
-    def test_order_has_all_decision_fields(self, db, client):
+    def test_order_has_all_decision_fields(self, db, client, kitchen_client):
         ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         client.post("/public/orders/", json=p, headers=h)
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         assert len(orders) >= 1
         order = orders[0]
         for field in ("should_be_started", "urgency_reason", "action_hint"):
@@ -711,7 +733,7 @@ class TestKitchenDashboardAPI:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_batching_suggestion_has_correct_fields(self, db, client):
+    def test_batching_suggestion_has_correct_fields(self, db, client, kitchen_client):
         """
         Two orders sharing the same ingredient must produce a batching suggestion
         with the correct structure.
@@ -725,7 +747,7 @@ class TestKitchenDashboardAPI:
         oid1 = r1.json()["order_id"]
         oid2 = r2.json()["order_id"]
 
-        body = client.get("/kitchen/orders/?store_id=1").json()
+        body = kitchen_client.get("/kitchen/orders/").json()
         suggestions = body["batching_suggestions"]
 
         # At least one suggestion grouping our two orders
@@ -743,7 +765,7 @@ class TestKitchenDashboardAPI:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_action_hint_is_can_wait_for_fresh_order(self, db, client):
+    def test_action_hint_is_can_wait_for_fresh_order(self, db, client, kitchen_client):
         """A brand-new order with no batch partner should get 'Can wait'."""
         # Create a unique ingredient so no other order shares it → no batch suggestion
         ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"), name=f"Unique_{uuid.uuid4().hex[:6]}")
@@ -751,7 +773,7 @@ class TestKitchenDashboardAPI:
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
 
-        orders = client.get("/kitchen/orders/?store_id=1").json()["orders"]
+        orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
         assert our["action_hint"] == "Can wait", f"Fresh unique order should be 'Can wait', got: {our['action_hint']!r}"
 

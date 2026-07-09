@@ -95,9 +95,14 @@ def _is_valid(quality_status: str) -> bool:
 def compute_operational_context(
     db: Session,
     target_date: Optional[date] = None,
+    store_id: Optional[int] = None,
 ) -> OperationalContext:
     """
     Compute today's operational context from the measurement layer.
+
+    store_id scopes the underlying metrics to a store. The public menu path
+    passes store_id=None (single shared catalog / single-store assumption); the
+    authenticated owner path passes the session store.
 
     Always returns a complete OperationalContext.
     If metrics fail, returns mode="normal" (safe default — no adaptation applied).
@@ -108,7 +113,7 @@ def compute_operational_context(
     )
 
     try:
-        metrics: DailyMetricsResponse = fetch_daily_metrics(db, target_date)
+        metrics: DailyMetricsResponse = fetch_daily_metrics(db, target_date, store_id=store_id)
     except Exception:
         # Metrics failure → safe default
         ctx.reasons.append("Metrics unavailable; operating in normal mode.")

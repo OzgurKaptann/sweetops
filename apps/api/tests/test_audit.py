@@ -29,8 +29,8 @@ def _post_order(client, ingredient_id: int) -> tuple[int, dict]:
     return r.status_code, r.json()
 
 
-def _patch_status(client, order_id: int, status: str):
-    return client.patch(
+def _patch_status(kitchen_client, order_id: int, status: str):
+    return kitchen_client.patch(
         f"/kitchen/orders/{order_id}/status",
         json={"status": status},
     )
@@ -38,7 +38,7 @@ def _patch_status(client, order_id: int, status: str):
 
 class TestAuditFailureDoesNotBlockOrderCreation:
 
-    def test_order_succeeds_when_audit_raises(self, db, client):
+    def test_order_succeeds_when_audit_raises(self, db, client, kitchen_client):
         """
         If audit() raises an unhandled exception, order creation must still
         return 200 and the order must be persisted.
@@ -54,7 +54,7 @@ class TestAuditFailureDoesNotBlockOrderCreation:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_stock_deducted_when_audit_raises(self, db, client):
+    def test_stock_deducted_when_audit_raises(self, db, client, kitchen_client):
         """
         Stock deduction must complete atomically even when audit() fails.
         """
@@ -82,7 +82,7 @@ class TestAuditFailureDoesNotBlockOrderCreation:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_audit_failure_is_logged_not_silently_swallowed(self, db, client, caplog):
+    def test_audit_failure_is_logged_not_silently_swallowed(self, db, client, kitchen_client, caplog):
         """
         When audit() catches an exception, it must emit an ERROR log.
         Silent swallowing is a debugging trap.
@@ -109,7 +109,7 @@ class TestAuditFailureDoesNotBlockOrderCreation:
 
 class TestAuditFailureDoesNotBlockStatusTransition:
 
-    def test_status_transition_succeeds_when_audit_raises(self, db, client):
+    def test_status_transition_succeeds_when_audit_raises(self, db, client, kitchen_client):
         """
         Status transitions must succeed even if audit() fails.
         """
@@ -122,7 +122,7 @@ class TestAuditFailureDoesNotBlockStatusTransition:
         order_id = r.json()["order_id"]
 
         with patch("app.services.kitchen_service.audit", side_effect=RuntimeError("audit down")):
-            r2 = _patch_status(client, order_id, "IN_PREP")
+            r2 = _patch_status(kitchen_client, order_id, "IN_PREP")
 
         assert r2.status_code == 200, (
             f"Status transition must succeed despite audit failure. Got {r2.status_code}: {r2.json()}"
@@ -131,7 +131,7 @@ class TestAuditFailureDoesNotBlockStatusTransition:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_cancellation_stock_return_succeeds_when_audit_raises(self, db, client):
+    def test_cancellation_stock_return_succeeds_when_audit_raises(self, db, client, kitchen_client):
         """
         Stock must be returned on cancellation even if the audit() call inside
         _return_stock_for_order() raises.
@@ -150,7 +150,7 @@ class TestAuditFailureDoesNotBlockStatusTransition:
         order_id = r.json()["order_id"]
 
         with patch("app.services.kitchen_service.audit", side_effect=RuntimeError("audit down")):
-            r2 = _patch_status(client, order_id, "CANCELLED")
+            r2 = _patch_status(kitchen_client, order_id, "CANCELLED")
 
         assert r2.status_code == 200, (
             f"Cancellation must succeed despite audit failure. Got {r2.status_code}: {r2.json()}"
@@ -168,7 +168,7 @@ class TestAuditFailureDoesNotBlockStatusTransition:
 
 class TestAuditWritesWhenHealthy:
 
-    def test_order_creation_writes_audit_record(self, db, client):
+    def test_order_creation_writes_audit_record(self, db, client, kitchen_client):
         """
         When audit is healthy, order creation must produce an AuditLog record
         with action='created' and entity_type='order'.
@@ -195,7 +195,7 @@ class TestAuditWritesWhenHealthy:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_status_change_writes_audit_record(self, db, client):
+    def test_status_change_writes_audit_record(self, db, client, kitchen_client):
         """
         Status transitions must produce AuditLog records with correct before/after.
         """
@@ -207,7 +207,7 @@ class TestAuditWritesWhenHealthy:
         r = client.post("/public/orders/", json=payload, headers=headers)
         order_id = r.json()["order_id"]
 
-        _patch_status(client, order_id, "IN_PREP")
+        _patch_status(kitchen_client, order_id, "IN_PREP")
 
         log = (
             db.query(AuditLog)
@@ -221,7 +221,7 @@ class TestAuditWritesWhenHealthy:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_cancellation_writes_stock_returned_audit(self, db, client):
+    def test_cancellation_writes_stock_returned_audit(self, db, client, kitchen_client):
         """
         Cancellation must produce a stock_returned audit record.
         """
@@ -233,7 +233,7 @@ class TestAuditWritesWhenHealthy:
         r = client.post("/public/orders/", json=payload, headers=headers)
         order_id = r.json()["order_id"]
 
-        _patch_status(client, order_id, "CANCELLED")
+        _patch_status(kitchen_client, order_id, "CANCELLED")
 
         log = (
             db.query(AuditLog)
@@ -245,7 +245,7 @@ class TestAuditWritesWhenHealthy:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_idempotent_retry_does_not_write_duplicate_audit(self, db, client):
+    def test_idempotent_retry_does_not_write_duplicate_audit(self, db, client, kitchen_client):
         """
         Submitting the same order twice (same key) must write exactly one
         audit record — not two.

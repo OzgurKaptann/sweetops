@@ -1,9 +1,13 @@
 """
 Owner Analytics Service — MVP version using direct table queries.
 No dependency on analytics.* schema or views.
+
+Store scoping:
+  Every order-derived metric is filtered by the authenticated store_id. The
+  store_id is supplied by the router from the session — never from the client.
 """
 from sqlalchemy.orm import Session
-from sqlalchemy import text, func
+from sqlalchemy import text
 from datetime import datetime, timezone, timedelta
 from app.schemas.owner_analytics import (
     KPIsResponse, KPIsData,
@@ -18,29 +22,32 @@ def get_current_utc():
     return datetime.now(timezone.utc)
 
 
-def fetch_kpis(db: Session) -> KPIsResponse:
-    """KPIs from direct queries on orders table."""
+def fetch_kpis(db: Session, store_id: int) -> KPIsResponse:
+    """KPIs from direct queries on the orders table, scoped to store_id."""
     now = get_current_utc()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    params = {"today_start": today_start, "store_id": store_id}
 
     # Today's stats
     today_query = text("""
-        SELECT 
+        SELECT
             COUNT(id) as total_orders,
             COALESCE(SUM(total_amount), 0) as gross_revenue,
             COALESCE(AVG(total_amount), 0) as aov
         FROM orders
         WHERE created_at >= :today_start
+          AND store_id = :store_id
     """)
-    today_res = db.execute(today_query, {"today_start": today_start}).fetchone()
+    today_res = db.execute(today_query, params).fetchone()
 
     # Active orders (NEW + IN_PREP + READY)
     active_query = text("""
         SELECT COUNT(id)
         FROM orders
         WHERE status IN ('NEW', 'IN_PREP', 'READY')
+          AND store_id = :store_id
     """)
-    active_res = db.execute(active_query).fetchone()
+    active_res = db.execute(active_query, {"store_id": store_id}).fetchone()
 
     # Delivered/completed today
     delivered_query = text("""
@@ -48,19 +55,21 @@ def fetch_kpis(db: Session) -> KPIsResponse:
         FROM orders
         WHERE status IN ('READY', 'DELIVERED')
           AND created_at >= :today_start
+          AND store_id = :store_id
     """)
-    delivered_res = db.execute(delivered_query, {"today_start": today_start}).fetchone()
+    delivered_res = db.execute(delivered_query, params).fetchone()
 
     # Peak hour today
     peak_query = text("""
         SELECT EXTRACT(HOUR FROM created_at)::int as hour, COUNT(*) as cnt
         FROM orders
         WHERE created_at >= :today_start
+          AND store_id = :store_id
         GROUP BY hour
         ORDER BY cnt DESC
         LIMIT 1
     """)
-    peak_res = db.execute(peak_query, {"today_start": today_start}).fetchone()
+    peak_res = db.execute(peak_query, params).fetchone()
 
     kpi_data = KPIsData(
         total_orders=int(today_res[0]) if today_res else 0,
@@ -78,15 +87,18 @@ def fetch_kpis(db: Session) -> KPIsResponse:
     )
 
 
-def fetch_top_ingredients(db: Session, limit: int = 5) -> TopIngredientsResponse:
-    """Top ingredients by usage count from order_item_ingredients."""
+def fetch_top_ingredients(db: Session, store_id: int, limit: int = 5) -> TopIngredientsResponse:
+    """Top ingredients by usage count, derived from this store's orders only."""
     query = text("""
         WITH usage AS (
             SELECT
                 i.name as ingredient_name,
-                COUNT(oi.id) as total_used
-            FROM order_item_ingredients oi
-            JOIN ingredients i ON oi.ingredient_id = i.id
+                COUNT(oii.id) as total_used
+            FROM order_item_ingredients oii
+            JOIN order_items it ON oii.order_item_id = it.id
+            JOIN orders o       ON it.order_id = o.id
+            JOIN ingredients i  ON oii.ingredient_id = i.id
+            WHERE o.store_id = :store_id
             GROUP BY i.name
         ),
         grand AS (
@@ -104,7 +116,7 @@ def fetch_top_ingredients(db: Session, limit: int = 5) -> TopIngredientsResponse
         LIMIT :limit
     """)
 
-    rows = db.execute(query, {"limit": limit}).fetchall()
+    rows = db.execute(query, {"limit": limit, "store_id": store_id}).fetchall()
     items = []
     for rank, row in enumerate(rows, start=1):
         items.append(TopIngredientItem(
@@ -117,8 +129,8 @@ def fetch_top_ingredients(db: Session, limit: int = 5) -> TopIngredientsResponse
     return TopIngredientsResponse(as_of=get_current_utc(), items=items)
 
 
-def fetch_hourly_demand(db: Session) -> HourlyDemandResponse:
-    """Hourly order counts for today."""
+def fetch_hourly_demand(db: Session, store_id: int) -> HourlyDemandResponse:
+    """Hourly order counts for today, scoped to store_id."""
     today_start = get_current_utc().replace(hour=0, minute=0, second=0, microsecond=0)
 
     query = text("""
@@ -127,11 +139,12 @@ def fetch_hourly_demand(db: Session) -> HourlyDemandResponse:
             COUNT(*) as order_count
         FROM orders
         WHERE created_at >= :today_start
+          AND store_id = :store_id
         GROUP BY hour
         ORDER BY hour ASC
     """)
 
-    rows = db.execute(query, {"today_start": today_start}).fetchall()
+    rows = db.execute(query, {"today_start": today_start, "store_id": store_id}).fetchall()
     points = [
         HourlyDemandPoint(hour_bucket=f"{int(r[0]):02d}:00", order_count=int(r[1]))
         for r in rows
@@ -140,8 +153,8 @@ def fetch_hourly_demand(db: Session) -> HourlyDemandResponse:
     return HourlyDemandResponse(as_of=get_current_utc(), points=points)
 
 
-def fetch_daily_sales(db: Session) -> DailySalesResponse:
-    """Daily sales for last 7 days."""
+def fetch_daily_sales(db: Session, store_id: int) -> DailySalesResponse:
+    """Daily sales for last 7 days, scoped to store_id."""
     seven_days_ago = get_current_utc() - timedelta(days=7)
 
     query = text("""
@@ -152,11 +165,12 @@ def fetch_daily_sales(db: Session) -> DailySalesResponse:
             COALESCE(AVG(total_amount), 0) as average_order_value
         FROM orders
         WHERE created_at >= :since
+          AND store_id = :store_id
         GROUP BY DATE(created_at)
         ORDER BY sales_date ASC
     """)
 
-    rows = db.execute(query, {"since": seven_days_ago}).fetchall()
+    rows = db.execute(query, {"since": seven_days_ago, "store_id": store_id}).fetchall()
     points = [
         DailySalesPoint(
             sales_date=str(r[0]),
@@ -170,16 +184,16 @@ def fetch_daily_sales(db: Session) -> DailySalesResponse:
     return DailySalesResponse(as_of=get_current_utc(), points=points)
 
 
-def fetch_ingredient_forecast(db: Session) -> IngredientForecastResponse:
+def fetch_ingredient_forecast(db: Session, store_id: int) -> IngredientForecastResponse:
     """
-    Simple forecast based on last 7 days of ingredient usage.
+    Simple forecast based on last 7 days of this store's ingredient usage.
     No ML needed for MVP — just project forward using average daily usage.
     """
     now = get_current_utc()
     seven_days_ago = now - timedelta(days=7)
     fourteen_days_ago = now - timedelta(days=14)
 
-    # Get this week's and last week's usage per ingredient
+    # Get this week's and last week's usage per ingredient (this store only)
     query = text("""
         SELECT
             i.name as ingredient_name,
@@ -190,6 +204,7 @@ def fetch_ingredient_forecast(db: Session) -> IngredientForecastResponse:
         JOIN orders o ON it.order_id = o.id
         JOIN ingredients i ON oi.ingredient_id = i.id
         WHERE o.created_at >= :last_week
+          AND o.store_id = :store_id
         GROUP BY i.name
         ORDER BY this_week_usage DESC
     """)
@@ -197,6 +212,7 @@ def fetch_ingredient_forecast(db: Session) -> IngredientForecastResponse:
     rows = db.execute(query, {
         "this_week": seven_days_ago,
         "last_week": fourteen_days_ago,
+        "store_id": store_id,
     }).fetchall()
 
     items = []

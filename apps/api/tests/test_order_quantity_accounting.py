@@ -387,7 +387,7 @@ class TestScenario7IdempotentRetry:
 
 class TestScenario8CancellationRestoration:
 
-    def test_cancel_restores_exact_deducted_quantity_once(self, db, client):
+    def test_cancel_restores_exact_deducted_quantity_once(self, db, client, kitchen_client):
         prod = make_product(db, base_price=Decimal("100.00"))
         initial = Decimal("1000.00")
         ing, _ = make_ingredient(
@@ -409,7 +409,7 @@ class TestScenario8CancellationRestoration:
             assert after_order.stock_quantity == initial - Decimal("150.00")
 
             # Cancel
-            rc = client.patch(f"/kitchen/orders/{oid}/status", json={"status": "CANCELLED"})
+            rc = kitchen_client.patch(f"/kitchen/orders/{oid}/status", json={"status": "CANCELLED"})
             assert rc.status_code == 200
 
             db.expire_all()
@@ -425,7 +425,7 @@ class TestScenario8CancellationRestoration:
             assert Decimal(str(returns[0].quantity_delta)) == Decimal("150.00")
 
             # Second cancel must not restore twice.
-            rc2 = client.patch(f"/kitchen/orders/{oid}/status", json={"status": "CANCELLED"})
+            rc2 = kitchen_client.patch(f"/kitchen/orders/{oid}/status", json={"status": "CANCELLED"})
             assert rc2.status_code == 409
             db.expire_all()
             after_second = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()

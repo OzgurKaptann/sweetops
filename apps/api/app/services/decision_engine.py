@@ -310,15 +310,24 @@ def _stock_risk_signals(db: Session) -> list[dict]:
     return signals
 
 
-def _demand_spike_signals(db: Session) -> list[dict]:
+def _demand_spike_signals(db: Session, store_id: int) -> list[dict]:
     now           = _now_utc()
     one_hour_ago  = now - timedelta(hours=1)
     window_start  = now - timedelta(hours=24)
 
-    last_1h: int = db.query(func.count(Order.id)).filter(Order.created_at >= one_hour_ago).scalar() or 0
+    last_1h: int = (
+        db.query(func.count(Order.id))
+        .filter(Order.store_id == store_id, Order.created_at >= one_hour_ago)
+        .scalar()
+        or 0
+    )
     prev_23h: int = (
         db.query(func.count(Order.id))
-        .filter(Order.created_at >= window_start, Order.created_at < one_hour_ago)
+        .filter(
+            Order.store_id == store_id,
+            Order.created_at >= window_start,
+            Order.created_at < one_hour_ago,
+        )
         .scalar()
         or 0
     )
@@ -442,10 +451,14 @@ def _slow_moving_signals(db: Session) -> list[dict]:
     return signals
 
 
-def _sla_risk_signals(db: Session) -> list[dict]:
+def _sla_risk_signals(db: Session, store_id: int) -> list[dict]:
     now = _now_utc()
 
-    active_orders = db.query(Order).filter(Order.status.in_(["NEW", "IN_PREP"])).all()
+    active_orders = (
+        db.query(Order)
+        .filter(Order.store_id == store_id, Order.status.in_(["NEW", "IN_PREP"]))
+        .all()
+    )
     if not active_orders:
         return []
 
@@ -516,19 +529,23 @@ def _sla_risk_signals(db: Session) -> list[dict]:
     }]
 
 
-def _revenue_anomaly_signals(db: Session) -> list[dict]:
+def _revenue_anomaly_signals(db: Session, store_id: int) -> list[dict]:
     now           = _now_utc()
     one_hour_ago  = now - timedelta(hours=1)
     window_start  = now - timedelta(hours=24)
 
     last_1h_revenue: float = float(
         db.query(func.coalesce(func.sum(Order.total_amount), 0))
-        .filter(Order.created_at >= one_hour_ago)
+        .filter(Order.store_id == store_id, Order.created_at >= one_hour_ago)
         .scalar() or 0
     )
     prev_23h_revenue: float = float(
         db.query(func.coalesce(func.sum(Order.total_amount), 0))
-        .filter(Order.created_at >= window_start, Order.created_at < one_hour_ago)
+        .filter(
+            Order.store_id == store_id,
+            Order.created_at >= window_start,
+            Order.created_at < one_hour_ago,
+        )
         .scalar() or 0
     )
 
@@ -603,9 +620,9 @@ def _revenue_anomaly_signals(db: Session) -> list[dict]:
 # Upsert logic
 # ---------------------------------------------------------------------------
 
-def _upsert_decision(db: Session, signal: dict, now: datetime) -> OwnerDecision | None:
+def _upsert_decision(db: Session, signal: dict, now: datetime, store_id: int) -> OwnerDecision | None:
     """
-    Upsert one signal into owner_decisions:
+    Upsert one signal into owner_decisions for this store:
       - INSERT if new
       - UPDATE mutable fields if pending/acknowledged
       - Skip if completed/dismissed within the cooldown window
@@ -613,11 +630,13 @@ def _upsert_decision(db: Session, signal: dict, now: datetime) -> OwnerDecision 
     Returns the row to include in the response, or None if suppressed.
     """
     decision_id = signal["id"]
-    row: OwnerDecision | None = db.get(OwnerDecision, decision_id)
+    # Composite primary key (store_id, decision_id).
+    row: OwnerDecision | None = db.get(OwnerDecision, (store_id, decision_id))
 
     if row is None:
         # First time this signal fires → create as pending
         row = OwnerDecision(
+            store_id=store_id,
             decision_id=decision_id,
             status="pending",
         )
@@ -665,6 +684,7 @@ def _apply_signal_fields(row: OwnerDecision, signal: dict) -> None:
 def _row_to_dict(row: OwnerDecision) -> dict:
     return {
         "id":                    row.decision_id,
+        "store_id":              row.store_id,
         "type":                  row.type,
         "severity":              row.severity,
         "decision_score":        row.decision_score,
@@ -710,9 +730,10 @@ _COMPLETION_RATE_LOW    = 0.30   # completion_rate < 30%
 _DECISIONS_SEEN_MIN     = 3      # need ≥ 3 seen for engagement signal to fire
 
 
-def _metric_driven_signals(db: Session) -> list[dict]:
+def _metric_driven_signals(db: Session, store_id: int) -> list[dict]:
     """
-    Generate decisions driven by today's measurement layer output.
+    Generate decisions driven by today's measurement layer output, scoped to
+    this store.
 
     Four signal types (all "metric_" prefixed IDs):
       metric_combo_health       — combo_usage_rate below threshold (pattern, not a moment)
@@ -726,7 +747,7 @@ def _metric_driven_signals(db: Session) -> list[dict]:
     # Late import to avoid circular dependency (metrics_service → decision_engine)
     try:
         from app.services.metrics_service import fetch_daily_metrics
-        metrics = fetch_daily_metrics(db)
+        metrics = fetch_daily_metrics(db, store_id=store_id)
     except Exception as exc:
         logger.error("metric_driven_signals: could not fetch metrics: %s", exc)
         return []
@@ -969,33 +990,52 @@ def _metric_driven_signals(db: Session) -> list[dict]:
 # Public: GET
 # ---------------------------------------------------------------------------
 
-def get_owner_decisions(db: Session) -> dict:
+def get_owner_decisions(db: Session, store_id: int) -> dict:
     """
-    1. Compute all fresh signals (realtime + metric-driven).
-    2. Upsert into owner_decisions (respecting cooldown).
+    1. Compute all fresh signals (realtime + metric-driven) for this store.
+    2. Upsert into owner_decisions keyed by (store_id, decision_id).
     3. Sort by decision_score DESC, then decision_id ASC.
     4. Return envelope.
+
+    Store scoping:
+      Order-derived signals (demand_spike, sla_risk, revenue_anomaly) and the
+      metric-driven signals are filtered to store_id. Inventory-derived signals
+      (stock_risk, slow_moving) read the GLOBAL inventory tables and are only
+      generated while a single operational store exists — otherwise they are
+      skipped (fail closed) so one store's global inventory never leaks into
+      another store's decision feed.
     """
+    from app.services.inventory_guard import is_single_operational_store
+
     now = _now_utc()
     all_signals: list[dict] = []
+    single_store = is_single_operational_store(db)
 
-    for fn in (
-        _stock_risk_signals,
+    # (callable, args) — inventory signals only when single-store.
+    store_scoped_fns = [
         _demand_spike_signals,
-        _slow_moving_signals,
         _sla_risk_signals,
         _revenue_anomaly_signals,
-        _metric_driven_signals,      # metric-driven, pattern-level signals
-    ):
+        _metric_driven_signals,
+    ]
+    inventory_fns = [_stock_risk_signals, _slow_moving_signals] if single_store else []
+
+    for fn in inventory_fns:
         try:
             all_signals.extend(fn(db))
+        except Exception as exc:
+            logger.error("decision_engine signal_fn=%s err=%s", fn.__name__, exc)
+
+    for fn in store_scoped_fns:
+        try:
+            all_signals.extend(fn(db, store_id))
         except Exception as exc:
             logger.error("decision_engine signal_fn=%s err=%s", fn.__name__, exc)
 
     visible: list[dict] = []
     for signal in all_signals:
         try:
-            row = _upsert_decision(db, signal, now)
+            row = _upsert_decision(db, signal, now, store_id)
             if row is not None:
                 visible.append(_row_to_dict(row))
         except Exception as exc:
@@ -1038,6 +1078,7 @@ _VALID_TRANSITIONS: dict[str, set[str]] = {
 
 def apply_decision_action(
     db: Session,
+    store_id: int,
     decision_id: str,
     action: str,
     actor_id: str | None = None,
@@ -1046,11 +1087,16 @@ def apply_decision_action(
     estimated_revenue_saved: float | None = None,
 ) -> dict:
     """
-    Transition a decision to a new lifecycle status.
+    Transition a decision to a new lifecycle status within the authenticated
+    store. A decision belonging to another store is reported as not-found so
+    cross-store existence is never disclosed.
+
     Returns the updated decision dict.
     Raises ValueError on invalid transition, LookupError if not found.
+    The `actor_id` must be the authenticated user's id — callers never pass a
+    client-supplied actor.
     """
-    row: OwnerDecision | None = db.get(OwnerDecision, decision_id)
+    row: OwnerDecision | None = db.get(OwnerDecision, (store_id, decision_id))
     if row is None:
         raise LookupError(f"Decision '{decision_id}' not found.")
 
