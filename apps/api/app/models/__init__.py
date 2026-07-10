@@ -14,6 +14,9 @@ from .order_item_ingredient import OrderItemIngredient
 from .order_status_event import OrderStatusEvent
 from .audit_log import AuditLog
 from .owner_decision import OwnerDecision
+from .payment_settlement import PaymentSettlement
+from .payment_allocation import PaymentAllocation
+from .payment_refund import PaymentRefund
 
 # Critical: Alembic discovers all models via this import
 __all__ = [
@@ -34,4 +37,7 @@ __all__ = [
     "OrderStatusEvent",
     "AuditLog",
     "OwnerDecision",
+    "PaymentSettlement",
+    "PaymentAllocation",
+    "PaymentRefund",
 ]

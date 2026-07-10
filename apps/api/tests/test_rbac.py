@@ -103,6 +103,19 @@ def test_authenticated_insufficient_role_is_403(db, make_staff):
     assert c.get("/owner/kpis").status_code == 403
 
 
-def test_cashier_permissions_are_empty(db, make_staff):
-    from app.core.permissions import permissions_for_role
-    assert permissions_for_role("CASHIER") == []
+def test_cashier_permissions_are_payments_only(db, make_staff):
+    """CASHIER may read bills and collect payments — but never refund, and no
+    owner/kitchen write access."""
+    from app.core.permissions import (
+        permissions_for_role,
+        PERM_PAYMENTS_READ,
+        PERM_PAYMENTS_COLLECT,
+        PERM_PAYMENTS_REFUND,
+        PERM_OWNER_READ,
+        PERM_KITCHEN_ORDERS_WRITE,
+    )
+    perms = set(permissions_for_role("CASHIER"))
+    assert perms == {PERM_PAYMENTS_READ, PERM_PAYMENTS_COLLECT}
+    assert PERM_PAYMENTS_REFUND not in perms
+    assert PERM_OWNER_READ not in perms
+    assert PERM_KITCHEN_ORDERS_WRITE not in perms
