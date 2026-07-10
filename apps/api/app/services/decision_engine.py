@@ -1,12 +1,23 @@
 """
 Owner Decision Engine — deterministic, explainable signals + action lifecycle.
 
-Five signal categories:
-  stock_risk      — velocity-based stockout prediction + revenue loss estimate
-  demand_spike    — last-1h order rate vs 23h rolling baseline
-  slow_moving     — ingredients with stock but zero deductions in 24h
-  sla_risk        — kitchen orders breaching SLA thresholds
-  revenue_anomaly — hourly revenue vs same-period baseline
+Six distinct signal evaluators run per request (see get_owner_decisions):
+
+  Realtime evaluators (moment-in-time):
+    stock_risk      — velocity-based stockout prediction + revenue loss estimate
+    slow_moving     — ingredients with stock but zero deductions in 24h
+    demand_spike    — last-1h order rate vs 23h rolling baseline
+    sla_risk        — kitchen orders breaching SLA thresholds
+    revenue_anomaly — hourly revenue vs same-period baseline
+
+  Metric-driven evaluator (pattern-level, batches four measurement-layer checks
+  under "metric_" ids — see _metric_driven_signals):
+    metric_driven   — combo health, upsell visibility, owner engagement,
+                      kitchen performance
+
+The response field ``signals_evaluated`` reports how many of these distinct
+evaluators the engine actually executed for the authenticated store and request
+(see get_owner_decisions for the exact contract).
 
 Persistence layer:
   Every signal is upserted into owner_decisions on GET /owner/decisions/.
@@ -1011,7 +1022,11 @@ def get_owner_decisions(db: Session, store_id: int) -> dict:
     all_signals: list[dict] = []
     single_store = is_single_operational_store(db)
 
-    # (callable, args) — inventory signals only when single-store.
+    # Distinct signal evaluators for this request. Inventory evaluators read the
+    # GLOBAL inventory tables and only run while a single operational store
+    # exists (fail-closed multi-store scoping — see inventory_guard); when they
+    # are skipped they are consistently excluded from signals_evaluated too, so
+    # the count never claims an evaluator ran when it did not.
     store_scoped_fns = [
         _demand_spike_signals,
         _sla_risk_signals,
@@ -1019,6 +1034,12 @@ def get_owner_decisions(db: Session, store_id: int) -> dict:
         _metric_driven_signals,
     ]
     inventory_fns = [_stock_risk_signals, _slow_moving_signals] if single_store else []
+
+    # signals_evaluated = number of distinct evaluators executed for this store
+    # and request. Deterministic and computed from the evaluator set itself so
+    # it can never drift from the code, and independent of how many decisions
+    # each evaluator emits (an evaluator that returns zero decisions still ran).
+    signals_evaluated = len(inventory_fns) + len(store_scoped_fns)
 
     for fn in inventory_fns:
         try:
@@ -1059,7 +1080,7 @@ def get_owner_decisions(db: Session, store_id: int) -> dict:
     return {
         "decisions":         visible,
         "generated_at":      now.isoformat(),
-        "signals_evaluated": 6,   # 5 realtime + 1 metric-driven batch
+        "signals_evaluated": signals_evaluated,
         "active_count":      len(visible),
         "summary":           summary,
     }

@@ -494,7 +494,11 @@ class TestGetOwnerDecisions:
         result = get_owner_decisions(db, 1)
         for field in ("decisions", "generated_at", "signals_evaluated", "active_count", "summary"):
             assert field in result
-        assert result["signals_evaluated"] == 5
+        # Six distinct evaluators run for a single-store request: five realtime
+        # (stock_risk, slow_moving, demand_spike, sla_risk, revenue_anomaly) plus
+        # the metric-driven evaluator. See TestSignalsEvaluatedContract for the
+        # full semantic definition of signals_evaluated.
+        assert result["signals_evaluated"] == 6
 
     def test_summary_counts_accurate(self, db):
         result = get_owner_decisions(db, 1)
@@ -547,6 +551,83 @@ class TestGetOwnerDecisions:
         assert d["status"] == "acknowledged", "Re-evaluation must preserve acknowledged status"
 
         cleanup_ingredient(db, ing.id)
+
+
+# ---------------------------------------------------------------------------
+# 6b. signals_evaluated contract
+# ---------------------------------------------------------------------------
+
+
+class TestSignalsEvaluatedContract:
+    """
+    Contract for the ``signals_evaluated`` envelope field.
+
+    Definition: the number of *distinct signal evaluators the engine executed*
+    for the authenticated store and request — NOT the number of decisions
+    emitted, and NOT a hardcoded constant. It is computed from the evaluator set
+    itself so it cannot drift from the code.
+
+    The engine defines six evaluators: five realtime (stock_risk, slow_moving,
+    demand_spike, sla_risk, revenue_anomaly) and one metric-driven batch. The
+    two inventory evaluators (stock_risk, slow_moving) read GLOBAL inventory and
+    are skipped — and consistently excluded from the count — when more than one
+    operational store exists (fail-closed multi-store scoping).
+    """
+
+    def test_single_store_runs_all_six_evaluators(self, db):
+        result = get_owner_decisions(db, 1)
+        assert result["signals_evaluated"] == 6
+
+    def test_count_independent_of_emitted_decisions(self, db, monkeypatch):
+        """
+        Making an evaluator emit zero decisions must NOT change
+        signals_evaluated — the evaluator still ran.
+        """
+        from app.services import decision_engine as de
+
+        baseline = get_owner_decisions(db, 1)["signals_evaluated"]
+
+        # Force the highest-volume realtime evaluators to emit nothing.
+        monkeypatch.setattr(de, "_stock_risk_signals", lambda db: [])
+        monkeypatch.setattr(de, "_slow_moving_signals", lambda db: [])
+        monkeypatch.setattr(de, "_sla_risk_signals", lambda db, store_id: [])
+
+        result = get_owner_decisions(db, 1)
+        assert result["signals_evaluated"] == baseline == 6
+        # Independence is meaningful only if emissions really could have changed.
+        assert isinstance(result["decisions"], list)
+
+    def test_multi_store_excludes_skipped_inventory_evaluators(self, db, make_store, make_staff):
+        """
+        With a second operational store, the two global-inventory evaluators are
+        skipped (fail-closed) and must not be counted: only the four
+        store-scoped evaluators run.
+        """
+        from app.services.inventory_guard import is_single_operational_store
+
+        other = make_store()
+        # Two operational stores: staff anchored to store 1 and to the new store.
+        # (operational_store_count = distinct non-null User.store_id.)
+        make_staff("OWNER", store_id=1)
+        make_staff("KITCHEN", store_id=other.id)
+        assert is_single_operational_store(db) is False
+
+        result = get_owner_decisions(db, 1)
+        assert result["signals_evaluated"] == 4
+        # No decision in store 1's feed may originate from an inventory evaluator
+        # (stock_risk / slow_moving) while multi-store scoping is active.
+        types = {d["type"] for d in result["decisions"]}
+        assert "stock_risk" not in types
+        assert "slow_moving" not in types
+
+    def test_store_scoping_signals_evaluated_is_per_store(self, db, make_store, make_staff):
+        """A request for another store returns the same evaluator-count contract."""
+        other = make_store()
+        make_staff("OWNER", store_id=1)
+        make_staff("OWNER", store_id=other.id)
+        # Now multi-store: both store 1 and the other store see 4 evaluators.
+        assert get_owner_decisions(db, 1)["signals_evaluated"] == 4
+        assert get_owner_decisions(db, other.id)["signals_evaluated"] == 4
 
 
 # ---------------------------------------------------------------------------

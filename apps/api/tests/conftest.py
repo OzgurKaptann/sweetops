@@ -44,6 +44,30 @@ DEFAULT_PASSWORD = "testpassw0rd"
 
 
 # ---------------------------------------------------------------------------
+# Async backend contract
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def anyio_backend() -> str:
+    """
+    Pin every ``@pytest.mark.anyio`` test to the asyncio backend.
+
+    SweetOps is an asyncio-only runtime: it is served by uvicorn's asyncio loop,
+    talks to PostgreSQL through the synchronous psycopg2 driver, and its own
+    async helpers (WebSocket manager, ``asyncio.run`` in tests) are written
+    against asyncio. Trio is not a supported runtime and is not a dependency.
+
+    AnyIO's pytest plugin otherwise parametrises anyio tests across *both*
+    asyncio and trio; without trio installed the trio variants fail with
+    ``KeyError: 'anyio._backends._trio'``. Returning only "asyncio" makes the
+    supported backend explicit and deterministic instead of silently
+    advertising a backend the product does not support. See
+    docs/TEST_SUITE_BASELINE.md for the full rationale.
+    """
+    return "asyncio"
+
+
+# ---------------------------------------------------------------------------
 # Legacy order context (non-production transition mode)
 # ---------------------------------------------------------------------------
 
