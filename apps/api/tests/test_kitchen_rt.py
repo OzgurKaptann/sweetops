@@ -441,6 +441,28 @@ async def test_disconnect_is_idempotent():
 
 
 # ---------------------------------------------------------------------------
+# Async backend contract — SweetOps is asyncio-only (see conftest.anyio_backend)
+# ---------------------------------------------------------------------------
+
+def test_anyio_backend_fixture_is_asyncio(anyio_backend):
+    """
+    The supported async backend is explicit and deterministic: every anyio test
+    runs on asyncio, never trio. Guards against the anyio plugin silently
+    parametrising trio again (which fails with KeyError: 'anyio._backends._trio'
+    because trio is not — and should not be — a dependency).
+    """
+    assert anyio_backend == "asyncio"
+
+
+@pytest.mark.anyio
+async def test_async_tests_actually_run_on_asyncio():
+    """The event loop the WS tests run under is genuinely asyncio, not trio."""
+    import sniffio
+
+    assert sniffio.current_async_library() == "asyncio"
+
+
+# ---------------------------------------------------------------------------
 # 9. Unit: decision signals
 # ---------------------------------------------------------------------------
 
