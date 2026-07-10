@@ -62,7 +62,11 @@ class Settings(BaseSettings):
     # requests (CORS) and to originate logins / state-changing mutations
     # (origin check). NEVER use "*" with credentials. Production values come
     # from the environment (STAFF_TRUSTED_ORIGINS=...).
-    STAFF_TRUSTED_ORIGINS: str = "http://localhost:3001,http://localhost:3002"
+    # Ports: kitchen-web 3002, owner-web 3003, cashier-web 3004.
+    STAFF_TRUSTED_ORIGINS: str = (
+        "http://localhost:3001,http://localhost:3002,"
+        "http://localhost:3003,http://localhost:3004"
+    )
 
     # Public customer origin(s) — allowed for the public QR/menu/order flow.
     # Kept separate so staff CSRF/origin rules never leak onto the public flow.

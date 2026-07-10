@@ -10,6 +10,7 @@ Design principles:
   - Cleanup always runs even if the test fails (yield + explicit delete).
 """
 import uuid
+from contextlib import contextmanager
 from decimal import Decimal
 from typing import Generator
 
@@ -36,6 +37,9 @@ from app.models.table import Table
 from app.models.table_qr_token import TableQrToken
 from app.models.user import User
 from app.models.audit_log import AuditLog  # noqa — ensure registered
+from app.models.payment_settlement import PaymentSettlement
+from app.models.payment_allocation import PaymentAllocation
+from app.models.payment_refund import PaymentRefund
 from app.services import auth_service, qr_token_service
 
 # Store id used by the legacy order path in the pre-existing test suite.
@@ -442,6 +446,9 @@ def make_store(db: Session):
     yield _make
 
     for sid in created_ids:
+        # Payment ledger first — settlements/allocations/refunds FK to store,
+        # table, user and order and would otherwise block cleanup.
+        _purge_payments_for_store(db, sid)
         user_ids = [u.id for u in db.query(User).filter(User.store_id == sid).all()]
         if user_ids:
             db.query(AuthSession).filter(AuthSession.user_id.in_(user_ids)).delete(synchronize_session=False)
@@ -459,6 +466,13 @@ def make_store(db: Session):
                 OrderStatusEvent.order_id.in_(order_ids)
             ).delete(synchronize_session=False)
             db.query(Order).filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+        # Tables + QR tokens anchored to the store (created by make_table).
+        table_ids = [t.id for t in db.query(Table).filter(Table.store_id == sid).all()]
+        if table_ids:
+            db.query(TableQrToken).filter(
+                TableQrToken.table_id.in_(table_ids)
+            ).delete(synchronize_session=False)
+            db.query(Table).filter(Table.id.in_(table_ids)).delete(synchronize_session=False)
         db.query(Store).filter(Store.id == sid).delete(synchronize_session=False)
     db.commit()
 
@@ -473,3 +487,210 @@ def owner_client(db: Session, make_staff) -> TestClient:
 def kitchen_client(db: Session, make_staff) -> TestClient:
     user = make_staff("KITCHEN", store_id=DEFAULT_STORE_ID)
     return make_authed_client(db, user)
+
+
+# ---------------------------------------------------------------------------
+# Payment / cashier fixtures
+# ---------------------------------------------------------------------------
+
+# The append-only immutability triggers (installed by migration b8c4d1e6f207)
+# refuse UPDATE/DELETE on every ledger table with NO runtime bypass — no GUC,
+# session variable, or set_config can turn them off. Test teardown must remove
+# the committed rows it created, so it uses the ONLY sanctioned escape hatch:
+# ownership-gated DDL. `ALTER TABLE ... DISABLE TRIGGER` requires table ownership
+# (the migration/test role owns the payment tables) and is not reachable through
+# ordinary application DML or an SQL-injection path, so it is not a production
+# bypass. The triggers are re-enabled before the transaction commits, so ledger
+# immutability is fully restored for the next test.
+_IMMUTABLE_TRIGGERS = (
+    ("payment_refunds", "trg_payment_refunds_immutable"),
+    ("payment_allocations", "trg_payment_allocations_immutable"),
+    ("payment_settlements", "trg_payment_settlements_immutable"),
+)
+
+
+@contextmanager
+def _ledger_maintenance(db: Session):
+    """Ownership-gated teardown escape hatch — see module note above."""
+    from sqlalchemy import text
+    for table, trig in _IMMUTABLE_TRIGGERS:
+        db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {trig}"))
+    try:
+        yield
+    finally:
+        for table, trig in _IMMUTABLE_TRIGGERS:
+            db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trig}"))
+
+
+def _purge_payments_for_store(db: Session, store_id: int) -> None:
+    """Delete all ledger rows for a store (refunds → allocations → settlements)."""
+    settlement_ids = [
+        s.id for s in db.query(PaymentSettlement).filter(
+            PaymentSettlement.store_id == store_id
+        ).all()
+    ]
+    with _ledger_maintenance(db):
+        db.query(PaymentRefund).filter(
+            PaymentRefund.store_id == store_id
+        ).delete(synchronize_session=False)
+        if settlement_ids:
+            db.query(PaymentAllocation).filter(
+                PaymentAllocation.settlement_id.in_(settlement_ids)
+            ).delete(synchronize_session=False)
+            db.query(PaymentSettlement).filter(
+                PaymentSettlement.id.in_(settlement_ids)
+            ).delete(synchronize_session=False)
+
+
+@pytest.fixture()
+def make_table(db: Session):
+    """Factory: create a Table on an existing store. Cleans up on teardown."""
+    created: list[int] = []
+
+    def _make(store_id: int, table_number: str | None = None) -> Table:
+        uid = uuid.uuid4().hex[:8]
+        table = Table(
+            store_id=store_id,
+            table_number=table_number if table_number is not None else uid,
+            qr_code=f"cashier-test-{uid}",
+        )
+        db.add(table)
+        db.commit()
+        db.refresh(table)
+        created.append(table.id)
+        return table
+
+    yield _make
+
+    for tid in created:
+        db.query(TableQrToken).filter(TableQrToken.table_id == tid).delete(synchronize_session=False)
+        db.query(Table).filter(Table.id == tid).delete(synchronize_session=False)
+    db.commit()
+
+
+@pytest.fixture()
+def make_order(db: Session):
+    """
+    Factory: create a bare Order with a persisted total. Tracks created orders
+    (and any ledger rows referencing them) for teardown. No order items — the
+    payment layer settles against the persisted total_amount snapshot only.
+    """
+    created: list[int] = []
+
+    def _make(
+        store_id: int,
+        table_id: int | None,
+        total: Decimal,
+        *,
+        status: str = "READY",
+    ) -> Order:
+        order = Order(
+            store_id=store_id,
+            table_id=table_id,
+            total_amount=Decimal(str(total)),
+            status=status,
+            payment_status="UNPAID",
+            refund_status="NONE",
+            paid_amount=Decimal("0"),
+            refunded_amount=Decimal("0"),
+        )
+        db.add(order)
+        db.commit()
+        db.refresh(order)
+        created.append(order.id)
+        return order
+
+    yield _make
+
+    if created:
+        settlement_ids = [
+            a.settlement_id for a in db.query(PaymentAllocation).filter(
+                PaymentAllocation.order_id.in_(created)
+            ).all()
+        ]
+        with _ledger_maintenance(db):
+            db.query(PaymentRefund).filter(
+                PaymentRefund.order_id.in_(created)
+            ).delete(synchronize_session=False)
+            db.query(PaymentAllocation).filter(
+                PaymentAllocation.order_id.in_(created)
+            ).delete(synchronize_session=False)
+            if settlement_ids:
+                db.query(PaymentAllocation).filter(
+                    PaymentAllocation.settlement_id.in_(settlement_ids)
+                ).delete(synchronize_session=False)
+                db.query(PaymentSettlement).filter(
+                    PaymentSettlement.id.in_(settlement_ids)
+                ).delete(synchronize_session=False)
+        db.query(OrderStatusEvent).filter(
+            OrderStatusEvent.order_id.in_(created)
+        ).delete(synchronize_session=False)
+        db.query(Order).filter(Order.id.in_(created)).delete(synchronize_session=False)
+        db.commit()
+
+
+@pytest.fixture()
+def cashier_env(db: Session, make_store, make_table, make_staff):
+    """
+    A ready-to-use cashier environment: a fresh store, a table on it, and an
+    authenticated CASHIER client. Returns a small namespace object.
+    """
+    class Env:
+        pass
+
+    store = make_store()
+    table = make_table(store.id)
+    cashier = make_staff("CASHIER", store_id=store.id)
+    env = Env()
+    env.store = store
+    env.table = table
+    env.cashier = cashier
+    env.client = make_authed_client(db, cashier)
+    return env
+
+
+@pytest.fixture()
+def manager_client_factory(db: Session, make_staff):
+    """Factory: an authenticated MANAGER client for a given store."""
+    def _make(store_id: int) -> TestClient:
+        user = make_staff("MANAGER", store_id=store_id)
+        return make_authed_client(db, user)
+    return _make
+
+
+@pytest.fixture()
+def collected_ledger(db: Session, make_store, make_table, make_staff, make_order):
+    """
+    A committed real ledger for direct-SQL integrity/immutability tests: a store,
+    a table, a MANAGER, a fully-paid order (one settlement + one allocation), and
+    one partial refund. Returns a namespace of live ids. All rows are cleaned up
+    through the make_order / make_store teardowns (which disable the immutability
+    triggers via ownership-gated DDL), so no test needs a production-style delete.
+    """
+    class Env:
+        pass
+
+    env = Env()
+    env.store = make_store()
+    env.table = make_table(env.store.id)
+    env.manager = make_staff("MANAGER", store_id=env.store.id)
+    env.client = make_authed_client(db, env.manager)
+    env.order = make_order(env.store.id, env.table.id, Decimal("100.00"))
+
+    pay = env.client.post(
+        f"/cashier/orders/{env.order.id}/payments",
+        json={"payment_method": "CASH"},
+        headers={"Idempotency-Key": uuid.uuid4().hex},
+    )
+    assert pay.status_code == 200, pay.text
+    env.settlement_id = pay.json()["settlement_id"]
+    env.allocation_id = pay.json()["allocations"][0]["id"]
+
+    ref = env.client.post(
+        f"/cashier/allocations/{env.allocation_id}/refunds",
+        json={"amount": "10.00", "reason": "kismi iade"},
+        headers={"Idempotency-Key": uuid.uuid4().hex},
+    )
+    assert ref.status_code == 200, ref.text
+    env.refund_id = ref.json()["refund_id"]
+    return env

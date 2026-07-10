@@ -17,6 +17,7 @@ from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core import messages
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
 from app.models.order import Order
@@ -566,6 +567,24 @@ def update_order_status(
         _validate_undo_window(db, order_id, old_status)
     else:
         _validate_forward_transition(old_status, new_status)
+
+    # ── Guard: cannot cancel an order that still holds collected money ─────
+    # Payment state is independent of preparation state. An order with a
+    # positive net paid amount (paid − refunded) must have its collection
+    # refunded before it can be cancelled — cancellation never fabricates a
+    # refund and never silently discards collected cash.
+    if new_status == "CANCELLED":
+        paid = Decimal(str(order.paid_amount or 0))
+        refunded = Decimal(str(order.refunded_amount or 0))
+        if paid - refunded > Decimal("0"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "payment_outstanding",
+                    "current_status": old_status,
+                    "message": messages.ORDER_CANCEL_BLOCKED_PAID,
+                },
+            )
 
     # ── Apply transition ───────────────────────────────────────────────────
     snapshot_before = {"status": old_status, "order_id": order.id}

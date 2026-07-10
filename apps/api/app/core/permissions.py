@@ -16,8 +16,7 @@ ROLE_CASHIER = "CASHIER"
 CANONICAL_ROLES = [ROLE_OWNER, ROLE_MANAGER, ROLE_KITCHEN, ROLE_CASHIER]
 
 # Roles that operate against a single store and therefore MUST have a store_id.
-# (CASHIER also settles at a store, but this branch grants it no operational
-# endpoints; it is included so a store is still required for it.)
+# CASHIER settles payments at a store, so a store is likewise mandatory for it.
 OPERATIONAL_ROLES = {ROLE_OWNER, ROLE_MANAGER, ROLE_KITCHEN, ROLE_CASHIER}
 
 # ── Named permissions ────────────────────────────────────────────────────────
@@ -26,28 +25,48 @@ PERM_OWNER_DECISIONS_WRITE = "owner:decisions:write"
 PERM_KITCHEN_READ = "kitchen:read"
 PERM_KITCHEN_ORDERS_WRITE = "kitchen:orders:write"
 
+# Payment settlement / cashier permissions.
+#   payments:read    — view open tables, order bills, payment history.
+#   payments:collect — record a cash/card collection (settlement).
+#   payments:refund  — reverse previously-collected money.
+PERM_PAYMENTS_READ = "payments:read"
+PERM_PAYMENTS_COLLECT = "payments:collect"
+PERM_PAYMENTS_REFUND = "payments:refund"
+
 # ── Matrix ───────────────────────────────────────────────────────────────────
 # MANAGER matches OWNER for current operational functionality. Neither is
 # granted any user-management capability here — that is a future authenticated
-# feature. CASHIER intentionally has no permissions in this branch.
+# feature. CASHIER may read bills and collect payments but never refund.
 _ROLE_PERMISSIONS: dict[str, set[str]] = {
     ROLE_OWNER: {
         PERM_OWNER_READ,
         PERM_OWNER_DECISIONS_WRITE,
         PERM_KITCHEN_READ,
         PERM_KITCHEN_ORDERS_WRITE,
+        PERM_PAYMENTS_READ,
+        PERM_PAYMENTS_COLLECT,
+        PERM_PAYMENTS_REFUND,
     },
     ROLE_MANAGER: {
         PERM_OWNER_READ,
         PERM_OWNER_DECISIONS_WRITE,
         PERM_KITCHEN_READ,
         PERM_KITCHEN_ORDERS_WRITE,
+        PERM_PAYMENTS_READ,
+        PERM_PAYMENTS_COLLECT,
+        PERM_PAYMENTS_REFUND,
     },
     ROLE_KITCHEN: {
         PERM_KITCHEN_READ,
         PERM_KITCHEN_ORDERS_WRITE,
     },
-    ROLE_CASHIER: set(),
+    # CASHIER settles at the till: it may read bills and collect money, but must
+    # never refund (that is a MANAGER/OWNER control) and has no owner/kitchen
+    # write access.
+    ROLE_CASHIER: {
+        PERM_PAYMENTS_READ,
+        PERM_PAYMENTS_COLLECT,
+    },
 }
 
 

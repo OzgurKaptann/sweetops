@@ -9,9 +9,11 @@ from app.routers import (
     public_orders,
     public_qr,
     kitchen_orders,
+    cashier,
     owner_analytics,
     owner_insights,
     owner_metrics,
+    owner_payments,
     ws,
 )
 
@@ -34,7 +36,9 @@ app.include_router(public_menu.router)
 app.include_router(public_qr.router)
 app.include_router(public_orders.router)
 app.include_router(kitchen_orders.router)
+app.include_router(cashier.router)
 app.include_router(owner_analytics.router)
 app.include_router(owner_insights.router)
 app.include_router(owner_metrics.router)
+app.include_router(owner_payments.router)
 app.include_router(ws.router)
