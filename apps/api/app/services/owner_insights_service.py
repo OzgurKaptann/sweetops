@@ -33,7 +33,12 @@ def fetch_critical_alerts(db: Session, store_id: int):
             i.name,
             i.category,
             i.unit,
-            COALESCE(s.stock_quantity, 0) as stock_qty,
+            -- Runway is measured against AVAILABLE stock: quantity already
+            -- reserved for accepted orders cannot be sold to anyone else, so
+            -- counting it as runway would understate how close a stockout is.
+            COALESCE(s.available_quantity, 0) as stock_qty,
+            COALESCE(s.on_hand_quantity, 0) as on_hand_qty,
+            COALESCE(s.reserved_quantity, 0) as reserved_qty,
             COALESCE(s.reorder_level, 0) as reorder_lvl,
             COUNT(DISTINCT DATE(o.created_at)) as active_days,
             COUNT(oi.id) as total_selections,
@@ -46,7 +51,8 @@ def fetch_critical_alerts(db: Session, store_id: int):
         WHERE o.created_at >= :since
           AND o.store_id = :store_id
           AND o.status IN ('DELIVERED', 'READY', 'IN_PREP', 'NEW')
-        GROUP BY oi.ingredient_id, i.name, i.category, i.unit, s.stock_quantity, s.reorder_level
+        GROUP BY oi.ingredient_id, i.name, i.category, i.unit,
+                 s.available_quantity, s.on_hand_quantity, s.reserved_quantity, s.reorder_level
         ORDER BY stock_qty ASC
     """), {"since": seven_days_ago, "store_id": store_id}).fetchall()
 
@@ -57,10 +63,12 @@ def fetch_critical_alerts(db: Session, store_id: int):
         category = row[2]
         unit = row[3]
         stock_qty = float(row[4])
-        reorder_lvl = float(row[5])
-        active_days = max(int(row[6]), 1)
-        total_selections = int(row[7])
-        total_revenue = float(row[8])
+        on_hand_qty = float(row[5])
+        reserved_qty = float(row[6])
+        reorder_lvl = float(row[7])
+        active_days = max(int(row[8]), 1)
+        total_selections = int(row[9])
+        total_revenue = float(row[10])
 
         avg_daily_selections = total_selections / active_days
         avg_daily_revenue = total_revenue / active_days
@@ -97,7 +105,10 @@ def fetch_critical_alerts(db: Session, store_id: int):
             "ingredient_name": name,
             "category": category,
             "unit": unit,
-            "stock_quantity": stock_qty,
+            "stock_quantity": on_hand_qty,   # legacy alias — physical on-hand
+            "on_hand_quantity": on_hand_qty,
+            "reserved_quantity": reserved_qty,
+            "available_quantity": stock_qty,
             "days_remaining": round(days_remaining, 1),
             "severity": severity,
             "message": message,

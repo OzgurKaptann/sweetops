@@ -20,11 +20,16 @@ api_dir = os.path.join(current_dir, '..', 'apps', 'api')
 sys.path.insert(0, api_dir)
 sys.path.insert(0, '/app')
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.core.db import SessionLocal
 from app.models.product import Product
 from app.models.ingredient import Ingredient
-from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
+from app.models.ingredient_stock import (
+    IngredientStock,
+    IngredientStockMovement,
+    OrderInventoryLine,
+)
 from app.models.store import Store
 from app.models.table import Table
 from app.models.order import Order
@@ -56,12 +61,28 @@ HEAVY_USE = ["Nutella", "Çilek", "Muz"]
 
 
 def clear_transactional_data(db: Session):
+    """
+    Wipe demo transactional data.
+
+    The inventory ledger is append-only in production: a trigger refuses UPDATE
+    and DELETE, with no runtime bypass. Wiping it therefore needs the same
+    ownership-gated escape hatch the test teardown uses — ALTER TABLE ... DISABLE
+    TRIGGER requires table ownership and is not reachable from ordinary
+    application DML, so this is a dev-tool affordance, not a production hole.
+    """
     logger.info("Clearing existing transactional data...")
     db.query(OrderStatusEvent).delete()
-    db.query(OrderItemIngredient).delete()
-    db.query(OrderItem).delete()
-    db.query(Order).delete()
-    db.query(IngredientStockMovement).delete()
+    db.execute(text("ALTER TABLE ingredient_stock_movements DISABLE TRIGGER "
+                    "trg_ingredient_stock_movements_immutable"))
+    try:
+        db.query(IngredientStockMovement).delete()
+        db.query(OrderInventoryLine).delete()
+        db.query(OrderItemIngredient).delete()
+        db.query(OrderItem).delete()
+        db.query(Order).delete()
+    finally:
+        db.execute(text("ALTER TABLE ingredient_stock_movements ENABLE TRIGGER "
+                        "trg_ingredient_stock_movements_immutable"))
     db.commit()
     logger.info("Cleared.")
 
@@ -76,18 +97,19 @@ def reset_stock_to_initial(db: Session):
         # Heavy-use ingredients get less starting stock → will show warnings
         if ing.name in HEAVY_USE:
             if ing.unit == "g":
-                s.stock_quantity = Decimal('800')  # Will drop to ~200 after 14 days
+                s.on_hand_quantity = Decimal('800')  # Will drop to ~200 after 14 days
             elif ing.unit == "ml":
-                s.stock_quantity = Decimal('400')
+                s.on_hand_quantity = Decimal('400')
             else:
-                s.stock_quantity = Decimal('30')
+                s.on_hand_quantity = Decimal('30')
         else:
             if ing.unit == "g":
-                s.stock_quantity = Decimal('2000')
+                s.on_hand_quantity = Decimal('2000')
             elif ing.unit == "ml":
-                s.stock_quantity = Decimal('1000')
+                s.on_hand_quantity = Decimal('1000')
             else:
-                s.stock_quantity = Decimal('100')
+                s.on_hand_quantity = Decimal('100')
+        s.reserved_quantity = Decimal('0')
     db.commit()
     logger.info("Stock levels reset.")
 
@@ -215,7 +237,10 @@ def generate_demo_orders(db: Session):
             db.add(item)
             db.flush()
 
-            # Order item ingredients with consumption snapshot
+            # Order item ingredients with consumption snapshot + the inventory
+            # line. These demo orders are all DELIVERED, so they were reserved
+            # and then physically consumed: reserved == consumed, nothing
+            # outstanding.
             for ing in selected_ings:
                 consumed_qty = float(ing.standard_quantity) if ing.standard_quantity else 0
                 oi_ing = OrderItemIngredient(
@@ -228,6 +253,16 @@ def generate_demo_orders(db: Session):
                 )
                 db.add(oi_ing)
 
+                if consumed_qty > 0:
+                    db.add(OrderInventoryLine(
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        ingredient_id=ing.id,
+                        reserved_quantity=Decimal(str(consumed_qty)),
+                        consumed_quantity=Decimal(str(consumed_qty)),
+                        unit=ing.unit,
+                    ))
+
                 # Track stock consumed
                 key = ing.id
                 total_stock_deductions[key] = total_stock_deductions.get(key, 0) + consumed_qty
@@ -236,34 +271,56 @@ def generate_demo_orders(db: Session):
 
     db.commit()
 
-    # Apply stock deductions
+    # Apply stock deductions. Each ingredient gets the RESERVATION_CREATED /
+    # CONSUMPTION pair the real lifecycle would have produced, so reserved nets
+    # back to zero and the ledger's on-hand deltas still sum to the summary.
     for ing_id, total_consumed in total_stock_deductions.items():
+        if total_consumed <= 0:
+            continue
         stock = db.query(IngredientStock).filter(IngredientStock.ingredient_id == ing_id).first()
-        if stock:
-            stock.stock_quantity = max(Decimal('0'), Decimal(str(float(stock.stock_quantity) - total_consumed)))
+        if not stock:
+            continue
 
-            # Create a summary movement
-            movement = IngredientStockMovement(
-                ingredient_id=ing_id,
-                movement_type="ORDER_DEDUCTION",
-                quantity_delta=-total_consumed,
-                unit=stock.unit,
-                reference_type="demo_seed",
-                reference_id=0,
-                note=f"Demo seed: {total_consumed:.0f} {stock.unit} consumed across {total_orders} orders",
-            )
-            db.add(movement)
+        qty = Decimal(str(total_consumed))
+        stock.on_hand_quantity = max(
+            Decimal('0'), Decimal(str(stock.on_hand_quantity)) - qty
+        )
+
+        db.add(IngredientStockMovement(
+            ingredient_id=ing_id,
+            movement_type="RESERVATION_CREATED",
+            quantity=qty,
+            quantity_delta_on_hand=Decimal('0'),
+            quantity_delta_reserved=qty,
+            unit=stock.unit,
+            reason=f"Demo seed: reserved across {total_orders} orders",
+        ))
+        db.add(IngredientStockMovement(
+            ingredient_id=ing_id,
+            movement_type="CONSUMPTION",
+            quantity=qty,
+            quantity_delta_on_hand=-qty,
+            quantity_delta_reserved=-qty,
+            unit=stock.unit,
+            reason=f"Demo seed: {total_consumed:.0f} {stock.unit} consumed across {total_orders} orders",
+        ))
 
     db.commit()
     logger.info(f"Generated {total_orders} orders across 14 days.")
 
-    # Log stock warnings
+    # NOTE: reset_stock_levels() above writes on-hand directly, without a ledger
+    # movement, so a demo database is intentionally NOT ledger-reconciled — the
+    # opening balance was overwritten. scripts/reconcile_inventory.py will report
+    # that drift, correctly. This seeder is a dev/demo tool only.
     logger.info("--- Stock status after demo seed ---")
     stocks = db.query(IngredientStock).join(Ingredient).all()
     for s in stocks:
         ing = db.query(Ingredient).filter(Ingredient.id == s.ingredient_id).first()
-        level = "🔴 CRITICAL" if float(s.stock_quantity) <= float(s.reorder_level or 0) else "✅ OK"
-        logger.info(f"  {level} {ing.name}: {float(s.stock_quantity):.0f} {s.unit}")
+        level = "🔴 CRITICAL" if float(s.available_quantity) <= float(s.reorder_level or 0) else "✅ OK"
+        logger.info(
+            f"  {level} {ing.name}: on-hand {float(s.on_hand_quantity):.0f} "
+            f"/ available {float(s.available_quantity):.0f} {s.unit}"
+        )
 
 
 def main():

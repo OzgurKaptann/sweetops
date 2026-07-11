@@ -64,7 +64,7 @@ def test_public_menu_categories_have_ingredients():
 
 def test_order_creation_requires_ingredients(db):
     """New service rejects orders with no ingredient selections."""
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
     payload = {
         "store_id": 1,
@@ -79,7 +79,7 @@ def test_order_creation_requires_ingredients(db):
 
 
 def test_order_creation_success(db):
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
     payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
     r = client.post("/public/orders/", json=payload, headers=headers)
@@ -124,7 +124,7 @@ def test_kitchen_orders_returns_dashboard(kitchen_client):
 
 
 def test_kitchen_orders_shape(db, kitchen_client):
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
     payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
     client.post("/public/orders/", json=payload, headers=headers)
 

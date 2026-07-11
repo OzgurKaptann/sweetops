@@ -52,7 +52,7 @@ def _connect(client: TestClient, *, origin: str | None = TRUSTED_KITCHEN_ORIGIN)
 
 
 def _order_in_store(db, store_id: int):
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("200.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("200.00"))
     payload = {
         "store_id": store_id,
         "items": [{"product_id": 1, "quantity": 1,

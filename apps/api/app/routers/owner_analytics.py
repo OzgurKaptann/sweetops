@@ -125,6 +125,16 @@ def get_stock_status(
     """
     Return stock status for all ingredients with severity levels.
 
+    Severity is judged on AVAILABLE stock (on_hand - reserved) — what the shop
+    can still sell — while on-hand and reserved are reported alongside it so the
+    owner can tell a physical shortage ("we are out of pistachio") apart from a
+    demand shortage ("we still have pistachio, but it is all promised to open
+    orders"). Those need opposite responses, so they must never be one number.
+
+    ``stock_quantity`` is retained as an alias of on_hand_quantity so the
+    existing owner-web contract does not break; new clients should read the
+    explicit fields.
+
     Inventory is global in the current schema, so this fails closed with a
     Turkish error when more than one operational store exists.
     """
@@ -135,7 +145,9 @@ def get_stock_status(
         Ingredient.name,
         Ingredient.category,
         Ingredient.unit,
-        IngredientStock.stock_quantity,
+        IngredientStock.on_hand_quantity,
+        IngredientStock.reserved_quantity,
+        IngredientStock.available_quantity,
         IngredientStock.reorder_level,
     ).join(
         IngredientStock, IngredientStock.ingredient_id == Ingredient.id
@@ -148,18 +160,24 @@ def get_stock_status(
     warning_count = 0
 
     for row in stocks:
-        stock_qty = float(row.stock_quantity) if row.stock_quantity else 0
+        on_hand = float(row.on_hand_quantity or 0)
+        reserved = float(row.reserved_quantity or 0)
+        avail = float(row.available_quantity or 0)
         reorder = float(row.reorder_level) if row.reorder_level else 0
 
-        if stock_qty <= 0:
+        if avail <= 0:
             severity = "critical"
-            message = "Stok tükendi!"
+            # Distinguish the two very different ways of having nothing to sell.
+            message = (
+                "Stok tükendi!" if on_hand <= 0
+                else "Kalan stok bekleyen siparişler için ayrıldı"
+            )
             critical_count += 1
-        elif reorder > 0 and stock_qty <= reorder:
+        elif reorder > 0 and avail <= reorder:
             severity = "warning"
             message = "Stok azalıyor"
             warning_count += 1
-        elif reorder > 0 and stock_qty <= reorder * 1.5:
+        elif reorder > 0 and avail <= reorder * 1.5:
             severity = "low"
             message = "Stok düşük"
         else:
@@ -171,7 +189,10 @@ def get_stock_status(
             "ingredient_name": row.name,
             "category": row.category,
             "unit": row.unit,
-            "stock_quantity": stock_qty,
+            "on_hand_quantity": on_hand,
+            "reserved_quantity": reserved,
+            "available_quantity": avail,
+            "stock_quantity": on_hand,  # legacy alias — see docstring
             "reorder_level": reorder,
             "severity": severity,
             "message": message,

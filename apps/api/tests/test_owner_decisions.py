@@ -36,7 +36,12 @@ from app.services.decision_engine import (
     apply_decision_action,
     get_owner_decisions,
 )
-from tests.conftest import cleanup_ingredient, make_ingredient, order_payload
+from tests.conftest import (
+    _inventory_maintenance,
+    cleanup_ingredient,
+    make_ingredient,
+    order_payload,
+)
 
 client = TestClient(app)
 
@@ -56,17 +61,45 @@ def _backdate(db, order_id: int, minutes_ago: float) -> None:
 def _add_movement(
     db,
     ingredient_id: int,
-    quantity_delta: float,
-    movement_type: str = "ORDER_DEDUCTION",
+    quantity: float,
+    movement_type: str = "CONSUMPTION",
     hours_ago: float = 1.0,
 ) -> IngredientStockMovement:
+    """
+    Append one ledger movement.
+
+    ``quantity`` is the positive magnitude; the deltas are derived from the
+    movement type, exactly as the database CHECK constraint demands. Stock-risk
+    velocity is measured from CONSUMPTION — what the kitchen physically burned —
+    so that is the default.
+    """
     ts = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    qty = Decimal(str(abs(quantity)))
+
+    if movement_type == "CONSUMPTION":
+        delta_on_hand, delta_reserved = -qty, -qty
+    elif movement_type == "RESERVATION_CREATED":
+        delta_on_hand, delta_reserved = Decimal("0"), qty
+    elif movement_type == "RESERVATION_RELEASED":
+        delta_on_hand, delta_reserved = Decimal("0"), -qty
+    elif movement_type in ("PURCHASE_RECEIPT", "RETURNED"):
+        delta_on_hand, delta_reserved = qty, Decimal("0")
+    elif movement_type == "WASTE":
+        delta_on_hand, delta_reserved = -qty, Decimal("0")
+    else:
+        raise AssertionError(f"unsupported movement_type for this helper: {movement_type}")
+
     mv = IngredientStockMovement(
         ingredient_id=ingredient_id,
         movement_type=movement_type,
-        quantity_delta=Decimal(str(quantity_delta)),
+        quantity=qty,
+        quantity_delta_on_hand=delta_on_hand,
+        quantity_delta_reserved=delta_reserved,
         unit="g",
         created_at=ts,
+        # These synthetic rows carry no actor; flagging them legacy keeps them
+        # inside the actor/reason constraints without inventing an operator.
+        legacy_backfill=True,
     )
     db.add(mv)
     db.commit()
@@ -75,9 +108,10 @@ def _add_movement(
 
 
 def _cleanup_movements(db, ingredient_id: int) -> None:
-    db.query(IngredientStockMovement).filter(
-        IngredientStockMovement.ingredient_id == ingredient_id
-    ).delete(synchronize_session=False)
+    with _inventory_maintenance(db):
+        db.query(IngredientStockMovement).filter(
+            IngredientStockMovement.ingredient_id == ingredient_id
+        ).delete(synchronize_session=False)
     db.commit()
 
 
@@ -351,7 +385,7 @@ class TestDecisionOrdering:
     def test_decisions_sorted_by_score_desc(self, db):
         """After GET, decisions must come back in score DESC order."""
         # Force a zero-stock ingredient to guarantee a high-score signal
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
         result = get_owner_decisions(db, 1)
 
         scores = [d["decision_score"] for d in result["decisions"]]
@@ -364,8 +398,8 @@ class TestDecisionOrdering:
         Two decisions with identical score must be ordered id ASC.
         We use two slow-moving ingredients (both score = medium base = 50).
         """
-        ing_a, _ = make_ingredient(db, stock_quantity=Decimal("50.00"), name="AAA_slow")
-        ing_b, _ = make_ingredient(db, stock_quantity=Decimal("50.00"), name="ZZZ_slow")
+        ing_a, _ = make_ingredient(db, on_hand=Decimal("50.00"), name="AAA_slow")
+        ing_b, _ = make_ingredient(db, on_hand=Decimal("50.00"), name="ZZZ_slow")
         # Remove any movements so they're both slow-moving
         _cleanup_movements(db, ing_a.id)
         _cleanup_movements(db, ing_b.id)
@@ -395,7 +429,7 @@ class TestDecisionOrdering:
 
 class TestStockRiskSignals:
     def test_zero_stock_is_high_severity(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
         signals = _stock_risk_signals(db)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
         assert match is not None
@@ -405,7 +439,7 @@ class TestStockRiskSignals:
         cleanup_ingredient(db, ing.id)
 
     def test_high_velocity_high_severity(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("5.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("5.00"))
         _add_movement(db, ing.id, -24.0, hours_ago=12)  # 1g/h → stockout 5h < 6h
         signals = _stock_risk_signals(db)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
@@ -416,14 +450,14 @@ class TestStockRiskSignals:
         cleanup_ingredient(db, ing.id)
 
     def test_healthy_stock_not_flagged(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         signals = _stock_risk_signals(db)
         flagged = {s["data"]["ingredient_id"] for s in signals}
         assert ing.id not in flagged
         cleanup_ingredient(db, ing.id)
 
     def test_old_movements_not_counted(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("5.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("5.00"))
         _add_movement(db, ing.id, -48.0, hours_ago=25)  # outside 24h window
         signals = _stock_risk_signals(db)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
@@ -435,7 +469,7 @@ class TestStockRiskSignals:
 
 class TestSlowMovingSignals:
     def test_no_demand_flags_ingredient(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         _cleanup_movements(db, ing.id)
         signals = _slow_moving_signals(db)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
@@ -445,7 +479,7 @@ class TestSlowMovingSignals:
         cleanup_ingredient(db, ing.id)
 
     def test_recent_demand_clears_flag(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         _add_movement(db, ing.id, -5.0, hours_ago=2)
         signals = _slow_moving_signals(db)
         flagged = {s["data"]["ingredient_id"] for s in signals}
@@ -456,7 +490,7 @@ class TestSlowMovingSignals:
 
 class TestSlaRiskSignals:
     def test_critical_breach_is_high_blocking(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
         assert r.status_code == 200
@@ -472,7 +506,7 @@ class TestSlaRiskSignals:
         cleanup_ingredient(db, ing.id)
 
     def test_fresh_order_not_in_sla_signal(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
         assert r.status_code == 200
@@ -536,7 +570,7 @@ class TestGetOwnerDecisions:
         Calling get_owner_decisions twice must not reset a pending→acknowledged
         decision back to pending.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
 
         result1 = get_owner_decisions(db, 1)
         decision_id = next(d["id"] for d in result1["decisions"] if d["type"] == "stock_risk")
@@ -714,7 +748,7 @@ class TestCooldownBehavior:
         A completed decision updated just now must NOT reappear as pending
         on the next evaluation within the cooldown window.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
 
         # First evaluation — creates pending row
         result1 = get_owner_decisions(db, 1)
@@ -738,7 +772,7 @@ class TestCooldownBehavior:
         A completed decision whose updated_at is older than COOLDOWN_HOURS
         must re-appear as pending on the next evaluation.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
 
         result1 = get_owner_decisions(db, 1)
         decision_id = next(
@@ -767,7 +801,7 @@ class TestCooldownBehavior:
         cleanup_ingredient(db, ing.id)
 
     def test_dismissed_within_cooldown_is_suppressed(self, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
 
         result1 = get_owner_decisions(db, 1)
         decision_id = next(
@@ -786,7 +820,7 @@ class TestCooldownBehavior:
         A pending decision must have its mutable fields updated on re-evaluation,
         without changing the status.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
 
         result1 = get_owner_decisions(db, 1)
         decision_id = next(
@@ -821,7 +855,7 @@ class TestDecisionsEndpointGet:
             assert field in body
 
     def test_each_decision_has_all_fields(self, owner_client, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
         body = owner_client.get("/owner/decisions/").json()
         required = (
             "id", "type", "severity", "decision_score", "blocking_vs_non_blocking",
@@ -851,7 +885,7 @@ class TestDecisionsEndpointGet:
             assert d["status"] in ("pending", "acknowledged", "completed", "dismissed")
 
     def test_sorted_by_score_desc(self, owner_client, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
         body = owner_client.get("/owner/decisions/").json()
         scores = [d["decision_score"] for d in body["decisions"]]
         assert scores == sorted(scores, reverse=True)
@@ -860,7 +894,7 @@ class TestDecisionsEndpointGet:
 
 class TestDecisionsEndpointPatch:
     def test_acknowledge_via_http(self, owner_client, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
         body = owner_client.get("/owner/decisions/").json()
         decision_id = next(d["id"] for d in body["decisions"] if d["type"] == "stock_risk")
 
@@ -879,7 +913,7 @@ class TestDecisionsEndpointPatch:
         cleanup_ingredient(db, ing.id)
 
     def test_complete_via_http(self, owner_client, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
         body = owner_client.get("/owner/decisions/").json()
         decision_id = next(d["id"] for d in body["decisions"] if d["type"] == "stock_risk")
 
@@ -895,7 +929,7 @@ class TestDecisionsEndpointPatch:
         cleanup_ingredient(db, ing.id)
 
     def test_dismiss_via_http(self, owner_client, db):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
         body = owner_client.get("/owner/decisions/").json()
         decision_id = next(d["id"] for d in body["decisions"] if d["type"] == "stock_risk")
 

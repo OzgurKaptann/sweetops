@@ -5,9 +5,15 @@ Proves, against the real database, that the payment migration
 (``b8c4d1e6f207``) is reversible and re-appliable and that its append-only
 immutability guard is (re)installed on every upgrade:
 
-  9.  ``alembic downgrade -1`` succeeds after the immutable triggers are
-      installed, and removes every payment trigger, trigger function and table.
+  9.  Downgrading past the payment revision succeeds after the immutable
+      triggers are installed, and removes every payment trigger, trigger
+      function and table.
   10. ``alembic upgrade head`` recreates all three immutability triggers.
+
+The payment migration is no longer the head revision — the inventory lifecycle
+sits on top of it — so the downgrade names the revision BELOW payment instead of
+using a relative ``-1``. Alembic unwinds the intervening revision on the way,
+which is exactly what a real rollback past payment would have to do.
 
 The test drops the engine's pooled connections around each Alembic run so the
 schema-level ALTER/DROP statements are not blocked by an idle in-transaction
@@ -29,6 +35,9 @@ _IMMUTABLE_TRIGGERS = (
     ("payment_refunds", "trg_payment_refunds_immutable"),
 )
 _LEDGER_TABLES = ("payment_settlements", "payment_allocations", "payment_refunds")
+
+# The revision immediately below the payment migration (staff auth + RBAC).
+_BELOW_PAYMENT = "a7d3f9b21c05"
 
 
 def _alembic(*args: str) -> None:
@@ -87,8 +96,8 @@ def test_downgrade_then_reupgrade_reinstalls_immutability(restore_head):
     for table, trig in _IMMUTABLE_TRIGGERS:
         assert _trigger_exists(table, trig), f"{trig} missing before downgrade"
 
-    # 9. Downgrade removes payment triggers, functions and tables cleanly.
-    _alembic("downgrade", "-1")
+    # 9. Downgrade past payment removes its triggers, functions and tables cleanly.
+    _alembic("downgrade", _BELOW_PAYMENT)
     for table in _LEDGER_TABLES:
         assert not _table_exists(table), f"{table} still present after downgrade"
     assert not _function_exists("sweetops_block_ledger_mutation")

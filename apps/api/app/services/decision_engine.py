@@ -42,7 +42,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.ingredient import Ingredient
-from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
+from app.models.ingredient_stock import (
+    MOVEMENT_CONSUMPTION,
+    IngredientStock,
+    IngredientStockMovement,
+)
 from app.models.order import Order
 from app.models.owner_decision import OwnerDecision
 
@@ -227,25 +231,35 @@ def _stock_risk_signals(db: Session) -> list[dict]:
         .all()
     )
 
+    # Velocity is the rate at which stock is PHYSICALLY consumed — CONSUMPTION
+    # movements only. Reservations are not consumption: an order that is sitting
+    # in the queue (or is about to be cancelled) has not burned any batter, and
+    # counting it here would inflate the burn rate and cry stockout too early.
     movements = (
         db.query(
             IngredientStockMovement.ingredient_id,
-            func.sum(IngredientStockMovement.quantity_delta).label("total_delta"),
+            func.sum(IngredientStockMovement.quantity).label("total_consumed"),
         )
         .filter(
-            IngredientStockMovement.movement_type == "ORDER_DEDUCTION",
+            IngredientStockMovement.movement_type == MOVEMENT_CONSUMPTION,
             IngredientStockMovement.created_at >= window_start,
         )
         .group_by(IngredientStockMovement.ingredient_id)
         .all()
     )
     velocity_map: dict[int, float] = {
-        m.ingredient_id: abs(float(m.total_delta)) / 24.0 for m in movements
+        m.ingredient_id: float(m.total_consumed) / 24.0 for m in movements
     }
 
     signals: list[dict] = []
     for ing, stock in rows:
-        current_qty = float(stock.stock_quantity)
+        # Stockout risk is about what we can still SELL, so it runs off
+        # available (on_hand - reserved), not on_hand. Stock already promised to
+        # accepted orders cannot be sold again, and treating it as if it could
+        # would hide a stockout that has effectively already happened.
+        current_qty = float(stock.available_quantity)
+        on_hand_qty = float(stock.on_hand_quantity)
+        reserved_qty = float(stock.reserved_quantity)
         reorder     = float(stock.reorder_level) if stock.reorder_level else 0.0
 
         if current_qty > reorder:
@@ -290,7 +304,13 @@ def _stock_risk_signals(db: Session) -> list[dict]:
             "ingredient_id":     ing.id,
             "ingredient_name":   ing.name,
             "unit":              ing.unit,
+            # current_stock is the AVAILABLE quantity — what the shop can still
+            # sell. on_hand/reserved are surfaced alongside it so the owner can
+            # see whether a shortage is physical or merely promised away.
             "current_stock":     current_qty,
+            "available_quantity": current_qty,
+            "on_hand_quantity":  on_hand_qty,
+            "reserved_quantity": reserved_qty,
             "reorder_level":     reorder,
             "velocity_per_hour": round(velocity, 3),
             "hours_to_stockout": round(hours_to_stockout, 1) if hours_to_stockout is not None else None,
@@ -397,11 +417,13 @@ def _slow_moving_signals(db: Session) -> list[dict]:
     now          = _now_utc()
     window_start = now - timedelta(hours=24)
 
+    # "Moving" means physically consumed in the kitchen. An ingredient that only
+    # sat in reservations for orders that never got cooked has not moved.
     active_ids: set[int] = {
         row.ingredient_id
         for row in db.query(IngredientStockMovement.ingredient_id)
         .filter(
-            IngredientStockMovement.movement_type == "ORDER_DEDUCTION",
+            IngredientStockMovement.movement_type == MOVEMENT_CONSUMPTION,
             IngredientStockMovement.created_at >= window_start,
         )
         .distinct()
@@ -417,7 +439,9 @@ def _slow_moving_signals(db: Session) -> list[dict]:
 
     signals: list[dict] = []
     for ing, stock in rows:
-        current_qty = float(stock.stock_quantity)
+        # Slow-moving is about capital sitting on the shelf, so this one is
+        # correctly about PHYSICAL stock (on-hand), not availability.
+        current_qty = float(stock.on_hand_quantity)
         reorder     = float(stock.reorder_level) if stock.reorder_level else 0.0
 
         if current_qty <= 0:

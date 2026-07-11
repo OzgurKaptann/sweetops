@@ -24,7 +24,10 @@ from tests.conftest import cleanup_ingredient, make_ingredient, order_payload
 
 class TestStockNeverGoesNegative:
     """
-    Core invariant: stock_quantity must never drop below 0.
+    Core invariant: AVAILABLE stock must never drop below 0 — the shop can never
+    promise more than it physically holds. Under the reservation lifecycle,
+    order creation moves `reserved`, not `on_hand`, so these tests assert on
+    availability (on_hand - reserved), which is what order acceptance gates on.
     """
 
     def test_two_concurrent_requests_exactly_one_stock_unit(self, db, client):
@@ -37,7 +40,7 @@ class TestStockNeverGoesNegative:
         """
         ing, stock = make_ingredient(
             db,
-            stock_quantity=Decimal("10.00"),
+            on_hand=Decimal("10.00"),
             standard_quantity=Decimal("10.00"),  # 10g per order = fits exactly 1
         )
 
@@ -65,13 +68,18 @@ class TestStockNeverGoesNegative:
         assert successes == 1, f"Expected exactly 1 success, got {successes}. Results: {results}"
         assert failures == 1, f"Expected exactly 1 failure (422), got {failures}. Results: {results}"
 
-        # Verify stock is exactly 0 — never negative
+        # Availability is exactly 0 — never negative. Physical stock is untouched:
+        # nothing has been cooked yet.
         db.expire_all()
         final_stock = db.query(
             __import__("app.models.ingredient_stock", fromlist=["IngredientStock"]).IngredientStock
         ).filter_by(ingredient_id=ing.id).first()
-        assert final_stock.stock_quantity == Decimal("0.00"), (
-            f"Stock should be 0, got {final_stock.stock_quantity}"
+        assert final_stock.available_quantity == Decimal("0.00"), (
+            f"Available should be 0, got {final_stock.available_quantity}"
+        )
+        assert final_stock.reserved_quantity == Decimal("10.00")
+        assert final_stock.on_hand_quantity == Decimal("10.00"), (
+            "Reserving must never consume physical stock"
         )
 
         cleanup_ingredient(db, ing.id)
@@ -87,7 +95,7 @@ class TestStockNeverGoesNegative:
 
         ing, stock = make_ingredient(
             db,
-            stock_quantity=Decimal("100.00"),
+            on_hand=Decimal("100.00"),
             standard_quantity=Decimal("10.00"),
         )
 
@@ -116,11 +124,13 @@ class TestStockNeverGoesNegative:
         db.expire_all()
         final_stock = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
 
-        expected = Decimal("100.00") - (5 * Decimal("10.00"))  # = 50
-        assert final_stock.stock_quantity == expected, (
-            f"Expected {expected}, got {final_stock.stock_quantity}"
+        expected = Decimal("100.00") - (5 * Decimal("10.00"))  # = 50 available
+        assert final_stock.available_quantity == expected, (
+            f"Expected available {expected}, got {final_stock.available_quantity}"
         )
-        assert final_stock.stock_quantity >= Decimal("0"), "Stock must not be negative"
+        assert final_stock.reserved_quantity == 5 * Decimal("10.00")
+        assert final_stock.on_hand_quantity == Decimal("100.00")
+        assert final_stock.available_quantity >= Decimal("0"), "Available must not be negative"
 
         cleanup_ingredient(db, ing.id)
 
@@ -136,7 +146,7 @@ class TestStockNeverGoesNegative:
 
         ing, stock = make_ingredient(
             db,
-            stock_quantity=Decimal("30.00"),
+            on_hand=Decimal("30.00"),
             standard_quantity=Decimal("10.00"),
         )
 
@@ -168,23 +178,24 @@ class TestStockNeverGoesNegative:
 
         db.expire_all()
         final_stock = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert final_stock.stock_quantity == Decimal("0.00"), (
-            f"Stock should be exactly 0, got {final_stock.stock_quantity}"
+        assert final_stock.available_quantity == Decimal("0.00"), (
+            f"Available should be exactly 0, got {final_stock.available_quantity}"
         )
-        assert final_stock.stock_quantity >= Decimal("0"), "Stock must never go negative"
+        assert final_stock.available_quantity >= Decimal("0"), "Available must never go negative"
+        assert final_stock.reserved_quantity == Decimal("30.00")
 
         cleanup_ingredient(db, ing.id)
 
     def test_movement_log_count_matches_successful_orders(self, db, client):
         """
-        Every successful order must produce exactly one ORDER_DEDUCTION movement.
-        Movement count = success count.  No phantom deductions.
+        Every successful order produces exactly one RESERVATION_CREATED movement.
+        Movement count = success count. No phantom reservations.
         """
         from app.models.ingredient_stock import IngredientStockMovement
 
         ing, stock = make_ingredient(
             db,
-            stock_quantity=Decimal("20.00"),
+            on_hand=Decimal("20.00"),
             standard_quantity=Decimal("10.00"),
         )
 
@@ -213,7 +224,7 @@ class TestStockNeverGoesNegative:
             db.query(IngredientStockMovement)
             .filter_by(
                 ingredient_id=ing.id,
-                movement_type="ORDER_DEDUCTION",
+                movement_type="RESERVATION_CREATED",
             )
             .count()
         )
@@ -221,5 +232,9 @@ class TestStockNeverGoesNegative:
         assert movement_count == successes, (
             f"Movement records ({movement_count}) must equal successful orders ({successes})"
         )
+        # None of them cooked anything.
+        assert db.query(IngredientStockMovement).filter_by(
+            ingredient_id=ing.id, movement_type="CONSUMPTION"
+        ).count() == 0
 
         cleanup_ingredient(db, ing.id)

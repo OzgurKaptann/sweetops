@@ -2,19 +2,24 @@
 Order Service — production-grade order creation.
 
 Key guarantees:
-  1. Idempotent: same idempotency_key returns existing order, never duplicates.
-  2. Transactional stock validation: SELECT ... FOR UPDATE row locks prevent
-     concurrent over-deduction. If any ingredient is insufficient, the entire
-     transaction is rolled back and a 422 is returned.
-  3. Stock is deducted at order creation — customers are rejected immediately
-     if stock is unavailable, not silently at kitchen time.
+  1. Idempotent: same idempotency_key returns existing order, never duplicates
+     and never double-reserves — including under a concurrent retry, where the
+     unique key constraint makes the loser return the winner's order.
+  2. Transactional stock validation: SELECT ... FOR UPDATE row locks (taken in
+     ascending ingredient_id order) prevent concurrent over-reservation. If any
+     ingredient is short, the whole transaction rolls back with a 422.
+  3. Order creation RESERVES stock; it does not consume it. Physical on-hand
+     stock only falls when the kitchen actually starts cooking. A customer is
+     still rejected immediately when stock is unavailable — availability is
+     tested against (on_hand - reserved), so the shop can never promise the same
+     ingredient twice.
   4. Every mutation is audit-logged inside the same transaction.
 """
 import logging
 from datetime import timezone
 from decimal import Decimal
 from fastapi import BackgroundTasks, HTTPException
-from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import messages
@@ -22,14 +27,15 @@ from app.core.config import settings
 from app.services.qr_token_service import resolve_token, QrTableUnavailable
 from app.models.audit_log import AuditLog  # noqa — ensure model registered
 from app.models.ingredient import Ingredient
-from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_item_ingredient import OrderItemIngredient
 from app.models.order_status_event import OrderStatusEvent
 from app.models.product import Product
 from app.schemas.order import OrderCreateRequest, OrderCreatedResponse
+from app.services import inventory_service
 from app.services.audit_service import audit
+from app.services.inventory_service import InsufficientStock
 
 logger = logging.getLogger(__name__)
 
@@ -44,16 +50,23 @@ def calculate_consumed_quantity(
     item_quantity: int,
 ) -> Decimal:
     """
-    Physical ingredient consumption for a single order-item line.
+    Ingredient quantity required by a single order-item line.
 
-    consumed = standard_quantity (per portion)
+    required = standard_quantity (per portion)
              × selected_quantity (portions per product)
              × item_quantity     (number of products ordered)
 
-    This is the ONE canonical formula. It is reused for stock validation,
-    persisted consumption, stock deduction, movement logging and — via the
-    persisted value — cancellation restoration, so those figures can never
-    drift apart.
+    This is the ONE canonical formula. It is reused for availability validation,
+    the persisted per-line requirement, the reservation, the ledger movement
+    and — via order_inventory_lines — the eventual consumption and release, so
+    those figures can never drift apart.
+
+    Note on naming: this quantity is what the order WILL consume if it is
+    cooked. Under the reservation lifecycle it is reserved at creation and only
+    becomes physical consumption at start-of-preparation. The function name (and
+    the OrderItemIngredient.consumed_quantity column it feeds) predate the
+    lifecycle and are kept to avoid a gratuitous rename of a stable contract;
+    the authoritative lifecycle state lives in order_inventory_lines.
     """
     return standard_quantity * selected_quantity * item_quantity
 
@@ -73,14 +86,19 @@ def create_order(
     Create an order.
 
     Idempotency:
-        If idempotency_key already exists in orders table, returns the
-        existing order immediately without touching stock.
+        If idempotency_key already exists in the orders table, returns the
+        existing order immediately without touching stock. A concurrent retry
+        that races past that check is caught by the unique constraint on
+        orders.idempotency_key and resolved to the same order — so a retry can
+        never produce a second reservation.
 
-    Stock validation:
-        All required ingredient quantities are checked inside a single
-        transaction using SELECT … FOR UPDATE row locks. Any shortfall
-        triggers a 422 with a list of the unavailable ingredients.
-        On success, stock is deducted atomically in the same transaction.
+    Stock:
+        Availability (on_hand - reserved) for every required ingredient is
+        checked inside a single transaction under SELECT … FOR UPDATE row locks
+        taken in ascending ingredient_id order. Any shortfall triggers a 422
+        listing the unavailable ingredients. On success the order RESERVES those
+        quantities atomically in the same transaction — physical on-hand stock
+        is untouched until the kitchen starts preparation.
     """
     # ── 1. Idempotency check ─────────────────────────────────────────────
     if idempotency_key:
@@ -138,117 +156,146 @@ def create_order(
             )
             required[ing.id] = required.get(ing.id, Decimal("0")) + consumed
 
-    # ── 4. Stock validation — SELECT … FOR UPDATE (row-level lock) ───────
-    # Each ingredient_stock row is locked. Concurrent orders for the
-    # same ingredient queue here. No lost update possible.
-    out_of_stock: list[str] = []
-    stock_rows: dict[int, IngredientStock] = {}
-
-    for ing_id, needed in required.items():
-        stock = db.execute(
-            select(IngredientStock)
-            .where(IngredientStock.ingredient_id == ing_id)
-            .with_for_update()
-        ).scalar_one_or_none()
-
-        if stock is None or stock.stock_quantity < needed:
-            out_of_stock.append(ingredients_by_id[ing_id].name)
-        else:
-            stock_rows[ing_id] = stock
-
-    if out_of_stock:
-        # Roll back implicit (no writes done yet) and reject
+    # ── 4. Availability validation — SELECT … FOR UPDATE (row-level lock) ─
+    # Every ingredient_stock row is locked in ascending ingredient_id order, so
+    # concurrent orders queue deterministically instead of deadlocking. The gate
+    # is AVAILABLE (on_hand - reserved), never on_hand: stock already promised
+    # to another table's accepted order is not stock this order may claim.
+    stock_rows = inventory_service.lock_stock_rows(db, required.keys())
+    try:
+        inventory_service.check_availability(stock_rows, required, ingredients_by_id)
+    except InsufficientStock as short:
+        # Nothing has been written yet — reject without mutating any stock.
+        db.rollback()
         raise HTTPException(
             status_code=422,
-            detail={"error": "out_of_stock", "items": out_of_stock},
+            detail={"error": "out_of_stock", "items": short.ingredient_names},
         )
 
-    # ── 5. Build order inside transaction ────────────────────────────────
-    new_order = Order(
-        store_id=store_id,
-        table_id=table_id,
-        status="NEW",
-        total_amount=Decimal("0.00"),
-        idempotency_key=idempotency_key,
-    )
-    db.add(new_order)
-    db.flush()  # get new_order.id without committing
+    try:
+        # ── 5. Build order inside transaction ────────────────────────────
+        new_order = Order(
+            store_id=store_id,
+            table_id=table_id,
+            status="NEW",
+            total_amount=Decimal("0.00"),
+            idempotency_key=idempotency_key,
+        )
+        db.add(new_order)
+        db.flush()  # get new_order.id without committing
 
-    # Status event
-    db.add(OrderStatusEvent(
-        order_id=new_order.id,
-        status_from=None,
-        status_to="NEW",
-        actor_type="CUSTOMER",
-    ))
-
-    # ── 6. Order items + price calculation ───────────────────────────────
-    total_amount = Decimal("0.00")
-
-    for item_data in order_data.items:
-        product = db.get(Product, item_data.product_id)
-        if product is None:
-            raise HTTPException(status_code=422, detail=f"Product {item_data.product_id} not found.")
-
-        base_price = product.base_price
-        item_total = base_price * item_data.quantity
-
-        new_item = OrderItem(
+        # Status event
+        db.add(OrderStatusEvent(
             order_id=new_order.id,
-            product_id=item_data.product_id,
-            quantity=item_data.quantity,
-            price=base_price,
-        )
-        db.add(new_item)
+            status_from=None,
+            status_to="NEW",
+            actor_type="CUSTOMER",
+        ))
+
+        # ── 6. Order items + price calculation ───────────────────────────
+        total_amount = Decimal("0.00")
+        # (order_item_id, ingredient_id) → quantity. This is the deterministic
+        # grain of order_inventory_lines; aggregating here means an item that
+        # names the same ingredient twice still yields exactly one line.
+        line_requirements: dict[tuple[int, int], Decimal] = {}
+
+        for item_data in order_data.items:
+            product = db.get(Product, item_data.product_id)
+            if product is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Product {item_data.product_id} not found.",
+                )
+
+            base_price = product.base_price
+            item_total = base_price * item_data.quantity
+
+            new_item = OrderItem(
+                order_id=new_order.id,
+                product_id=item_data.product_id,
+                quantity=item_data.quantity,
+                price=base_price,
+            )
+            db.add(new_item)
+            db.flush()
+
+            for ing_data in item_data.ingredients:
+                ing = ingredients_by_id[ing_data.ingredient_id]
+                required_qty = calculate_consumed_quantity(
+                    ing.standard_quantity or Decimal("1"),
+                    ing_data.quantity,
+                    item_data.quantity,
+                )
+
+                db.add(OrderItemIngredient(
+                    order_item_id=new_item.id,
+                    ingredient_id=ing_data.ingredient_id,
+                    quantity=ing_data.quantity,
+                    price_modifier=ing.price,
+                    consumed_quantity=required_qty,
+                    consumed_unit=ing.unit,
+                ))
+                key = (new_item.id, ing_data.ingredient_id)
+                line_requirements[key] = line_requirements.get(key, Decimal("0")) + required_qty
+
+                item_total += ing.price * ing_data.quantity * item_data.quantity
+
+            total_amount += item_total
+
+        new_order.total_amount = total_amount
         db.flush()
 
-        for ing_data in item_data.ingredients:
-            ing = ingredients_by_id[ing_data.ingredient_id]
-            consumed_qty = calculate_consumed_quantity(
-                ing.standard_quantity or Decimal("1"),
-                ing_data.quantity,
-                item_data.quantity,
-            )
-
-            db.add(OrderItemIngredient(
-                order_item_id=new_item.id,
-                ingredient_id=ing_data.ingredient_id,
-                quantity=ing_data.quantity,
-                price_modifier=ing.price,
-                consumed_quantity=consumed_qty,
-                consumed_unit=ing.unit,
-            ))
-            item_total += ing.price * ing_data.quantity * item_data.quantity
-
-        total_amount += item_total
-
-    new_order.total_amount = total_amount
-    db.flush()
-
-    # ── 7. Deduct stock (same transaction, locks already held) ───────────
-    _deduct_stock(db, new_order.id, required, stock_rows, ingredients_by_id)
-
-    # ── 8. Audit log ─────────────────────────────────────────────────────
-    try:
-        audit(
+        # ── 7. Reserve stock (same transaction, locks already held) ───────
+        # Reserved rises; on-hand does NOT. Nothing has been cooked yet.
+        inventory_service.reserve_for_order(
             db,
-            entity_type="order",
-            entity_id=new_order.id,
-            action="created",
-            actor_type="CUSTOMER",
+            new_order,
+            [(oi_id, ing_id, qty) for (oi_id, ing_id), qty in line_requirements.items()],
+            stock_rows,
+            ingredients_by_id,
             ip_address=ip_address,
-            payload_after={
-                "store_id": new_order.store_id,
-                "table_id": new_order.table_id,
-                "total_amount": new_order.total_amount,
-                "ingredient_ids": list(required.keys()),
-                "idempotency_key": idempotency_key,
-            },
         )
-    except Exception as exc:  # pragma: no cover
-        logger.error("audit_call_failed order_created err=%s", exc)
 
-    db.commit()
+        # ── 8. Audit log ─────────────────────────────────────────────────
+        try:
+            audit(
+                db,
+                entity_type="order",
+                entity_id=new_order.id,
+                action="created",
+                actor_type="CUSTOMER",
+                ip_address=ip_address,
+                payload_after={
+                    "store_id": new_order.store_id,
+                    "table_id": new_order.table_id,
+                    "total_amount": new_order.total_amount,
+                    "ingredient_ids": list(required.keys()),
+                },
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.error("audit_call_failed order_created err=%s", exc)
+
+        db.commit()
+    except IntegrityError:
+        # A concurrent request with the SAME idempotency key committed while we
+        # were building this order. The unique constraint on
+        # orders.idempotency_key rejected the duplicate — resolve to the winner
+        # rather than surfacing a 500, so a retry storm still reserves once.
+        db.rollback()
+        if idempotency_key:
+            winner = db.query(Order).filter(
+                Order.idempotency_key == idempotency_key
+            ).first()
+            if winner is not None:
+                logger.info(
+                    "idempotency_race_resolved order_id=%s", winner.id
+                )
+                return _build_response(winner)
+        raise
+    except HTTPException:
+        db.rollback()
+        raise
+
     db.refresh(new_order)
 
     logger.info("order_created id=%s store=%s total=%s",
@@ -313,33 +360,6 @@ def _derive_order_context(
         return order_data.store_id, order_data.table_id
 
     raise HTTPException(status_code=400, detail=messages.QR_REQUIRED)
-
-
-def _deduct_stock(
-    db: Session,
-    order_id: int,
-    required: dict[int, Decimal],
-    stock_rows: dict[int, IngredientStock],
-    ingredients_by_id: dict[int, Ingredient],
-) -> None:
-    """
-    Deduct stock and write movement records.
-    Called inside the order creation transaction — locks are already held.
-    """
-    for ing_id, needed in required.items():
-        stock = stock_rows[ing_id]
-        ing = ingredients_by_id[ing_id]
-
-        stock.stock_quantity = Decimal(str(stock.stock_quantity)) - needed
-
-        db.add(IngredientStockMovement(
-            ingredient_id=ing_id,
-            movement_type="ORDER_DEDUCTION",
-            quantity_delta=-needed,
-            unit=ing.unit,
-            reference_type="order",
-            reference_id=order_id,
-        ))
 
 
 def _build_response(order: Order) -> OrderCreatedResponse:

@@ -60,6 +60,29 @@ INVENTORY_MULTISTORE_BLOCKED = (
 )
 
 
+# ── Inventory lifecycle (staff-facing, owner-web) ────────────────────────────
+# A manual stock command needs an idempotency key.
+INVENTORY_IDEMPOTENCY_REQUIRED = "Stok işlemi için işlem anahtarı (Idempotency-Key) gerekli."
+
+# Same key replayed with a different payload.
+INVENTORY_IDEMPOTENCY_MISMATCH = "Aynı işlem anahtarı farklı stok bilgileriyle kullanılamaz."
+
+# Quantity must be positive.
+INVENTORY_QUANTITY_INVALID = "Stok miktarı sıfırdan büyük olmalı."
+
+# Waste / manual adjustment without a reason.
+INVENTORY_REASON_REQUIRED = "Stok işlemi için neden belirtmen gerekli."
+
+# Unknown / inactive ingredient, or no stock row for it.
+INVENTORY_INGREDIENT_NOT_FOUND = "Malzeme bulunamadı."
+
+# A negative adjustment / waste would push physical stock below what is already
+# promised to accepted orders (or below zero).
+INVENTORY_INSUFFICIENT_ON_HAND = (
+    "Bu işlem fiziksel stoğu, bekleyen siparişler için ayrılmış miktarın altına düşürüyor."
+)
+
+
 # ── Payment settlement / cashier (Turkish, shown in cashier-web) ─────────────
 # Order/table/settlement not found or belongs to another store — non-disclosing.
 PAY_NOT_FOUND = "Kayıt bulunamadı."

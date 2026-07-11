@@ -126,7 +126,7 @@ class TestKitchenOrdersSorting:
         A 12-min-old NEW order with 1 ingredient must appear before a
         fresh NEW order with 5 ingredients despite the latter's complexity.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("200.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("200.00"))
 
         # Fresh order (high complexity)
         p_fresh, h_fresh = order_payload(ing.id, idem_key=uuid.uuid4().hex)
@@ -156,7 +156,7 @@ class TestKitchenOrdersSorting:
         Three orders at 1 min, 8 min (warning), 11 min (critical).
         Expected ranking: critical → warning → ok.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("200.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("200.00"))
 
         r_ok = client.post("/public/orders/",
                            json=order_payload(ing.id, idem_key=uuid.uuid4().hex)[0],
@@ -202,7 +202,7 @@ class TestKitchenOrdersSorting:
 
     def test_priority_score_in_response_is_positive(self, db, client, kitchen_client):
         """Sanity: every order in response has a non-negative priority_score."""
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         client.post("/public/orders/", json=p, headers=h)
 
@@ -216,7 +216,7 @@ class TestKitchenOrdersSorting:
 class TestSlaSeverityInResponse:
 
     def test_fresh_order_is_ok(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
@@ -228,7 +228,7 @@ class TestSlaSeverityInResponse:
         cleanup_ingredient(db, ing.id)
 
     def test_aged_order_is_warning(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
@@ -242,7 +242,7 @@ class TestSlaSeverityInResponse:
         cleanup_ingredient(db, ing.id)
 
     def test_breached_order_is_critical(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
@@ -263,7 +263,7 @@ class TestTimestampConsistency:
         created_at in kitchen orders response must be a UTC ISO-8601 string
         with explicit timezone offset (not a naive datetime).
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
@@ -292,7 +292,7 @@ class TestTimestampConsistency:
         The created_at returned by GET /kitchen/orders/ must refer to the
         same point in time as the order's actual creation.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]
@@ -739,7 +739,7 @@ class TestKitchenDashboardAPI:
         assert load["load_level"] in ("low", "medium", "high")
 
     def test_order_has_all_decision_fields(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         client.post("/public/orders/", json=p, headers=h)
 
@@ -760,7 +760,7 @@ class TestKitchenDashboardAPI:
         Two orders sharing the same ingredient must produce a batching suggestion
         with the correct structure.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("200.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("200.00"))
 
         p1, h1 = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         p2, h2 = order_payload(ing.id, idem_key=uuid.uuid4().hex)
@@ -790,7 +790,7 @@ class TestKitchenDashboardAPI:
     def test_action_hint_is_can_wait_for_fresh_order(self, db, client, kitchen_client):
         """A brand-new order with no batch partner should get 'Can wait'."""
         # Create a unique ingredient so no other order shares it → no batch suggestion
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"), name=f"Unique_{uuid.uuid4().hex[:6]}")
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"), name=f"Unique_{uuid.uuid4().hex[:6]}")
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=p, headers=h)
         oid = r.json()["order_id"]

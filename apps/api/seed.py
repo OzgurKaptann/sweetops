@@ -88,7 +88,8 @@ def seed_db():
 
         stock = IngredientStock(
             ingredient_id=ing.id,
-            stock_quantity=initial_qty,
+            on_hand_quantity=initial_qty,
+            reserved_quantity=Decimal('0'),
             unit=ing.unit,
             reorder_level=initial_qty * Decimal('0.15')  # 15% of initial as reorder threshold
         )

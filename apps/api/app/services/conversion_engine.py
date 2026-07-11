@@ -105,11 +105,18 @@ def _load_combo_counts(db: Session) -> dict[tuple[int, int], int]:
 
 
 def _stock_status(stock: IngredientStock | None) -> str:
-    """Returns 'in_stock' | 'low_stock' | 'out_of_stock'."""
-    if stock is None or float(stock.stock_quantity) <= 0:
+    """
+    Returns 'in_stock' | 'low_stock' | 'out_of_stock' for the customer menu.
+
+    Driven by AVAILABLE stock (on_hand - reserved), because that is what the
+    customer can actually still order. Showing the last 200 g of pistachio as
+    "in stock" while it is already reserved for the order two tables over sells
+    it twice and produces a rejection at checkout.
+    """
+    if stock is None or float(stock.available_quantity) <= 0:
         return "out_of_stock"
     reorder = float(stock.reorder_level) if stock.reorder_level else 0.0
-    if reorder > 0 and float(stock.stock_quantity) <= reorder * LOW_STOCK_MULTIPLIER:
+    if reorder > 0 and float(stock.available_quantity) <= reorder * LOW_STOCK_MULTIPLIER:
         return "low_stock"
     return "in_stock"
 

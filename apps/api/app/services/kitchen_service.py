@@ -2,12 +2,22 @@
 Kitchen Service — order status transitions with strict state machine enforcement.
 
 Key guarantees:
-  1. Invalid transitions are rejected with 409.
+  1. Invalid transitions are rejected with 409, mutating no stock.
   2. Terminal states (DELIVERED, CANCELLED) are immutable.
   3. Backward transitions (undo) are allowed only within UNDO_WINDOW_SECONDS.
-  4. Stock is returned when an IN_PREP order is cancelled.
-  5. Every transition is audit-logged.
-  6. N+1 queries eliminated — kitchen orders fetched with eager loads.
+  4. Preparation status drives the INVENTORY lifecycle through explicit rules —
+     it never carries inventory meaning implicitly:
+       • entering IN_PREP (the first physical-preparation state) converts the
+         order's outstanding reservation into physical consumption, exactly once;
+       • READY / DELIVERED consume nothing further;
+       • CANCELLED releases whatever is still merely reserved and NEVER restores
+         stock that was already physically consumed.
+  5. Inventory movement and the status change commit in ONE transaction — an
+     order can never be marked IN_PREP without its consumption, or consumed
+     without being marked IN_PREP.
+  6. Payment safety is evaluated BEFORE any inventory mutation.
+  7. Every transition is audit-logged.
+  8. N+1 queries eliminated — kitchen orders fetched with eager loads.
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -19,12 +29,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core import messages
 from app.models.ingredient import Ingredient
-from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
 from app.models.order import Order
 from app.models.order_item import OrderItem
-from app.models.order_item_ingredient import OrderItemIngredient
 from app.models.order_status_event import OrderStatusEvent
 from app.models.product import Product
+from app.services import inventory_service
 from app.services.audit_service import audit
 
 logger = logging.getLogger(__name__)
@@ -38,6 +47,11 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     "IN_PREP": ["READY",   "CANCELLED"],
     "READY":   ["DELIVERED"],
 }
+
+# The status at which the kitchen physically starts cooking. Entering it is what
+# turns a reservation into real consumption — the single, explicit bridge from
+# preparation state to inventory state.
+CONSUMING_STATUS = "IN_PREP"
 
 # Backward (undo) transitions — only within UNDO_WINDOW_SECONDS of forward move
 UNDO_TRANSITIONS: dict[str, str] = {
@@ -530,12 +544,26 @@ def update_order_status(
 
     Guards:
       - Terminal state → 409
-      - Invalid forward transition → 409
+      - Invalid forward transition → 409 (no stock is touched)
       - Undo transition outside 60s window → 410
-      - Stock deducted on NEW → IN_PREP (idempotent guard)
-      - Stock returned on IN_PREP → CANCELLED
+      - Cancellation of an order still holding collected money → 409, raised
+        BEFORE any inventory mutation
+
+    Inventory:
+      - → IN_PREP   : outstanding reservation becomes physical consumption, once
+      - → READY/DELIVERED : nothing
+      - → CANCELLED : outstanding reservation is released; already-consumed
+                      stock is NOT restored
     """
-    order = db.query(Order).filter(Order.id == order_id).first()
+    # Lock the order row for the whole transition. This serialises a start-prep
+    # against a concurrent cancel of the same order: whichever commits first
+    # settles the reservation, and the other then finds nothing outstanding.
+    order = db.execute(
+        select(Order)
+        .where(Order.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found.")
 
@@ -599,21 +627,32 @@ def update_order_status(
         actor_id=actor_id,
     ))
 
-    # ── Side effects ──────────────────────────────────────────────────────
-    if new_status == "IN_PREP" and not is_undo:
-        # Stock was already deducted at order creation.
-        # This is intentionally a no-op — kept for clarity and future hooks.
+    # ── Inventory side effects (same transaction as the status change) ────
+    actor_user_id = _actor_user_id(actor_id)
+
+    if new_status == CONSUMING_STATUS and not is_undo:
+        # The kitchen is starting to cook: the reservation becomes physical
+        # consumption. Idempotent — consume_order settles only the OUTSTANDING
+        # reservation, so a re-entry after an undo (NEW → IN_PREP → NEW →
+        # IN_PREP) finds nothing left to consume and deducts nothing twice.
+        inventory_service.consume_order(
+            db, order, actor_type=actor_type, actor_user_id=actor_user_id
+        )
+
+    elif is_undo and old_status == CONSUMING_STATUS:
+        # Undo IN_PREP → NEW. Deliberately does NOT un-consume: the batter was
+        # really poured. The order returns to the queue while the ingredients
+        # stay spent; putting them back would be a lie about physical reality.
+        # Restoring usable stock is an explicit, actor-attributed RETURNED /
+        # MANUAL_ADJUSTMENT movement, never an implicit consequence of an undo.
         pass
 
-    if is_undo and old_status == "IN_PREP":
-        # Undo of IN_PREP: we're going back to NEW.
-        # Stock was deducted at order creation, NOT at IN_PREP transition,
-        # so no stock return needed here.
-        pass
-
-    if new_status == "CANCELLED":
-        # Stock was deducted at order creation — return it on cancellation.
-        _return_stock_for_order(db, order)
+    elif new_status == "CANCELLED":
+        # Release only what is still merely promised. Anything already consumed
+        # stays consumed — see release_order_reservation.
+        inventory_service.release_order_reservation(
+            db, order, actor_type=actor_type, actor_user_id=actor_user_id
+        )
 
     # ── Audit ─────────────────────────────────────────────────────────────
     try:
@@ -722,81 +761,17 @@ def _validate_undo_window(db: Session, order_id: int, current_status: str) -> No
         )
 
 
-def _return_stock_for_order(db: Session, order: Order) -> None:
+def _actor_user_id(actor_id: str | None) -> int | None:
     """
-    Return stock for a cancelled order.
-    Idempotent: if a CANCELLATION_RETURN movement already exists, skip.
-    Only returns stock if an ORDER_DEDUCTION movement exists
-    (i.e., stock was actually deducted at order creation).
+    The staff user id behind a kitchen transition, for ledger attribution.
+
+    actor_id is a free-form string on the status-event/audit contract; only a
+    numeric staff id can be attributed to an inventory movement's actor FK.
+    Anything else (a system or customer actor) attributes to no user.
     """
-    deduction_exists = (
-        db.query(IngredientStockMovement)
-        .filter(
-            IngredientStockMovement.reference_type == "order",
-            IngredientStockMovement.reference_id == order.id,
-            IngredientStockMovement.movement_type == "ORDER_DEDUCTION",
-        )
-        .first()
-    )
-    if not deduction_exists:
-        return
-
-    already_returned = (
-        db.query(IngredientStockMovement)
-        .filter(
-            IngredientStockMovement.reference_type == "order",
-            IngredientStockMovement.reference_id == order.id,
-            IngredientStockMovement.movement_type == "CANCELLATION_RETURN",
-        )
-        .first()
-    )
-    if already_returned:
-        logger.info("cancellation_return already exists for order %s, skipping", order.id)
-        return
-
-    # Eagerly load if not already
-    if not order.items:
-        order = (
-            db.query(Order)
-            .options(selectinload(Order.items).selectinload(OrderItem.ingredients))
-            .filter(Order.id == order.id)
-            .first()
-        )
-
-    for item in order.items:
-        for oii in item.ingredients:
-            if not oii.consumed_quantity or not oii.consumed_unit:
-                continue
-
-            consumed = Decimal(str(oii.consumed_quantity))
-
-            db.add(IngredientStockMovement(
-                ingredient_id=oii.ingredient_id,
-                movement_type="CANCELLATION_RETURN",
-                quantity_delta=consumed,   # positive = return to stock
-                unit=oii.consumed_unit,
-                reference_type="order",
-                reference_id=order.id,
-            ))
-
-            stock = (
-                db.query(IngredientStock)
-                .filter(IngredientStock.ingredient_id == oii.ingredient_id)
-                .first()
-            )
-            if stock:
-                stock.stock_quantity = Decimal(str(stock.stock_quantity)) + consumed
-
+    if actor_id is None:
+        return None
     try:
-        audit(
-            db,
-            entity_type="order",
-            entity_id=order.id,
-            action="stock_returned",
-            actor_type="SYSTEM",
-            payload_after={"reason": "CANCELLATION", "order_id": order.id},
-        )
-    except Exception as exc:  # pragma: no cover
-        logger.error("audit_call_failed stock_returned order=%s err=%s", order.id, exc)
-
-    logger.info("stock_returned for cancelled order %s", order.id)
+        return int(actor_id)
+    except (TypeError, ValueError):
+        return None

@@ -3,9 +3,15 @@ Rollback tests — prove stock is never mutated when an order fails.
 
 Invariants:
   1. A 422 response means the transaction was rolled back.
-  2. Stock quantity after a failed order equals stock quantity before.
-  3. Partial deduction is impossible — all-or-nothing semantics.
-  4. No ORDER_DEDUCTION movement records exist for failed orders.
+  2. Every quantity after a failed order equals what it was before: nothing
+     reserved, and certainly nothing consumed.
+  3. Partial reservation is impossible — all-or-nothing semantics across every
+     ingredient in the order.
+  4. No movement records of any kind exist for a failed order.
+
+A successful order RESERVES (it does not consume), so the success-path tests
+here assert on reserved/available; physical on-hand only moves when the kitchen
+starts cooking. See docs/INVENTORY_LIFECYCLE.md.
 """
 import uuid
 from decimal import Decimal
@@ -21,7 +27,7 @@ class TestOutOfStockRejection:
         """
         An ingredient with zero stock must be rejected before any DB write.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
 
         payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
@@ -39,7 +45,7 @@ class TestOutOfStockRejection:
         """
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("5.00"),
+            on_hand=Decimal("5.00"),
             standard_quantity=Decimal("10.00"),
         )
 
@@ -51,16 +57,17 @@ class TestOutOfStockRejection:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_stock_quantity_unchanged_after_failed_order(self, db, client):
+    def test_stock_unchanged_after_failed_order(self, db, client):
         """
-        The stock row must have the exact same value before and after a failed order.
+        A failed order must leave every quantity exactly as it was — nothing
+        reserved, nothing consumed.
         """
         from app.models.ingredient_stock import IngredientStock
 
         initial = Decimal("8.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=Decimal("10.00"),
         )
 
@@ -69,9 +76,11 @@ class TestOutOfStockRejection:
 
         db.expire_all()
         stock_after = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert stock_after.stock_quantity == initial, (
-            f"Stock must be unchanged. Before={initial}, After={stock_after.stock_quantity}"
+        assert stock_after.on_hand_quantity == initial, (
+            f"On-hand must be unchanged. Before={initial}, After={stock_after.on_hand_quantity}"
         )
+        assert stock_after.reserved_quantity == Decimal("0"), "Nothing may be reserved"
+        assert stock_after.available_quantity == initial
 
         cleanup_ingredient(db, ing.id)
 
@@ -83,7 +92,7 @@ class TestOutOfStockRejection:
 
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("0.00"),
+            on_hand=Decimal("0.00"),
             standard_quantity=Decimal("10.00"),
         )
 
@@ -107,8 +116,8 @@ class TestOutOfStockRejection:
         """
         from app.models.ingredient_stock import IngredientStock
 
-        ing_a, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
-        ing_b, _ = make_ingredient(db, stock_quantity=Decimal("0.00"))
+        ing_a, _ = make_ingredient(db, on_hand=Decimal("100.00"))
+        ing_b, _ = make_ingredient(db, on_hand=Decimal("0.00"))
 
         stock_a_before = Decimal("100.00")
 
@@ -137,20 +146,24 @@ class TestOutOfStockRejection:
 
         db.expire_all()
         stock_a_after = db.query(IngredientStock).filter_by(ingredient_id=ing_a.id).first()
-        assert stock_a_after.stock_quantity == stock_a_before, (
+        assert stock_a_after.on_hand_quantity == stock_a_before, (
             f"Ingredient A must not be partially deducted. "
-            f"Before={stock_a_before}, After={stock_a_after.stock_quantity}"
+            f"Before={stock_a_before}, After={stock_a_after.on_hand_quantity}"
+        )
+        assert stock_a_after.reserved_quantity == Decimal("0"), (
+            "Ingredient A must not hold a partial reservation from a rejected order"
         )
 
         cleanup_ingredient(db, ing_a.id)
         cleanup_ingredient(db, ing_b.id)
 
 
-class TestSuccessfulOrderDeduction:
+class TestSuccessfulOrderReservation:
 
-    def test_stock_deducted_exactly_on_success(self, db, client):
+    def test_stock_reserved_not_consumed_on_success(self, db, client):
         """
-        Successful order must deduct exactly standard_quantity from stock.
+        A successful order RESERVES exactly standard_quantity. Physical on-hand
+        stock is untouched — nothing has been cooked yet.
         """
         from app.models.ingredient_stock import IngredientStock
 
@@ -158,7 +171,7 @@ class TestSuccessfulOrderDeduction:
         std_qty = Decimal("10.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=std_qty,
         )
 
@@ -168,16 +181,18 @@ class TestSuccessfulOrderDeduction:
 
         db.expire_all()
         stock_after = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        expected = initial - std_qty
-        assert stock_after.stock_quantity == expected, (
-            f"Expected {expected}, got {stock_after.stock_quantity}"
+        assert stock_after.on_hand_quantity == initial, (
+            f"Order creation must NOT consume physical stock. "
+            f"Expected on-hand {initial}, got {stock_after.on_hand_quantity}"
         )
+        assert stock_after.reserved_quantity == std_qty
+        assert stock_after.available_quantity == initial - std_qty
 
         cleanup_ingredient(db, ing.id)
 
-    def test_idempotent_order_does_not_double_deduct(self, db, client):
+    def test_idempotent_order_does_not_double_reserve(self, db, client):
         """
-        Submitting the same order twice (same Idempotency-Key) must deduct
+        Submitting the same order twice (same Idempotency-Key) must reserve
         stock exactly once — not twice.
         """
         from app.models.ingredient_stock import IngredientStock
@@ -186,7 +201,7 @@ class TestSuccessfulOrderDeduction:
         std_qty = Decimal("10.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=std_qty,
         )
 
@@ -202,25 +217,26 @@ class TestSuccessfulOrderDeduction:
 
         db.expire_all()
         stock_after = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        expected = initial - std_qty  # deducted exactly once
-        assert stock_after.stock_quantity == expected, (
-            f"Idempotent retry double-deducted stock. "
-            f"Expected {expected}, got {stock_after.stock_quantity}"
+        assert stock_after.reserved_quantity == std_qty, (
+            f"Idempotent retry double-reserved stock. "
+            f"Expected reserved {std_qty}, got {stock_after.reserved_quantity}"
         )
+        assert stock_after.on_hand_quantity == initial
+        assert stock_after.available_quantity == initial - std_qty
 
         cleanup_ingredient(db, ing.id)
 
     def test_movement_records_correct_after_success(self, db, client):
         """
-        Successful order must produce exactly one ORDER_DEDUCTION with
-        negative delta equal to standard_quantity.
+        A successful order produces exactly one RESERVATION_CREATED movement:
+        reserved goes up by standard_quantity, on-hand does not move at all.
         """
         from app.models.ingredient_stock import IngredientStockMovement
 
         std_qty = Decimal("10.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("50.00"),
+            on_hand=Decimal("50.00"),
             standard_quantity=std_qty,
         )
 
@@ -231,12 +247,19 @@ class TestSuccessfulOrderDeduction:
 
         movements = (
             db.query(IngredientStockMovement)
-            .filter_by(ingredient_id=ing.id, movement_type="ORDER_DEDUCTION")
+            .filter_by(ingredient_id=ing.id, movement_type="RESERVATION_CREATED")
             .all()
         )
         assert len(movements) == 1, f"Expected 1 movement, got {len(movements)}"
-        assert Decimal(str(movements[0].quantity_delta)) == -std_qty, (
-            f"Expected delta={-std_qty}, got {movements[0].quantity_delta}"
+        assert Decimal(str(movements[0].quantity)) == std_qty
+        assert Decimal(str(movements[0].quantity_delta_reserved)) == std_qty
+        assert Decimal(str(movements[0].quantity_delta_on_hand)) == Decimal("0"), (
+            "Reserving must not move physical stock"
         )
+
+        # And no consumption happened at creation time.
+        assert db.query(IngredientStockMovement).filter_by(
+            ingredient_id=ing.id, movement_type="CONSUMPTION"
+        ).count() == 0
 
         cleanup_ingredient(db, ing.id)

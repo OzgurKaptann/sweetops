@@ -51,7 +51,7 @@ def _make_full_ingredient(
     name: str,
     category: str = "Test",
     price: float = 10.0,
-    stock_quantity: float = 100.0,
+    on_hand: float = 100.0,
     reorder_level: float = 5.0,
     cost_per_unit: float | None = None,
     standard_quantity: float = 10.0,
@@ -72,7 +72,7 @@ def _make_full_ingredient(
     db.flush()
     stock = IngredientStock(
         ingredient_id=ing.id,
-        stock_quantity=Decimal(str(stock_quantity)),
+        on_hand_quantity=Decimal(str(on_hand)),
         unit="g",
         reorder_level=Decimal(str(reorder_level)),
     )
@@ -135,19 +135,19 @@ class TestStockStatus:
         assert _stock_status(None) == "out_of_stock"
 
     def test_zero_quantity_is_out(self, db):
-        _, stock = _make_full_ingredient(db, name="OOS", stock_quantity=0.0, reorder_level=5.0)
+        _, stock = _make_full_ingredient(db, name="OOS", on_hand=0.0, reorder_level=5.0)
         assert _stock_status(stock) == "out_of_stock"
         _cleanup_ing_direct(db, stock.ingredient_id)
 
     def test_above_low_threshold_is_in_stock(self, db):
-        _, stock = _make_full_ingredient(db, name="FullStock", stock_quantity=100.0, reorder_level=5.0)
+        _, stock = _make_full_ingredient(db, name="FullStock", on_hand=100.0, reorder_level=5.0)
         # 100 > 5 * 1.5 = 7.5 → in_stock
         assert _stock_status(stock) == "in_stock"
         _cleanup_ing_direct(db, stock.ingredient_id)
 
     def test_at_low_stock_boundary(self, db):
         # reorder=10, stock=10 → 10 <= 10*1.5=15 → low_stock
-        _, stock = _make_full_ingredient(db, name="LowStock", stock_quantity=10.0, reorder_level=10.0)
+        _, stock = _make_full_ingredient(db, name="LowStock", on_hand=10.0, reorder_level=10.0)
         assert _stock_status(stock) == "low_stock"
         _cleanup_ing_direct(db, stock.ingredient_id)
 
@@ -292,7 +292,7 @@ class TestRecommendedWith:
         """Out-of-stock ingredient must not appear in recommended_with."""
         ing_a, _ = _make_full_ingredient(db, name="RecOOSA", category="Test_roos")
         ing_b, _ = _make_full_ingredient(db, name="RecOOSB_oos", category="Test_roos",
-                                          stock_quantity=0.0)
+                                          on_hand=0.0)
 
         order_ids = [_make_order_with_ingredients(db, [ing_a.id, ing_b.id]).id for _ in range(3)]
 
@@ -347,11 +347,11 @@ class TestOutOfStockAlternative:
     def test_oos_ingredient_gets_alternative(self, db):
         """OOS ingredient in category X → alternative is nearest-price in-stock in same category."""
         oos, _ = _make_full_ingredient(db, name="AltOOS", category="Test_alt",
-                                        price=10.0, stock_quantity=0.0)
+                                        price=10.0, on_hand=0.0)
         close, _ = _make_full_ingredient(db, name="AltClose", category="Test_alt",
-                                          price=11.0, stock_quantity=50.0)
+                                          price=11.0, on_hand=50.0)
         far, _   = _make_full_ingredient(db, name="AltFar", category="Test_alt",
-                                          price=20.0, stock_quantity=50.0)
+                                          price=20.0, on_hand=50.0)
 
         stocks = {
             oos.id:   db.query(IngredientStock).filter(IngredientStock.ingredient_id == oos.id).first(),
@@ -369,7 +369,7 @@ class TestOutOfStockAlternative:
 
     def test_in_stock_ingredient_has_no_alternative(self, db):
         """In-stock ingredient must have out_of_stock_alternative=None."""
-        ing, _ = _make_full_ingredient(db, name="InStockAlt", stock_quantity=100.0)
+        ing, _ = _make_full_ingredient(db, name="InStockAlt", on_hand=100.0)
         stocks = {ing.id: db.query(IngredientStock).filter(IngredientStock.ingredient_id == ing.id).first()}
         enriched = enrich_menu(db, [ing], stocks)
         assert enriched[0]["out_of_stock_alternative"] is None
@@ -378,11 +378,11 @@ class TestOutOfStockAlternative:
     def test_alternative_is_same_category_only(self, db):
         """Alternative must be from the same category, not a different one."""
         oos, _ = _make_full_ingredient(db, name="AltCatOOS", category="Cat_A",
-                                        price=10.0, stock_quantity=0.0)
+                                        price=10.0, on_hand=0.0)
         wrong_cat, _ = _make_full_ingredient(db, name="AltCatWrong", category="Cat_B",
-                                              price=10.0, stock_quantity=50.0)
+                                              price=10.0, on_hand=50.0)
         correct, _   = _make_full_ingredient(db, name="AltCatCorrect", category="Cat_A",
-                                              price=12.0, stock_quantity=50.0)
+                                              price=12.0, on_hand=50.0)
 
         stocks = {
             ing.id: db.query(IngredientStock).filter(IngredientStock.ingredient_id == ing.id).first()
@@ -400,8 +400,8 @@ class TestOutOfStockAlternative:
 
     def test_no_alternative_if_category_all_oos(self, db):
         """If all same-category ingredients are OOS, alternative is None."""
-        ing_a, _ = _make_full_ingredient(db, name="AllOOS_A", category="Cat_alloos", stock_quantity=0.0)
-        ing_b, _ = _make_full_ingredient(db, name="AllOOS_B", category="Cat_alloos", stock_quantity=0.0)
+        ing_a, _ = _make_full_ingredient(db, name="AllOOS_A", category="Cat_alloos", on_hand=0.0)
+        ing_b, _ = _make_full_ingredient(db, name="AllOOS_B", category="Cat_alloos", on_hand=0.0)
 
         stocks = {
             ing_a.id: db.query(IngredientStock).filter(IngredientStock.ingredient_id == ing_a.id).first(),
@@ -423,9 +423,9 @@ class TestMenuRanking:
     def test_promoted_ingredient_ranks_first(self, db):
         """is_promoted=True ingredient must always sort before non-promoted."""
         normal, _ = _make_full_ingredient(db, name="RankNormal", category="Test_rank",
-                                           price=15.0, stock_quantity=100.0)
+                                           price=15.0, on_hand=100.0)
         promoted, _ = _make_full_ingredient(db, name="RankPromoted", category="Test_rank",
-                                             price=5.0, stock_quantity=100.0, is_promoted=True)
+                                             price=5.0, on_hand=100.0, is_promoted=True)
 
         stocks = {
             ing.id: db.query(IngredientStock).filter(IngredientStock.ingredient_id == ing.id).first()
@@ -443,9 +443,9 @@ class TestMenuRanking:
     def test_oos_ranks_last_within_same_score_group(self, db):
         """Out-of-stock ingredient should score lower than in-stock."""
         in_stock_ing, _ = _make_full_ingredient(db, name="RankInStock", category="Test_rstk",
-                                                 price=10.0, stock_quantity=100.0)
+                                                 price=10.0, on_hand=100.0)
         oos_ing, _       = _make_full_ingredient(db, name="RankOOS", category="Test_rstk",
-                                                  price=10.0, stock_quantity=0.0)
+                                                  price=10.0, on_hand=0.0)
 
         # No usage, no combos, same price → only stock_factor differs
         in_stock_score = _ranking_score(in_stock_ing, "in_stock",  0, 0, 0.5)
@@ -491,7 +491,7 @@ class TestUpsell:
         sel, _ = _make_full_ingredient(db, name="UpsellSel", category="Test_ups")
         sug, _ = _make_full_ingredient(db, name="UpsellSug", category="Test_ups")
         other, _ = _make_full_ingredient(db, name="UpsellOther", category="Test_ups",
-                                          stock_quantity=0.0)  # OOS — should not appear
+                                          on_hand=0.0)  # OOS — should not appear
 
         order_ids = [_make_order_with_ingredients(db, [sel.id, sug.id]).id for _ in range(4)]
         order_ids += [_make_order_with_ingredients(db, [sel.id, other.id]).id for _ in range(2)]
@@ -558,8 +558,8 @@ class TestUpsell:
 
 class TestValidateSelection:
     def test_all_valid_returns_unchanged(self, db):
-        ing_a, _ = _make_full_ingredient(db, name="ValA", stock_quantity=50.0)
-        ing_b, _ = _make_full_ingredient(db, name="ValB", stock_quantity=50.0)
+        ing_a, _ = _make_full_ingredient(db, name="ValA", on_hand=50.0)
+        ing_b, _ = _make_full_ingredient(db, name="ValB", on_hand=50.0)
 
         result = validate_ingredient_selection(db, [ing_a.id, ing_b.id])
         assert set(result["valid_ids"]) == {ing_a.id, ing_b.id}
@@ -570,8 +570,8 @@ class TestValidateSelection:
         _cleanup_ing_direct(db, ing_b.id)
 
     def test_oos_ingredient_removed(self, db):
-        good, _ = _make_full_ingredient(db, name="ValGood", stock_quantity=50.0, price=10.0)
-        oos, _  = _make_full_ingredient(db, name="ValOOS", stock_quantity=0.0, price=8.0)
+        good, _ = _make_full_ingredient(db, name="ValGood", on_hand=50.0, price=10.0)
+        oos, _  = _make_full_ingredient(db, name="ValOOS", on_hand=0.0, price=8.0)
 
         result = validate_ingredient_selection(db, [good.id, oos.id])
         assert good.id in result["valid_ids"]
@@ -593,9 +593,9 @@ class TestValidateSelection:
     def test_oos_with_alternative(self, db):
         """OOS ingredient in category with in-stock alternatives → alternative suggested."""
         oos,  _ = _make_full_ingredient(db, name="ValOOSAlt", category="Cat_val",
-                                         price=10.0, stock_quantity=0.0)
+                                         price=10.0, on_hand=0.0)
         alt, _  = _make_full_ingredient(db, name="ValAlt", category="Cat_val",
-                                         price=11.0, stock_quantity=50.0)
+                                         price=11.0, on_hand=50.0)
 
         result = validate_ingredient_selection(db, [oos.id])
         removed = result["removed"][0]
@@ -606,8 +606,8 @@ class TestValidateSelection:
         _cleanup_ing_direct(db, alt.id)
 
     def test_price_breakdown_for_valid_ids(self, db):
-        ing_a, _ = _make_full_ingredient(db, name="PBrkA", price=8.0, stock_quantity=50.0)
-        ing_b, _ = _make_full_ingredient(db, name="PBrkB", price=12.0, stock_quantity=50.0)
+        ing_a, _ = _make_full_ingredient(db, name="PBrkA", price=8.0, on_hand=50.0)
+        ing_b, _ = _make_full_ingredient(db, name="PBrkB", price=12.0, on_hand=50.0)
 
         result = validate_ingredient_selection(db, [ing_a.id, ing_b.id])
         assert str(ing_a.id) in result["price_breakdown"]
@@ -627,8 +627,8 @@ class TestValidateSelection:
 
     def test_price_delta_cumulative_for_multiple_oos(self, db):
         """price_delta must sum across all removed ingredients."""
-        oos_a, _ = _make_full_ingredient(db, name="OOS_Multi_A", price=10.0, stock_quantity=0.0)
-        oos_b, _ = _make_full_ingredient(db, name="OOS_Multi_B", price=5.0, stock_quantity=0.0)
+        oos_a, _ = _make_full_ingredient(db, name="OOS_Multi_A", price=10.0, on_hand=0.0)
+        oos_b, _ = _make_full_ingredient(db, name="OOS_Multi_B", price=5.0, on_hand=0.0)
 
         result = validate_ingredient_selection(db, [oos_a.id, oos_b.id])
         assert result["price_delta"] == -15.0
