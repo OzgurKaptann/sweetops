@@ -12,8 +12,12 @@ Correct formulas (canonical, see order_service.calculate_consumed_quantity):
     consumed_qty    = ingredient.standard_qty × selected_quantity × item_quantity
 
 Every test below FAILS on the pre-fix code (item_quantity omitted) and PASSES
-after the fix. Stock deduction, movement quantity and cancellation restoration
-all derive from the same persisted consumed_quantity, so they are covered too.
+after the fix.
+
+Under the inventory-reservation lifecycle these same formulas now drive the
+RESERVATION at order creation rather than an immediate physical deduction, so
+the assertions below check reserved/available quantities and RESERVATION_CREATED
+movements. The arithmetic being guarded is identical; only what it moves changed.
 """
 import threading
 import uuid
@@ -27,7 +31,7 @@ from app.models.order_item import OrderItem
 from app.models.order_item_ingredient import OrderItemIngredient
 from app.models.order_status_event import OrderStatusEvent
 from app.models.product import Product
-from tests.conftest import cleanup_ingredient, make_ingredient
+from tests.conftest import cleanup_ingredient, make_ingredient, purge_inventory_for_orders
 
 
 # ---------------------------------------------------------------------------
@@ -79,10 +83,10 @@ def oii_for_ingredient(db, ingredient_id):
     )
 
 
-def deduction_movements(db, ingredient_id):
+def reservation_movements(db, ingredient_id):
     return (
         db.query(IngredientStockMovement)
-        .filter_by(ingredient_id=ingredient_id, movement_type="ORDER_DEDUCTION")
+        .filter_by(ingredient_id=ingredient_id, movement_type="RESERVATION_CREATED")
         .all()
     )
 
@@ -97,6 +101,7 @@ def cleanup_order(db, order_id):
     references the same order_item. Removing the whole order graph up front
     sidesteps that ordering hazard.
     """
+    purge_inventory_for_orders(db, [order_id])
     item_ids = [
         row.id
         for row in db.query(OrderItem).filter(OrderItem.order_id == order_id).all()
@@ -126,7 +131,7 @@ class TestScenario1SingleProduct:
         prod = make_product(db, base_price=base)
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("1000.00"),
+            on_hand=Decimal("1000.00"),
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
@@ -144,9 +149,11 @@ class TestScenario1SingleProduct:
             assert len(oiis) == 1
             assert Decimal(str(oiis[0].consumed_quantity)) == Decimal("50.00")
 
-            movements = deduction_movements(db, ing.id)
+            movements = reservation_movements(db, ing.id)
             assert len(movements) == 1
-            assert Decimal(str(movements[0].quantity_delta)) == Decimal("-50.00")
+            assert Decimal(str(movements[0].quantity)) == Decimal("50.00")
+            assert Decimal(str(movements[0].quantity_delta_reserved)) == Decimal("50.00")
+            assert Decimal(str(movements[0].quantity_delta_on_hand)) == Decimal("0")
         finally:
             cleanup_ingredient(db, ing.id)
             cleanup_product(db, prod.id)
@@ -163,7 +170,7 @@ class TestScenario2MultipleProducts:
         prod = make_product(db, base_price=base)
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("1000.00"),
+            on_hand=Decimal("1000.00"),
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
@@ -184,11 +191,13 @@ class TestScenario2MultipleProducts:
 
             db.expire_all()
             stock = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-            assert stock.stock_quantity == initial_stock - Decimal("150.00")
+            assert stock.reserved_quantity == Decimal("150.00")
+            assert stock.available_quantity == initial_stock - Decimal("150.00")
+            assert stock.on_hand_quantity == initial_stock  # reserved, not cooked
 
-            movements = deduction_movements(db, ing.id)
+            movements = reservation_movements(db, ing.id)
             assert len(movements) == 1
-            assert Decimal(str(movements[0].quantity_delta)) == Decimal("-150.00")
+            assert Decimal(str(movements[0].quantity)) == Decimal("150.00")
         finally:
             cleanup_ingredient(db, ing.id)
             cleanup_product(db, prod.id)
@@ -205,7 +214,7 @@ class TestScenario3MultipleProductsAndPortions:
         prod = make_product(db, base_price=base)
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("1000.00"),
+            on_hand=Decimal("1000.00"),
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
@@ -225,8 +234,8 @@ class TestScenario3MultipleProductsAndPortions:
             # 50 * 3 * 2 = 300
             assert Decimal(str(oiis[0].consumed_quantity)) == Decimal("300.00")
 
-            movements = deduction_movements(db, ing.id)
-            assert Decimal(str(movements[0].quantity_delta)) == Decimal("-300.00")
+            movements = reservation_movements(db, ing.id)
+            assert Decimal(str(movements[0].quantity)) == Decimal("300.00")
         finally:
             cleanup_ingredient(db, ing.id)
             cleanup_product(db, prod.id)
@@ -243,14 +252,14 @@ class TestScenario4And5MultipleItems:
         # shared ingredient used in both items
         shared, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("1000.00"),
+            on_hand=Decimal("1000.00"),
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
         # ingredient only in the second item
         extra, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("1000.00"),
+            on_hand=Decimal("1000.00"),
             standard_quantity=Decimal("20.00"),
             price=Decimal("5.00"),
         )
@@ -288,15 +297,17 @@ class TestScenario4And5MultipleItems:
             # Shared ingredient consumption: item A 50*1*3=150, item B 50*2*2=200 → 350
             db.expire_all()
             shared_stock = db.query(IngredientStock).filter_by(ingredient_id=shared.id).first()
-            assert shared_stock.stock_quantity == Decimal("1000.00") - Decimal("350.00")
+            assert shared_stock.reserved_quantity == Decimal("350.00")
+            assert shared_stock.available_quantity == Decimal("1000.00") - Decimal("350.00")
 
-            shared_movs = deduction_movements(db, shared.id)
-            total_shared_delta = sum(Decimal(str(m.quantity_delta)) for m in shared_movs)
-            assert total_shared_delta == Decimal("-350.00")
+            shared_movs = reservation_movements(db, shared.id)
+            total_shared = sum(Decimal(str(m.quantity)) for m in shared_movs)
+            assert total_shared == Decimal("350.00")
 
             # Extra ingredient: 20*1*2 = 40
             extra_stock = db.query(IngredientStock).filter_by(ingredient_id=extra.id).first()
-            assert extra_stock.stock_quantity == Decimal("1000.00") - Decimal("40.00")
+            assert extra_stock.reserved_quantity == Decimal("40.00")
+            assert extra_stock.available_quantity == Decimal("1000.00") - Decimal("40.00")
         finally:
             if order_id is not None:
                 cleanup_order(db, order_id)
@@ -316,7 +327,7 @@ class TestScenario6InsufficientStockByQuantity:
         # stock 120g, standard 50g. One product needs 50 (ok), three need 150 (fail).
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("120.00"),
+            on_hand=Decimal("120.00"),
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
@@ -332,8 +343,9 @@ class TestScenario6InsufficientStockByQuantity:
             # Nothing committed: stock untouched, no movements, no order.
             db.expire_all()
             stock = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-            assert stock.stock_quantity == Decimal("120.00")
-            assert len(deduction_movements(db, ing.id)) == 0
+            assert stock.on_hand_quantity == Decimal("120.00")
+            assert stock.reserved_quantity == Decimal("0")
+            assert len(reservation_movements(db, ing.id)) == 0
             assert len(oii_for_ingredient(db, ing.id)) == 0
         finally:
             cleanup_ingredient(db, ing.id)
@@ -350,7 +362,7 @@ class TestScenario7IdempotentRetry:
         prod = make_product(db, base_price=Decimal("100.00"))
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("1000.00"),
+            on_hand=Decimal("1000.00"),
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
@@ -366,14 +378,15 @@ class TestScenario7IdempotentRetry:
             assert r1.json()["order_id"] == r2.json()["order_id"]
             assert Decimal(str(r2.json()["total_amount"])) == Decimal("330.00")
 
-            # Deducted exactly once: 150g.
+            # Reserved exactly once: 150g.
             db.expire_all()
             stock = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-            assert stock.stock_quantity == Decimal("1000.00") - Decimal("150.00")
+            assert stock.reserved_quantity == Decimal("150.00")
+            assert stock.available_quantity == Decimal("1000.00") - Decimal("150.00")
 
-            movements = deduction_movements(db, ing.id)
+            movements = reservation_movements(db, ing.id)
             assert len(movements) == 1
-            assert Decimal(str(movements[0].quantity_delta)) == Decimal("-150.00")
+            assert Decimal(str(movements[0].quantity)) == Decimal("150.00")
 
             assert len(oii_for_ingredient(db, ing.id)) == 1
         finally:
@@ -382,17 +395,17 @@ class TestScenario7IdempotentRetry:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 8 — cancellation restoration with quantity > 1
+# Scenario 8 — cancellation releases the exact reserved quantity, once
 # ---------------------------------------------------------------------------
 
-class TestScenario8CancellationRestoration:
+class TestScenario8CancellationRelease:
 
-    def test_cancel_restores_exact_deducted_quantity_once(self, db, client, kitchen_client):
+    def test_cancel_releases_exact_reserved_quantity_once(self, db, client, kitchen_client):
         prod = make_product(db, base_price=Decimal("100.00"))
         initial = Decimal("1000.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
@@ -406,30 +419,36 @@ class TestScenario8CancellationRestoration:
 
             db.expire_all()
             after_order = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-            assert after_order.stock_quantity == initial - Decimal("150.00")
+            assert after_order.reserved_quantity == Decimal("150.00")
+            assert after_order.available_quantity == initial - Decimal("150.00")
+            assert after_order.on_hand_quantity == initial
 
-            # Cancel
+            # Cancel before the kitchen starts → the reservation is released.
             rc = kitchen_client.patch(f"/kitchen/orders/{oid}/status", json={"status": "CANCELLED"})
             assert rc.status_code == 200
 
             db.expire_all()
             after_cancel = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-            assert after_cancel.stock_quantity == initial
+            assert after_cancel.reserved_quantity == Decimal("0")
+            assert after_cancel.available_quantity == initial
+            assert after_cancel.on_hand_quantity == initial  # never physically moved
 
-            returns = (
+            releases = (
                 db.query(IngredientStockMovement)
-                .filter_by(ingredient_id=ing.id, movement_type="CANCELLATION_RETURN")
+                .filter_by(ingredient_id=ing.id, movement_type="RESERVATION_RELEASED")
                 .all()
             )
-            assert len(returns) == 1
-            assert Decimal(str(returns[0].quantity_delta)) == Decimal("150.00")
+            assert len(releases) == 1
+            assert Decimal(str(releases[0].quantity)) == Decimal("150.00")
+            assert Decimal(str(releases[0].quantity_delta_on_hand)) == Decimal("0")
 
-            # Second cancel must not restore twice.
+            # Second cancel must not release twice.
             rc2 = kitchen_client.patch(f"/kitchen/orders/{oid}/status", json={"status": "CANCELLED"})
             assert rc2.status_code == 409
             db.expire_all()
             after_second = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-            assert after_second.stock_quantity == initial
+            assert after_second.available_quantity == initial
+            assert after_second.reserved_quantity == Decimal("0")
         finally:
             cleanup_ingredient(db, ing.id)
             cleanup_product(db, prod.id)
@@ -446,7 +465,7 @@ class TestScenario9Concurrency:
         # Each order (qty 3, std 50) needs 150g. Stock 300g fits exactly 2.
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("300.00"),
+            on_hand=Decimal("300.00"),
             standard_quantity=Decimal("50.00"),
             price=Decimal("10.00"),
         )
@@ -476,13 +495,15 @@ class TestScenario9Concurrency:
 
             db.expire_all()
             stock = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-            assert stock.stock_quantity == Decimal("0.00")
-            assert stock.stock_quantity >= Decimal("0")
+            assert stock.available_quantity == Decimal("0.00")
+            assert stock.available_quantity >= Decimal("0")
+            assert stock.reserved_quantity == Decimal("300.00")
+            assert stock.on_hand_quantity == Decimal("300.00")
 
-            # Movement total must equal physical consumption of successful orders.
-            movements = deduction_movements(db, ing.id)
-            total = sum(Decimal(str(m.quantity_delta)) for m in movements)
-            assert total == Decimal("-300.00")
+            # Movement total must equal the reservation of the successful orders.
+            movements = reservation_movements(db, ing.id)
+            total = sum(Decimal(str(m.quantity)) for m in movements)
+            assert total == Decimal("300.00")
             assert len(movements) == successes
         finally:
             cleanup_ingredient(db, ing.id)

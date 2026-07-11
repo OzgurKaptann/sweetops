@@ -38,7 +38,7 @@ def patch_status(kitchen_client, order_id: int, status: str) -> "requests.Respon
 class TestValidTransitions:
 
     def test_new_to_in_prep(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         r = patch_status(kitchen_client, oid, "IN_PREP")
@@ -48,7 +48,7 @@ class TestValidTransitions:
         cleanup_ingredient(db, ing.id)
 
     def test_in_prep_to_ready(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         patch_status(kitchen_client, oid, "IN_PREP")
@@ -59,7 +59,7 @@ class TestValidTransitions:
         cleanup_ingredient(db, ing.id)
 
     def test_ready_to_delivered(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         patch_status(kitchen_client, oid, "IN_PREP")
@@ -71,7 +71,7 @@ class TestValidTransitions:
         cleanup_ingredient(db, ing.id)
 
     def test_new_to_cancelled(self, db, client, kitchen_client):
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         r = patch_status(kitchen_client, oid, "CANCELLED")
@@ -82,7 +82,7 @@ class TestValidTransitions:
 
     def test_status_events_written_for_each_transition(self, db, client, kitchen_client):
         """Every transition must produce an OrderStatusEvent record."""
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         patch_status(kitchen_client, oid, "IN_PREP")
@@ -121,7 +121,7 @@ class TestInvalidTransitions:
         the undo window concept doesn't apply (i.e., they go through the
         invalid forward path).
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         # Advance to from_status
@@ -159,7 +159,7 @@ class TestTerminalStateImmutability:
         Once in a terminal state, NO further transition is permitted.
         This covers all 10 combinations (2 terminals × 5 attempted statuses).
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("200.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("200.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         # Reach terminal state
@@ -183,7 +183,7 @@ class TestUndoWindow:
 
     def test_undo_in_prep_within_window(self, db, client, kitchen_client):
         """IN_PREP → NEW must succeed immediately (within window)."""
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         patch_status(kitchen_client, oid, "IN_PREP")
@@ -196,7 +196,7 @@ class TestUndoWindow:
 
     def test_undo_ready_within_window(self, db, client, kitchen_client):
         """READY → IN_PREP must succeed immediately (within window)."""
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         patch_status(kitchen_client, oid, "IN_PREP")
@@ -214,7 +214,7 @@ class TestUndoWindow:
         We manipulate the OrderStatusEvent.created_at to simulate elapsed time
         without actually waiting 60 seconds.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         patch_status(kitchen_client, oid, "IN_PREP")
@@ -235,7 +235,7 @@ class TestUndoWindow:
         """If undo is rejected, the order must remain in the current state."""
         from app.models.order import Order
 
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         oid = create_order_and_get_id(client, ing.id)
 
         patch_status(kitchen_client, oid, "IN_PREP")
@@ -251,127 +251,152 @@ class TestUndoWindow:
         cleanup_ingredient(db, ing.id)
 
 
-class TestCancellationStockReturn:
+class TestCancellationInventoryLifecycle:
+    """
+    Cancellation is inventory-aware, and the rule is physical reality:
 
-    def test_cancellation_returns_stock_once(self, db, client, kitchen_client):
-        """
-        Cancelling an order must return stock to exactly the original level.
-        """
+      * cancel BEFORE the kitchen starts  → the reservation is released;
+        on-hand never moved, so nothing is "returned".
+      * cancel AFTER the kitchen started  → the batter was really poured. Stock
+        is NOT restored. Pretending otherwise would invent ingredients that are
+        sitting in a bin.
+    """
+
+    def test_cancel_before_prep_releases_reservation(self, db, client, kitchen_client):
+        """Cancelling an un-started order frees the reservation and leaves on-hand alone."""
         from app.models.ingredient_stock import IngredientStock
 
         initial = Decimal("50.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=Decimal("10.00"),
         )
 
         oid = create_order_and_get_id(client, ing.id)
 
-        # Stock deducted at order creation
+        # Order creation RESERVES: available drops, physical on-hand does not.
         db.expire_all()
         after_order = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert after_order.stock_quantity == initial - Decimal("10.00")
+        assert after_order.on_hand_quantity == initial
+        assert after_order.reserved_quantity == Decimal("10.00")
+        assert after_order.available_quantity == initial - Decimal("10.00")
 
-        # Cancel the order
         r = patch_status(kitchen_client, oid, "CANCELLED")
         assert r.status_code == 200
 
         db.expire_all()
         after_cancel = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert after_cancel.stock_quantity == initial, (
-            f"Stock must return to {initial} after cancel. Got {after_cancel.stock_quantity}"
-        )
+        assert after_cancel.reserved_quantity == Decimal("0"), "Reservation must be released"
+        assert after_cancel.on_hand_quantity == initial, "On-hand must never have moved"
+        assert after_cancel.available_quantity == initial
 
         cleanup_ingredient(db, ing.id)
 
     def test_cancelled_order_cannot_be_cancelled_again(self, db, client, kitchen_client):
         """
-        CANCELLED is a terminal state — a second cancellation must return 409.
-        Stock must not be double-returned.
+        CANCELLED is terminal — a second cancellation returns 409 and the
+        reservation is not released twice.
         """
         from app.models.ingredient_stock import IngredientStock
 
         initial = Decimal("50.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=Decimal("10.00"),
         )
 
         oid = create_order_and_get_id(client, ing.id)
-
-        # First cancellation — succeeds
         patch_status(kitchen_client, oid, "CANCELLED")
 
         db.expire_all()
-        after_first_cancel = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert after_first_cancel.stock_quantity == initial
+        after_first = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
+        assert after_first.reserved_quantity == Decimal("0")
+        assert after_first.available_quantity == initial
 
-        # Second cancellation — must be rejected
         r2 = patch_status(kitchen_client, oid, "CANCELLED")
         assert r2.status_code == 409
         assert r2.json()["detail"]["error"] == "terminal_state"
 
-        # Stock must not have been double-returned
+        # A double release would push available ABOVE the physical stock.
         db.expire_all()
         after_second = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert after_second.stock_quantity == initial, (
-            f"Stock double-returned! Got {after_second.stock_quantity}, expected {initial}"
+        assert after_second.available_quantity == initial, (
+            f"Reservation double-released! Got {after_second.available_quantity}, expected {initial}"
         )
+        assert after_second.on_hand_quantity == initial
 
         cleanup_ingredient(db, ing.id)
 
-    def test_in_prep_cancellation_returns_stock(self, db, client, kitchen_client):
+    def test_cancel_after_prep_does_not_restore_stock(self, db, client, kitchen_client):
         """
-        An order that reached IN_PREP before being cancelled must also
-        have its stock returned (stock was deducted at creation).
+        An order cancelled AFTER the kitchen started it keeps its ingredients
+        consumed. The waffle batter is already on the iron; cancelling the order
+        does not put it back in the tub.
         """
         from app.models.ingredient_stock import IngredientStock
 
         initial = Decimal("50.00")
+        std = Decimal("10.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
-            standard_quantity=Decimal("10.00"),
+            on_hand=initial,
+            standard_quantity=std,
         )
 
         oid = create_order_and_get_id(client, ing.id)
+
+        # Kitchen starts cooking: reservation becomes physical consumption.
         patch_status(kitchen_client, oid, "IN_PREP")
+        db.expire_all()
+        after_prep = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
+        assert after_prep.on_hand_quantity == initial - std, "Start-prep must consume"
+        assert after_prep.reserved_quantity == Decimal("0"), "Reservation is now consumed"
 
         r = patch_status(kitchen_client, oid, "CANCELLED")
         assert r.status_code == 200
 
         db.expire_all()
-        stock_after = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert stock_after.stock_quantity == initial, (
-            f"Stock must return after IN_PREP→CANCELLED. Got {stock_after.stock_quantity}"
+        after_cancel = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
+        assert after_cancel.on_hand_quantity == initial - std, (
+            f"Consumed stock must NOT be restored on cancellation. "
+            f"Expected on-hand {initial - std}, got {after_cancel.on_hand_quantity}"
         )
+        assert after_cancel.reserved_quantity == Decimal("0")
+        assert after_cancel.available_quantity == initial - std
 
         cleanup_ingredient(db, ing.id)
 
-    def test_cancellation_return_movement_recorded(self, db, client, kitchen_client):
+    def test_cancellation_release_movement_recorded(self, db, client, kitchen_client):
         """
-        A CANCELLATION_RETURN movement must exist after cancel.
-        Exactly one — not zero, not two.
+        Cancelling an un-started order writes exactly one RESERVATION_RELEASED
+        movement — not zero, not two — and no physical movement at all.
         """
         from app.models.ingredient_stock import IngredientStockMovement
 
         ing, _ = make_ingredient(
             db,
-            stock_quantity=Decimal("50.00"),
+            on_hand=Decimal("50.00"),
             standard_quantity=Decimal("10.00"),
         )
 
         oid = create_order_and_get_id(client, ing.id)
         patch_status(kitchen_client, oid, "CANCELLED")
 
-        returns = (
+        releases = (
             db.query(IngredientStockMovement)
-            .filter_by(ingredient_id=ing.id, movement_type="CANCELLATION_RETURN")
+            .filter_by(ingredient_id=ing.id, movement_type="RESERVATION_RELEASED")
             .count()
         )
-        assert returns == 1, f"Expected 1 CANCELLATION_RETURN, got {returns}"
+        assert releases == 1, f"Expected 1 RESERVATION_RELEASED, got {releases}"
+
+        # Nothing physical happened: no consumption, and no phantom "return" of
+        # stock that was never taken off the shelf.
+        for physical in ("CONSUMPTION", "RETURNED"):
+            assert db.query(IngredientStockMovement).filter_by(
+                ingredient_id=ing.id, movement_type=physical
+            ).count() == 0, f"Cancelling an un-started order must not write {physical}"
 
         cleanup_ingredient(db, ing.id)
 

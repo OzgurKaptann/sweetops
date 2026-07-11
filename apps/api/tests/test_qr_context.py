@@ -290,7 +290,7 @@ def test_missing_qr_does_not_default_to_store_menu(client):
 
 def test_valid_qr_creates_order_with_server_derived_context(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
     try:
         payload, headers = qr_order_payload(ing.id, raw, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
@@ -305,7 +305,7 @@ def test_valid_qr_creates_order_with_server_derived_context(client, db):
 
 def test_client_supplied_conflicting_ids_are_ignored(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
     try:
         payload, headers = qr_order_payload(ing.id, raw, idem_key=uuid.uuid4().hex)
         # Attacker injects conflicting numeric ids alongside a valid token.
@@ -323,7 +323,7 @@ def test_client_supplied_conflicting_ids_are_ignored(client, db):
 
 def test_revoked_qr_cannot_create_order(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
     try:
         svc.revoke_by_id(db, record.id)
         before = db.query(Order).count()
@@ -337,10 +337,10 @@ def test_revoked_qr_cannot_create_order(client, db):
 
 
 def test_invalid_qr_creates_no_order_and_no_stock_movement(client, db):
-    ing, stock = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, stock = make_ingredient(db, on_hand=Decimal("50.00"))
     try:
         before_orders = db.query(Order).count()
-        before_stock = db.get(IngredientStock, stock.id).stock_quantity
+        before_available = db.get(IngredientStock, stock.id).available_quantity
 
         payload, headers = qr_order_payload(
             ing.id, "invalid-token", idem_key=uuid.uuid4().hex
@@ -350,8 +350,9 @@ def test_invalid_qr_creates_no_order_and_no_stock_movement(client, db):
 
         db.expire_all()
         assert db.query(Order).count() == before_orders
-        # scenario 25 — no stock movement on an invalid QR.
-        assert db.get(IngredientStock, stock.id).stock_quantity == before_stock
+        # scenario 25 — no stock movement on an invalid QR: nothing reserved.
+        assert db.get(IngredientStock, stock.id).available_quantity == before_available
+        assert db.get(IngredientStock, stock.id).reserved_quantity == Decimal("0")
     finally:
         cleanup_ingredient(db, ing.id)
 
@@ -360,16 +361,20 @@ def test_valid_qr_preserves_quantity_accounting(client, db):
     store, table, record, raw = make_store_table_token(db)
     # standard_quantity 10 × selected 1 × item 1 = 10 consumed.
     ing, stock = make_ingredient(
-        db, stock_quantity=Decimal("50.00"), standard_quantity=Decimal("10.00")
+        db, on_hand=Decimal("50.00"), standard_quantity=Decimal("10.00")
     )
     try:
-        before = db.get(IngredientStock, stock.id).stock_quantity
+        before = db.get(IngredientStock, stock.id).available_quantity
         payload, headers = qr_order_payload(ing.id, raw, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
         assert r.status_code == 200
         db.expire_all()
-        after = db.get(IngredientStock, stock.id).stock_quantity
-        assert before - after == Decimal("10.00")     # scenario 26
+        row = db.get(IngredientStock, stock.id)
+        # scenario 26 — the quantity formula still holds, now as a RESERVATION:
+        # availability drops by 10, physical stock is untouched.
+        assert before - row.available_quantity == Decimal("10.00")
+        assert row.reserved_quantity == Decimal("10.00")
+        assert row.on_hand_quantity == Decimal("50.00")
     finally:
         cleanup_ingredient(db, ing.id)
         cleanup_store_table(db, store.id, table.id)
@@ -379,7 +384,7 @@ def test_valid_qr_preserves_stock_atomicity(client, db):
     store, table, record, raw = make_store_table_token(db)
     # Not enough stock: 5 available, needs 10 → 422, nothing deducted.
     ing, stock = make_ingredient(
-        db, stock_quantity=Decimal("5.00"), standard_quantity=Decimal("10.00")
+        db, on_hand=Decimal("5.00"), standard_quantity=Decimal("10.00")
     )
     try:
         before_orders = db.query(Order).count()
@@ -387,7 +392,9 @@ def test_valid_qr_preserves_stock_atomicity(client, db):
         r = client.post("/public/orders/", json=payload, headers=headers)
         assert r.status_code == 422                    # scenario 27
         db.expire_all()
-        assert db.get(IngredientStock, stock.id).stock_quantity == Decimal("5.00")
+        row = db.get(IngredientStock, stock.id)
+        assert row.on_hand_quantity == Decimal("5.00")
+        assert row.reserved_quantity == Decimal("0")
         assert db.query(Order).count() == before_orders
     finally:
         cleanup_ingredient(db, ing.id)
@@ -396,7 +403,7 @@ def test_valid_qr_preserves_stock_atomicity(client, db):
 
 def test_valid_qr_preserves_idempotent_retry(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
     try:
         idem = uuid.uuid4().hex
         payload, headers = qr_order_payload(ing.id, raw, idem_key=idem)
@@ -415,7 +422,7 @@ def test_order_requires_qr_when_legacy_disabled(client, db):
     # Production default: legacy off → a tokenless order is rejected (no
     # trusting client store_id). scenario supporting acceptance #1/#11.
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
     original = settings.ALLOW_LEGACY_ORDER_CONTEXT
     settings.ALLOW_LEGACY_ORDER_CONTEXT = False
     try:

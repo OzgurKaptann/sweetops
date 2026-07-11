@@ -7,7 +7,11 @@ from .table import Table
 from .table_qr_token import TableQrToken
 from .product import Product
 from .ingredient import Ingredient
-from .ingredient_stock import IngredientStock, IngredientStockMovement
+from .ingredient_stock import (
+    IngredientStock,
+    IngredientStockMovement,
+    OrderInventoryLine,
+)
 from .order import Order
 from .order_item import OrderItem
 from .order_item_ingredient import OrderItemIngredient
@@ -31,6 +35,7 @@ __all__ = [
     "Ingredient",
     "IngredientStock",
     "IngredientStockMovement",
+    "OrderInventoryLine",
     "Order",
     "OrderItem",
     "OrderItemIngredient",

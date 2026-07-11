@@ -24,7 +24,7 @@ client = TestClient(app)
 
 def _order_in_store(db, store_id: int, backdate_minutes: float | None = None):
     """Create an order (legacy path) in a specific store; optionally backdate it."""
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("200.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("200.00"))
     payload = {
         "store_id": store_id,
         "items": [{

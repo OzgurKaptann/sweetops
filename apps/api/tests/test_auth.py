@@ -289,7 +289,7 @@ class TestCsrf:
     def _order(self, db):
         from decimal import Decimal
         from tests.conftest import make_ingredient, order_payload
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
         return ing, r.json()["order_id"]
@@ -335,7 +335,7 @@ class TestCsrf:
     def test_public_order_does_not_require_staff_csrf(self, db):
         from decimal import Decimal
         from tests.conftest import cleanup_ingredient, make_ingredient, order_payload
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
         assert r.status_code == 200

@@ -33,6 +33,14 @@ PERM_PAYMENTS_READ = "payments:read"
 PERM_PAYMENTS_COLLECT = "payments:collect"
 PERM_PAYMENTS_REFUND = "payments:refund"
 
+# Inventory lifecycle permissions.
+#   inventory:read   — view stock summary and the movement ledger.
+#   inventory:adjust — mutate physical stock: purchase receipt, manual
+#                      adjustment, waste. This is a physical-count authority,
+#                      not a sales authority.
+PERM_INVENTORY_READ = "inventory:read"
+PERM_INVENTORY_ADJUST = "inventory:adjust"
+
 # ── Matrix ───────────────────────────────────────────────────────────────────
 # MANAGER matches OWNER for current operational functionality. Neither is
 # granted any user-management capability here — that is a future authenticated
@@ -46,6 +54,8 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         PERM_PAYMENTS_READ,
         PERM_PAYMENTS_COLLECT,
         PERM_PAYMENTS_REFUND,
+        PERM_INVENTORY_READ,
+        PERM_INVENTORY_ADJUST,
     },
     ROLE_MANAGER: {
         PERM_OWNER_READ,
@@ -55,14 +65,22 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         PERM_PAYMENTS_READ,
         PERM_PAYMENTS_COLLECT,
         PERM_PAYMENTS_REFUND,
+        PERM_INVENTORY_READ,
+        PERM_INVENTORY_ADJUST,
     },
+    # KITCHEN sees what stock is left so it can flag a shortage, but cannot
+    # rewrite physical stock: a cook correcting the count is exactly the
+    # unaccountable adjustment this lifecycle exists to prevent. Waste reporting
+    # by kitchen is deliberately NOT enabled here — see docs/INVENTORY_LIFECYCLE.md.
     ROLE_KITCHEN: {
         PERM_KITCHEN_READ,
         PERM_KITCHEN_ORDERS_WRITE,
+        PERM_INVENTORY_READ,
     },
     # CASHIER settles at the till: it may read bills and collect money, but must
     # never refund (that is a MANAGER/OWNER control) and has no owner/kitchen
-    # write access.
+    # write access. It has NO inventory permission at all — money and stock are
+    # separate authorities.
     ROLE_CASHIER: {
         PERM_PAYMENTS_READ,
         PERM_PAYMENTS_COLLECT,

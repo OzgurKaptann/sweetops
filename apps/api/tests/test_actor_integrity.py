@@ -23,7 +23,7 @@ client = TestClient(app)
 
 
 def _make_order(db):
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
     payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
     r = client.post("/public/orders/", json=payload, headers=headers)
     return ing, r.json()["order_id"]
@@ -80,7 +80,7 @@ def test_x_actor_id_header_cannot_override_audit_actor(db, make_staff):
 def test_owner_decision_body_actor_cannot_override(db, make_staff, make_store):
     # Fresh store so the SLA decision starts clean (store 1 carries history).
     store = make_store()
-    ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
     payload = {
         "store_id": store.id,
         "items": [{"product_id": 1, "quantity": 1,

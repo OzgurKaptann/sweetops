@@ -43,7 +43,7 @@ class TestAuditFailureDoesNotBlockOrderCreation:
         If audit() raises an unhandled exception, order creation must still
         return 200 and the order must be persisted.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
         with patch("app.services.order_service.audit", side_effect=RuntimeError("DB audit unavailable")):
             status, body = _post_order(client, ing.id)
@@ -54,9 +54,9 @@ class TestAuditFailureDoesNotBlockOrderCreation:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_stock_deducted_when_audit_raises(self, db, client, kitchen_client):
+    def test_reservation_persists_when_audit_raises(self, db, client, kitchen_client):
         """
-        Stock deduction must complete atomically even when audit() fails.
+        The inventory reservation must commit atomically even when audit() fails.
         """
         from app.models.ingredient_stock import IngredientStock
 
@@ -64,7 +64,7 @@ class TestAuditFailureDoesNotBlockOrderCreation:
         std_qty = Decimal("10.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=std_qty,
         )
 
@@ -75,9 +75,12 @@ class TestAuditFailureDoesNotBlockOrderCreation:
 
         db.expire_all()
         stock_after = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert stock_after.stock_quantity == initial - std_qty, (
-            f"Stock must be deducted even when audit fails. "
-            f"Expected {initial - std_qty}, got {stock_after.stock_quantity}"
+        assert stock_after.reserved_quantity == std_qty, (
+            f"Stock must be reserved even when audit fails. "
+            f"Expected reserved {std_qty}, got {stock_after.reserved_quantity}"
+        )
+        assert stock_after.on_hand_quantity == initial, (
+            "Order creation reserves; it must not consume physical stock"
         )
 
         cleanup_ingredient(db, ing.id)
@@ -87,7 +90,7 @@ class TestAuditFailureDoesNotBlockOrderCreation:
         When audit() catches an exception, it must emit an ERROR log.
         Silent swallowing is a debugging trap.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
         # Patch the _internal_ flush that audit() calls so the error
         # reaches audit()'s except block and gets logged.
@@ -113,7 +116,7 @@ class TestAuditFailureDoesNotBlockStatusTransition:
         """
         Status transitions must succeed even if audit() fails.
         """
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("100.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
         _, body = _post_order(client, ing.id)[0], _post_order(client, ing.id)[1]
 
         # Create a fresh order properly
@@ -131,17 +134,17 @@ class TestAuditFailureDoesNotBlockStatusTransition:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_cancellation_stock_return_succeeds_when_audit_raises(self, db, client, kitchen_client):
+    def test_cancellation_release_succeeds_when_audit_raises(self, db, client, kitchen_client):
         """
-        Stock must be returned on cancellation even if the audit() call inside
-        _return_stock_for_order() raises.
+        The reservation must be released on cancellation even if the audit()
+        call inside the kitchen transition raises.
         """
         from app.models.ingredient_stock import IngredientStock
 
         initial = Decimal("50.00")
         ing, _ = make_ingredient(
             db,
-            stock_quantity=initial,
+            on_hand=initial,
             standard_quantity=Decimal("10.00"),
         )
 
@@ -158,10 +161,14 @@ class TestAuditFailureDoesNotBlockStatusTransition:
 
         db.expire_all()
         stock_after = db.query(IngredientStock).filter_by(ingredient_id=ing.id).first()
-        assert stock_after.stock_quantity == initial, (
-            f"Stock must be returned even when audit fails. "
-            f"Expected {initial}, got {stock_after.stock_quantity}"
+        assert stock_after.reserved_quantity == Decimal("0"), (
+            f"Reservation must be released even when audit fails. "
+            f"Got reserved {stock_after.reserved_quantity}"
         )
+        assert stock_after.on_hand_quantity == initial, (
+            "Cancelling an un-started order must not move physical stock"
+        )
+        assert stock_after.available_quantity == initial
 
         cleanup_ingredient(db, ing.id)
 
@@ -175,7 +182,7 @@ class TestAuditWritesWhenHealthy:
         """
         from app.models.audit_log import AuditLog
 
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
         idem = uuid.uuid4().hex
         payload, headers = order_payload(ing.id, idem_key=idem)
@@ -191,7 +198,10 @@ class TestAuditWritesWhenHealthy:
         assert log is not None, "AuditLog record must exist for order creation"
         assert log.actor_type == "CUSTOMER"
         assert log.payload_after is not None
-        assert log.payload_after.get("idempotency_key") == idem
+        # The raw idempotency key is deliberately NOT logged — an audit trail is
+        # not a place to keep a replay credential.
+        assert "idempotency_key" not in log.payload_after
+        assert log.payload_after.get("store_id") is not None
 
         cleanup_ingredient(db, ing.id)
 
@@ -201,7 +211,7 @@ class TestAuditWritesWhenHealthy:
         """
         from app.models.audit_log import AuditLog
 
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
         payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
@@ -221,13 +231,14 @@ class TestAuditWritesWhenHealthy:
 
         cleanup_ingredient(db, ing.id)
 
-    def test_cancellation_writes_stock_returned_audit(self, db, client, kitchen_client):
+    def test_cancellation_writes_reservation_released_audit(self, db, client, kitchen_client):
         """
-        Cancellation must produce a stock_returned audit record.
+        Cancelling an un-started order produces an INVENTORY_RESERVATION_RELEASED
+        audit record attributed to the staff member who cancelled it.
         """
         from app.models.audit_log import AuditLog
 
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
         payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
@@ -237,11 +248,44 @@ class TestAuditWritesWhenHealthy:
 
         log = (
             db.query(AuditLog)
-            .filter_by(entity_type="order", entity_id=order_id, action="stock_returned")
+            .filter_by(
+                entity_type="inventory",
+                entity_id=order_id,
+                action="INVENTORY_RESERVATION_RELEASED",
+            )
             .first()
         )
-        assert log is not None, "stock_returned AuditLog must exist after cancellation"
-        assert log.actor_type == "SYSTEM"
+        assert log is not None, (
+            "INVENTORY_RESERVATION_RELEASED AuditLog must exist after cancellation"
+        )
+        assert log.actor_type == "STAFF"
+        assert log.actor_id is not None, "A staff cancellation must name its actor"
+
+        cleanup_ingredient(db, ing.id)
+
+    def test_start_prep_writes_consumed_audit(self, db, client, kitchen_client):
+        """Starting preparation produces an INVENTORY_CONSUMED audit record."""
+        from app.models.audit_log import AuditLog
+
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
+
+        payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
+        r = client.post("/public/orders/", json=payload, headers=headers)
+        order_id = r.json()["order_id"]
+
+        _patch_status(kitchen_client, order_id, "IN_PREP")
+
+        log = (
+            db.query(AuditLog)
+            .filter_by(
+                entity_type="inventory",
+                entity_id=order_id,
+                action="INVENTORY_CONSUMED",
+            )
+            .first()
+        )
+        assert log is not None, "INVENTORY_CONSUMED AuditLog must exist after start-prep"
+        assert log.actor_type == "STAFF"
 
         cleanup_ingredient(db, ing.id)
 
@@ -252,7 +296,7 @@ class TestAuditWritesWhenHealthy:
         """
         from app.models.audit_log import AuditLog
 
-        ing, _ = make_ingredient(db, stock_quantity=Decimal("50.00"))
+        ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
 
         idem = uuid.uuid4().hex
         payload, headers = order_payload(ing.id, idem_key=idem)
