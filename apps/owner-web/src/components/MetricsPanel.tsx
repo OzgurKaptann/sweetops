@@ -8,6 +8,7 @@ import {
   DataQuality,
   MetricsObservability,
 } from "@/lib/api";
+import { dataQualityLabel } from "@/lib/labels";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -24,18 +25,12 @@ function QualityBadge({ quality }: { quality: DataQuality }) {
     no_data:    "bg-gray-100 text-gray-500 border-gray-200",
     unreliable: "bg-red-50 text-red-700 border-red-200",
   };
-  const labels: Record<string, string> = {
-    low_sample: "low sample",
-    no_data:    "no data",
-    unreliable: "unreliable",
-  };
-
   return (
     <span
       className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium ${styles[quality.status] ?? styles["no_data"]}`}
       title={quality.message ?? undefined}
     >
-      {labels[quality.status] ?? quality.status}
+      {dataQualityLabel(quality.status)}
     </span>
   );
 }
@@ -148,12 +143,12 @@ function CountRow({ label, value }: { label: string; value: number }) {
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 
-const pct   = (v: number) => `${(v * 100).toFixed(1)}%`;
-const mins  = (v: number) => `${v.toFixed(1)} min`;
+const pct   = (v: number) => `%${(v * 100).toFixed(1)}`;
+const mins  = (v: number) => `${v.toFixed(1)} dk`;
 const money = (v: number) =>
   v === 0
     ? "—"
-    : `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    : `₺${v.toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 
 // ── Freshness footer ──────────────────────────────────────────────────────────
@@ -166,14 +161,14 @@ function FreshnessFooter({ meta }: { meta: MetricsObservability }) {
   return (
     <div className="flex items-center justify-between mt-3 px-0.5">
       <span className="text-[10px] text-gray-400">
-        vs {meta.comparison_date} · computed {timeStr} · {meta.computation_ms}ms
+        {meta.comparison_date} ile karşılaştırıldı · {timeStr} itibarıyla · {meta.computation_ms} ms
       </span>
       {hasErrors && (
         <span
           className="text-[10px] text-amber-600 font-medium cursor-help"
-          title={`Validation issues:\n${meta.errors.join("\n")}`}
+          title={`Veri tutarsızlıkları:\n${meta.errors.join("\n")}`}
         >
-          ⚠ {meta.errors.length} data issue{meta.errors.length > 1 ? "s" : ""}
+          ⚠ {meta.errors.length} veri sorunu
         </span>
       )}
     </div>
@@ -208,15 +203,15 @@ function MetricsDegraded({
   const isInfra = "status" in error && error.status === 503;
   const isFuture = "status" in error && error.status === 422;
 
-  let title = "Metrics unavailable";
-  let body  = "Could not load measurement data. Other dashboard panels are unaffected.";
+  let title = "Ölçüm verileri yüklenemedi";
+  let body  = "Ölçüm verileri okunamadı. Panelin diğer bölümleri etkilenmedi.";
 
   if (isInfra) {
-    title = "Metrics service unavailable";
-    body  = "The metrics database is temporarily unavailable. Data will appear automatically when it recovers.";
+    title = "Ölçüm servisi şu anda çalışmıyor";
+    body  = "Ölçüm veritabanına geçici olarak ulaşılamıyor. Bağlantı düzelince veriler otomatik görünecek.";
   } else if (isFuture) {
-    title = "Future date selected";
-    body  = "Metrics can only be computed for today or past dates.";
+    title = "İleri bir tarih seçildi";
+    body  = "Ölçümler yalnızca bugün ve geçmiş tarihler için hesaplanabilir.";
   }
 
   return (
@@ -232,7 +227,7 @@ function MetricsDegraded({
             onClick={onRetry}
             className="shrink-0 text-xs px-2 py-1 rounded border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
           >
-            Retry
+            Tekrar dene
           </button>
         )}
       </div>
@@ -278,57 +273,57 @@ export function MetricsPanel({ refreshTick }: { refreshTick: number }) {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
 
         {/* Conversion */}
-        <MetricGroup title="Conversion" icon="🔄">
+        <MetricGroup title="Dönüşüm" icon="🔄">
           <MetricRow
-            label="Combo usage rate"
+            label="Kombinasyon kullanımı"
             tv={conversion.combo_usage_rate}
             format={pct}
           />
           <MetricRow
-            label="AOV with combo"
+            label="Kombinasyonlu sepet ort."
             tv={conversion.avg_order_value_with_combo}
             format={money}
           />
           <MetricRow
-            label="AOV without combo"
+            label="Kombinasyonsuz sepet ort."
             tv={conversion.avg_order_value_without_combo}
             format={money}
           />
           <MetricRow
-            label="Upsell acceptance"
+            label="Ek malzeme kabulü"
             tv={conversion.upsell_acceptance_rate}
             format={pct}
           />
         </MetricGroup>
 
         {/* Decision Quality */}
-        <MetricGroup title="Decision Quality" icon="✅">
-          <CountRow label="Seen today"    value={decisions.decisions_seen} />
-          <CountRow label="Acknowledged"  value={decisions.decisions_acknowledged} />
-          <CountRow label="Completed"     value={decisions.decisions_completed} />
+        <MetricGroup title="Uyarı Takibi" icon="✅">
+          <CountRow label="Bugün görülen" value={decisions.decisions_seen} />
+          <CountRow label="Görüldü işaretlenen" value={decisions.decisions_acknowledged} />
+          <CountRow label="Tamamlanan"    value={decisions.decisions_completed} />
           <MetricRow
-            label="Completion rate"
+            label="Tamamlanma oranı"
             tv={decisions.completion_rate}
             format={pct}
           />
         </MetricGroup>
 
         {/* Kitchen — lower is better */}
-        <MetricGroup title="Kitchen" icon="⏱">
+        <MetricGroup title="Mutfak" icon="⏱">
           <MetricRow
-            label="Avg prep time"
+            label="Ort. hazırlık süresi"
             tv={kitchen.avg_prep_time_minutes}
             format={mins}
             lowerIsBetter
           />
           <MetricRow
-            label="P90 prep time"
+            label="P90 hazırlık süresi"
             tv={kitchen.p90_prep_time_minutes}
             format={mins}
             lowerIsBetter
           />
           <MetricRow
-            label="SLA breach rate"
+            label="Süre aşımı oranı"
             tv={kitchen.sla_breach_rate}
             format={pct}
             lowerIsBetter
@@ -336,11 +331,11 @@ export function MetricsPanel({ refreshTick }: { refreshTick: number }) {
         </MetricGroup>
 
         {/* Revenue Protection */}
-        <MetricGroup title="Revenue Protection" icon="🛡">
-          <CountRow label="Risks triggered" value={revenue_protection.stock_risk_triggered} />
-          <CountRow label="Resolved"        value={revenue_protection.stock_risk_resolved} />
+        <MetricGroup title="Ciro Koruma" icon="🛡">
+          <CountRow label="Oluşan risk"  value={revenue_protection.stock_risk_triggered} />
+          <CountRow label="Çözülen risk" value={revenue_protection.stock_risk_resolved} />
           <div className="flex items-center justify-between py-1.5 border-b border-gray-100">
-            <span className="text-xs text-gray-500">Est. saved</span>
+            <span className="text-xs text-gray-500">Önlenen kayıp</span>
             <span className={`text-xs font-semibold ${
               revenue_protection.estimated_revenue_saved > 0
                 ? "text-emerald-700"
@@ -352,7 +347,7 @@ export function MetricsPanel({ refreshTick }: { refreshTick: number }) {
             </span>
           </div>
           <div className="flex items-center justify-between py-1.5">
-            <span className="text-xs text-gray-500">Outcome</span>
+            <span className="text-xs text-gray-500">Sonuç</span>
             <span className="text-xs text-gray-700 tabular-nums">
               <span className="text-emerald-700">{revenue_protection.actual_outcome.good}G</span>
               {" · "}

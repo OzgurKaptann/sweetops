@@ -15,27 +15,22 @@ import {
   RevenueAnomalyData,
   SlowMovingData,
 } from "@/lib/api";
+import {
+  DECISION_TYPE_LABEL,
+  decisionStatusLabel,
+  resolutionQualityLabel,
+} from "@/lib/labels";
 
 // ── Severity styling ──────────────────────────────────────────────────────────
 
+// `severity` is an API enum (high/medium/low); only the badge text is copy.
 const SEVERITY_STYLES = {
-  high:   { border: "border-l-red-500",   badge: "bg-red-100 text-red-700",   label: "HIGH", dot: "bg-red-500" },
-  medium: { border: "border-l-amber-400", badge: "bg-amber-100 text-amber-700", label: "MED", dot: "bg-amber-400" },
-  low:    { border: "border-l-yellow-300", badge: "bg-yellow-50 text-yellow-700", label: "LOW", dot: "bg-yellow-400" },
+  high:   { border: "border-l-red-500",   badge: "bg-red-100 text-red-700",   label: "YÜKSEK", dot: "bg-red-500" },
+  medium: { border: "border-l-amber-400", badge: "bg-amber-100 text-amber-700", label: "ORTA", dot: "bg-amber-400" },
+  low:    { border: "border-l-yellow-300", badge: "bg-yellow-50 text-yellow-700", label: "DÜŞÜK", dot: "bg-yellow-400" },
 } as const;
 
-const TYPE_LABELS: Record<string, string> = {
-  stock_risk: "Stock Risk",
-  demand_spike: "Demand Spike",
-  slow_moving: "Slow Moving",
-  sla_risk: "SLA Risk",
-  revenue_anomaly: "Revenue Anomaly",
-  // Metric-driven (pattern-level, generated from measurement layer)
-  metric_combo_health: "Combo Health",
-  metric_upsell_visibility: "Upsell Visibility",
-  metric_owner_engagement: "Owner Engagement",
-  metric_kitchen_performance: "Kitchen Performance",
-};
+const TYPE_LABELS = DECISION_TYPE_LABEL;
 
 const TYPE_ICONS: Record<string, string> = {
   stock_risk: "📦",
@@ -53,9 +48,9 @@ const TYPE_ICONS: Record<string, string> = {
 // ── Resolution quality config ─────────────────────────────────────────────────
 
 const QUALITY_CONFIG = {
-  good:    { label: "Issue resolved",   bg: "bg-emerald-50", text: "text-emerald-700", icon: "✓" },
-  partial: { label: "Partially resolved", bg: "bg-amber-50",   text: "text-amber-700",  icon: "~" },
-  failed:  { label: "Could not resolve",  bg: "bg-red-50",     text: "text-red-600",    icon: "✕" },
+  good:    { label: resolutionQualityLabel("good"),    bg: "bg-emerald-50", text: "text-emerald-700", icon: "✓" },
+  partial: { label: resolutionQualityLabel("partial"), bg: "bg-amber-50",   text: "text-amber-700",  icon: "~" },
+  failed:  { label: resolutionQualityLabel("failed"),  bg: "bg-red-50",     text: "text-red-600",    icon: "✕" },
 } as const;
 
 // ── Data context row ──────────────────────────────────────────────────────────
@@ -68,11 +63,11 @@ function DataContext({ decision }: { decision: OwnerDecision }) {
     const data = d as StockRiskData;
     return (
       <div className="flex flex-wrap gap-3 text-xs text-gray-500 mt-2">
-        <span>Stock: <b className="text-gray-700">{data.current_stock.toFixed(1)} {data.unit}</b></span>
+        <span>Kullanılabilir stok: <b className="text-gray-700">{data.current_stock.toFixed(1)} {data.unit}</b></span>
         {data.hours_to_stockout !== null && (
-          <span>Stockout: <b className="text-red-600">{data.hours_to_stockout.toFixed(1)}h</b></span>
+          <span>Tükenmesine: <b className="text-red-600">{data.hours_to_stockout.toFixed(1)} sa</b></span>
         )}
-        <span>At risk: <b className="text-red-600">₺{data.revenue_at_risk.toFixed(0)}</b></span>
+        <span>Risk altında: <b className="text-red-600">₺{data.revenue_at_risk.toFixed(0)}</b></span>
       </div>
     );
   }
@@ -80,9 +75,9 @@ function DataContext({ decision }: { decision: OwnerDecision }) {
     const data = d as DemandSpikeData;
     return (
       <div className="flex flex-wrap gap-3 text-xs text-gray-500 mt-2">
-        <span>Last 1h: <b className="text-gray-700">{data.last_1h_orders} orders</b></span>
-        <span>Baseline: <b className="text-gray-700">{data.avg_hourly_baseline.toFixed(1)}/h</b></span>
-        <span>Spike: <b className="text-amber-600">{data.spike_ratio.toFixed(1)}×</b></span>
+        <span>Son 1 saat: <b className="text-gray-700">{data.last_1h_orders} sipariş</b></span>
+        <span>Ortalama: <b className="text-gray-700">saatte {data.avg_hourly_baseline.toFixed(1)}</b></span>
+        <span>Artış: <b className="text-amber-600">{data.spike_ratio.toFixed(1)} kat</b></span>
       </div>
     );
   }
@@ -90,9 +85,9 @@ function DataContext({ decision }: { decision: OwnerDecision }) {
     const data = d as SLARiskData;
     return (
       <div className="flex flex-wrap gap-3 text-xs text-gray-500 mt-2">
-        <span>Critical: <b className="text-red-600">{data.critical_count}</b></span>
-        <span>Warning: <b className="text-amber-600">{data.warning_count}</b></span>
-        <span>Worst: <b className="text-red-600">{data.worst_age_minutes.toFixed(1)} min</b></span>
+        <span>Süre aşıldı: <b className="text-red-600">{data.critical_count}</b></span>
+        <span>Süre doluyor: <b className="text-amber-600">{data.warning_count}</b></span>
+        <span>En uzun bekleyen: <b className="text-red-600">{data.worst_age_minutes.toFixed(1)} dk</b></span>
       </div>
     );
   }
@@ -101,9 +96,9 @@ function DataContext({ decision }: { decision: OwnerDecision }) {
     const isDrop = data.direction === "drop";
     return (
       <div className="flex flex-wrap gap-3 text-xs text-gray-500 mt-2">
-        <span>Last 1h: <b className="text-gray-700">₺{data.last_1h_revenue.toFixed(0)}</b></span>
-        <span>Baseline: <b className="text-gray-700">₺{data.avg_hourly_baseline.toFixed(0)}/h</b></span>
-        <span>Ratio: <b className={isDrop ? "text-red-600" : "text-emerald-600"}>{isDrop ? "▼" : "▲"} {(data.ratio * 100).toFixed(0)}%</b></span>
+        <span>Son 1 saat: <b className="text-gray-700">₺{data.last_1h_revenue.toFixed(0)}</b></span>
+        <span>Ortalama: <b className="text-gray-700">saatte ₺{data.avg_hourly_baseline.toFixed(0)}</b></span>
+        <span>Oran: <b className={isDrop ? "text-red-600" : "text-emerald-600"}>{isDrop ? "▼" : "▲"} %{(data.ratio * 100).toFixed(0)}</b></span>
       </div>
     );
   }
@@ -111,8 +106,8 @@ function DataContext({ decision }: { decision: OwnerDecision }) {
     const data = d as SlowMovingData;
     return (
       <div className="flex flex-wrap gap-3 text-xs text-gray-500 mt-2">
-        <span>Stock: <b className="text-gray-700">{data.current_stock.toFixed(1)}</b></span>
-        <span>Capital tied: <b className="text-amber-600">₺{data.tied_capital.toFixed(0)}</b></span>
+        <span>Fiziksel stok: <b className="text-gray-700">{data.current_stock.toFixed(1)}</b></span>
+        <span>Bağlı sermaye: <b className="text-amber-600">₺{data.tied_capital.toFixed(0)}</b></span>
       </div>
     );
   }
@@ -134,10 +129,10 @@ function ResolutionBadge({ decision }: { decision: OwnerDecision }) {
       <span className={`text-xs font-bold ${qcfg.text}`}>{qcfg.icon} {qcfg.label}</span>
       {decision.estimated_revenue_saved != null && decision.estimated_revenue_saved > 0 && (
         <span className="text-xs text-emerald-600 font-semibold">
-          ~₺{decision.estimated_revenue_saved.toFixed(0)} saved
+          ~₺{decision.estimated_revenue_saved.toFixed(0)} kurtarıldı
         </span>
       )}
-      <span className="text-xs text-gray-400 ml-auto">{minutesElapsed}m to act</span>
+      <span className="text-xs text-gray-400 ml-auto">{minutesElapsed} dk içinde ele alındı</span>
     </div>
   );
 }
@@ -153,7 +148,7 @@ interface QualitySelectorProps {
 function QualitySelector({ onSelect, onCancel, revenueatRisk }: QualitySelectorProps) {
   return (
     <div className="mt-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
-      <p className="text-xs font-semibold text-gray-600 mb-2">How was it resolved?</p>
+      <p className="text-xs font-semibold text-gray-600 mb-2">Sonuç ne oldu?</p>
       <div className="flex gap-2 mb-2">
         {(["good", "partial", "failed"] as ResolutionQuality[]).map((q) => {
           const cfg = QUALITY_CONFIG[q];
@@ -171,11 +166,11 @@ function QualitySelector({ onSelect, onCancel, revenueatRisk }: QualitySelectorP
       </div>
       {revenueatRisk && revenueatRisk > 0 && (
         <p className="text-[10px] text-gray-400">
-          Potential save: ₺{revenueatRisk.toFixed(0)} (used for "Issue resolved" quality)
+          Önlenebilecek kayıp: ₺{revenueatRisk.toFixed(0)} (yalnızca &quot;Sorun çözüldü&quot; seçilirse sayılır)
         </p>
       )}
       <button onClick={onCancel} className="mt-1 text-xs text-gray-400 hover:text-gray-600">
-        Cancel
+        Vazgeç
       </button>
     </div>
   );
@@ -227,7 +222,7 @@ function DecisionCard({ decision, isPrimary, onAction }: CardProps) {
       {isPrimary && !isResolved && (
         <div className="flex items-center gap-1.5 mb-2 -mt-1">
           <span className="text-[10px] font-bold bg-amber-400 text-white px-2 py-0.5 rounded uppercase tracking-wide">
-            🔥 Primary Focus
+            🔥 Öncelikli
           </span>
         </div>
       )}
@@ -246,7 +241,7 @@ function DecisionCard({ decision, isPrimary, onAction }: CardProps) {
               </span>
               {decision.blocking_vs_non_blocking && (
                 <span className="text-[10px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded font-semibold uppercase">
-                  Blocking
+                  Engelleyici
                 </span>
               )}
             </div>
@@ -259,7 +254,7 @@ function DecisionCard({ decision, isPrimary, onAction }: CardProps) {
             decision.status === "completed" ? "bg-emerald-50 text-emerald-700" :
             "bg-gray-100 text-gray-500"
           }`}>
-            {decision.status}
+            {decisionStatusLabel(decision.status)}
           </span>
         )}
       </div>
@@ -270,18 +265,18 @@ function DecisionCard({ decision, isPrimary, onAction }: CardProps) {
       {/* Why now + expected impact */}
       <div className="mt-3 space-y-1">
         <div className="flex gap-1.5">
-          <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide shrink-0 mt-0.5 w-16">Why now</span>
+          <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide shrink-0 mt-0.5 w-16">Neden şimdi</span>
           <span className="text-xs text-gray-600">{decision.why_now}</span>
         </div>
         <div className="flex gap-1.5">
-          <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide shrink-0 mt-0.5 w-16">Impact</span>
+          <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide shrink-0 mt-0.5 w-16">Etki</span>
           <span className="text-xs text-gray-600">{decision.expected_impact}</span>
         </div>
       </div>
 
       {/* Recommended action */}
       <div className="mt-3 px-3 py-2 bg-gray-50 rounded-lg">
-        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Action</span>
+        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Yapılacak</span>
         <p className="text-xs font-medium text-gray-800 mt-0.5">{decision.recommended_action}</p>
       </div>
 
@@ -306,7 +301,7 @@ function DecisionCard({ decision, isPrimary, onAction }: CardProps) {
               disabled={acting !== null}
               className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 transition-colors"
             >
-              {acting === "acknowledge" ? "…" : "Acknowledge"}
+              {acting === "acknowledge" ? "…" : "Gördüm"}
             </button>
           )}
           <button
@@ -314,14 +309,14 @@ function DecisionCard({ decision, isPrimary, onAction }: CardProps) {
             disabled={acting !== null}
             className="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 transition-colors"
           >
-            {acting === "complete" ? "…" : "Mark Done"}
+            {acting === "complete" ? "…" : "Tamamlandı"}
           </button>
           <button
             onClick={() => handleAction("dismiss")}
             disabled={acting !== null}
             className="px-3 py-1.5 text-xs font-medium rounded-lg text-gray-400 hover:bg-gray-100 disabled:opacity-50 transition-colors ml-auto"
           >
-            {acting === "dismiss" ? "…" : "Dismiss"}
+            {acting === "dismiss" ? "…" : "Kapat"}
           </button>
         </div>
       )}
@@ -331,13 +326,19 @@ function DecisionCard({ decision, isPrimary, onAction }: CardProps) {
 
 // ── Summary pills ─────────────────────────────────────────────────────────────
 
+const SEVERITY_TEXT: Record<"high" | "medium" | "low", string> = {
+  high: "yüksek",
+  medium: "orta",
+  low: "düşük",
+};
+
 function SummaryPill({ count, severity }: { count: number; severity: "high" | "medium" | "low" }) {
   if (count === 0) return null;
   const s = SEVERITY_STYLES[severity];
   return (
     <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${s.badge}`}>
       <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
-      {count} {severity}
+      {count} {SEVERITY_TEXT[severity]}
     </span>
   );
 }
@@ -404,7 +405,7 @@ export function DecisionPanel({ refreshTick, onPrimaryDecision }: Props) {
   if (error) {
     return (
       <div className="p-4 text-sm text-red-600 bg-red-50 rounded-xl border border-red-100">
-        Decision system unavailable.
+        Uyarılar yüklenemedi. Panelin geri kalanı çalışmaya devam ediyor.
       </div>
     );
   }
@@ -424,8 +425,8 @@ export function DecisionPanel({ refreshTick, onPrimaryDecision }: Props) {
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-6 text-center">
         <div className="text-3xl mb-2">✓</div>
-        <p className="text-sm font-semibold text-emerald-600">No active alerts</p>
-        <p className="text-xs text-gray-400 mt-1">All signals clear.</p>
+        <p className="text-sm font-semibold text-emerald-600">Bekleyen uyarı yok</p>
+        <p className="text-xs text-gray-400 mt-1">Şu anda dikkat gerektiren bir durum yok.</p>
       </div>
     );
   }
@@ -445,7 +446,7 @@ export function DecisionPanel({ refreshTick, onPrimaryDecision }: Props) {
         <SummaryPill count={summary.high} severity="high" />
         <SummaryPill count={summary.medium} severity="medium" />
         <SummaryPill count={summary.low} severity="low" />
-        <span className="ml-auto text-xs text-gray-400">{data?.active_count ?? 0} active</span>
+        <span className="ml-auto text-xs text-gray-400">{data?.active_count ?? 0} açık uyarı</span>
       </div>
 
       <div className="space-y-3">
@@ -461,7 +462,7 @@ export function DecisionPanel({ refreshTick, onPrimaryDecision }: Props) {
         {/* Recently resolved — feedback only, no actions */}
         {recentCompleted.length > 0 && (
           <div className="mt-2">
-            <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-2">Recently resolved</p>
+            <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-2">Yakın zamanda kapatılanlar</p>
             {recentCompleted.map((d) => (
               <DecisionCard
                 key={d.id}

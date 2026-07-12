@@ -472,43 +472,43 @@ class TestDecisionSignals:
         from app.services.kitchen_service import _decision_signals, START_IMMEDIATELY_MINUTES
         should_start, reason = _decision_signals(0.5, "NEW", "ok")
         assert should_start is False
-        assert "Just placed" in reason
+        assert "Yeni geldi" in reason
 
     def test_new_order_at_start_threshold_should_start(self):
         from app.services.kitchen_service import _decision_signals, START_IMMEDIATELY_MINUTES
         should_start, reason = _decision_signals(float(START_IMMEDIATELY_MINUTES), "NEW", "ok")
         assert should_start is True
-        assert "start now" in reason.lower()
+        assert "şimdi başlayın" in reason
 
     def test_new_warning_order_should_start(self):
         from app.services.kitchen_service import _decision_signals
         should_start, reason = _decision_signals(8.0, "NEW", "warning")
         assert should_start is True
-        assert "SLA" in reason or "Approaching" in reason
+        assert "Süre doluyor" in reason
 
     def test_new_critical_order_should_start(self):
         from app.services.kitchen_service import _decision_signals
         should_start, reason = _decision_signals(11.0, "NEW", "critical")
         assert should_start is True
-        assert "SLA breached" in reason
+        assert "Süre aşıldı" in reason
 
     def test_in_prep_ok_should_not_start(self):
         from app.services.kitchen_service import _decision_signals
         should_start, reason = _decision_signals(3.0, "IN_PREP", "ok")
         assert should_start is False
-        assert "In preparation" in reason
+        assert "Hazırlanıyor" in reason
 
     def test_in_prep_critical_should_start(self):
         from app.services.kitchen_service import _decision_signals
         should_start, reason = _decision_signals(11.0, "IN_PREP", "critical")
         assert should_start is True
-        assert "expedite" in reason.lower()
+        assert "yetiştirin" in reason
 
     def test_in_prep_warning_should_start(self):
         from app.services.kitchen_service import _decision_signals
         should_start, reason = _decision_signals(8.0, "IN_PREP", "warning")
         assert should_start is True
-        assert "Running long" in reason
+        assert "Uzun sürüyor" in reason
 
     def test_urgency_reason_contains_age_minutes(self):
         """All urgency reasons must include the actual age value."""
@@ -525,39 +525,39 @@ class TestActionHints:
 
     def test_critical_new_hint(self):
         from app.services.kitchen_service import _action_hint
-        assert _action_hint(1, "NEW", "critical", 11.0, []) == "Start immediately — SLA breached"
+        assert _action_hint(1, "NEW", "critical", 11.0, []) == "Hemen başlayın — süre aşıldı"
 
     def test_warning_new_hint(self):
         from app.services.kitchen_service import _action_hint
-        assert _action_hint(1, "NEW", "warning", 8.0, []) == "Start soon — approaching SLA"
+        assert _action_hint(1, "NEW", "warning", 8.0, []) == "Yakında başlayın — süre doluyor"
 
     def test_batch_hint_references_partner_id(self):
         from app.services.kitchen_service import _action_hint
         hint = _action_hint(1, "NEW", "ok", 2.0, [5, 9])
-        assert "Combine with order #5" in hint
+        assert "#5 ile birlikte hazırlayın" in hint
 
     def test_start_now_hint_when_above_threshold_no_batch(self):
         from app.services.kitchen_service import _action_hint, START_IMMEDIATELY_MINUTES
         hint = _action_hint(1, "NEW", "ok", float(START_IMMEDIATELY_MINUTES), [])
-        assert hint == "Start now"
+        assert hint == "Şimdi başlayın"
 
     def test_can_wait_fresh_order(self):
         from app.services.kitchen_service import _action_hint
-        assert _action_hint(1, "NEW", "ok", 0.5, []) == "Can wait"
+        assert _action_hint(1, "NEW", "ok", 0.5, []) == "Bekleyebilir"
 
     def test_sla_takes_precedence_over_batch(self):
         """Critical SLA hint must appear even when batch partners exist."""
         from app.services.kitchen_service import _action_hint
         hint = _action_hint(1, "NEW", "critical", 11.0, [2, 3])
-        assert hint == "Start immediately — SLA breached"
+        assert hint == "Hemen başlayın — süre aşıldı"
 
     def test_in_prep_critical(self):
         from app.services.kitchen_service import _action_hint
-        assert _action_hint(1, "IN_PREP", "critical", 11.0, []) == "Expedite — SLA breached"
+        assert _action_hint(1, "IN_PREP", "critical", 11.0, []) == "Yetiştirin — süre aşıldı"
 
     def test_in_prep_ok(self):
         from app.services.kitchen_service import _action_hint
-        assert _action_hint(1, "IN_PREP", "ok", 3.0, []) == "In progress"
+        assert _action_hint(1, "IN_PREP", "ok", 3.0, []) == "Hazırlanıyor"
 
 
 # ---------------------------------------------------------------------------
@@ -667,7 +667,7 @@ class TestKitchenLoad:
         load = _kitchen_load([])
         assert load["load_level"] == "low"
         assert load["active_orders_count"] == 0
-        assert "idle" in load["explanation"].lower()
+        assert "sakin" in load["explanation"].lower()
 
     def test_low_load(self):
         from app.services.kitchen_service import _kitchen_load, LOAD_MEDIUM_THRESHOLD
@@ -788,7 +788,7 @@ class TestKitchenDashboardAPI:
         cleanup_ingredient(db, ing.id)
 
     def test_action_hint_is_can_wait_for_fresh_order(self, db, client, kitchen_client):
-        """A brand-new order with no batch partner should get 'Can wait'."""
+        """A brand-new order with no batch partner should get 'Bekleyebilir'."""
         # Create a unique ingredient so no other order shares it → no batch suggestion
         ing, _ = make_ingredient(db, on_hand=Decimal("50.00"), name=f"Unique_{uuid.uuid4().hex[:6]}")
         p, h = order_payload(ing.id, idem_key=uuid.uuid4().hex)
@@ -797,6 +797,8 @@ class TestKitchenDashboardAPI:
 
         orders = kitchen_client.get("/kitchen/orders/").json()["orders"]
         our = next(o for o in orders if o["id"] == oid)
-        assert our["action_hint"] == "Can wait", f"Fresh unique order should be 'Can wait', got: {our['action_hint']!r}"
+        assert our["action_hint"] == "Bekleyebilir", (
+            f"Fresh unique order should be 'Bekleyebilir', got: {our['action_hint']!r}"
+        )
 
         cleanup_ingredient(db, ing.id)

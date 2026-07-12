@@ -116,7 +116,7 @@ def compute_operational_context(
         metrics: DailyMetricsResponse = fetch_daily_metrics(db, target_date, store_id=store_id)
     except Exception:
         # Metrics failure → safe default
-        ctx.reasons.append("Metrics unavailable; operating in normal mode.")
+        ctx.reasons.append("Ölçüm verileri okunamadı; normal moda geçildi.")
         return ctx
 
     conv    = metrics.conversion
@@ -144,9 +144,9 @@ def compute_operational_context(
     if sla_breach is not None and sla_breach > SLA_BREACH_CRITICAL_THRESHOLD:
         ctx.mode = "sla_critical"
         ctx.reasons.append(
-            f"SLA breach rate is {sla_breach * 100:.0f}% (threshold: "
-            f"{SLA_BREACH_CRITICAL_THRESHOLD * 100:.0f}%). "
-            "Kitchen is severely overloaded."
+            f"Süre aşımı oranı %{sla_breach * 100:.0f} (eşik: "
+            f"%{SLA_BREACH_CRITICAL_THRESHOLD * 100:.0f}). "
+            "Mutfak ciddi şekilde yoğun."
         )
         ctx.combo_boost = 1.0               # no combo push during crisis
         ctx.max_upsell_suggestions = HIGH_LOAD_MAX_UPSELL_SUGGESTIONS
@@ -160,13 +160,13 @@ def compute_operational_context(
         ctx.mode = "high_kitchen_load"
         if sla_breach is not None and sla_breach > SLA_BREACH_HIGH_LOAD_THRESHOLD:
             ctx.reasons.append(
-                f"SLA breach rate is {sla_breach * 100:.0f}% "
-                f"(threshold: {SLA_BREACH_HIGH_LOAD_THRESHOLD * 100:.0f}%)."
+                f"Süre aşımı oranı %{sla_breach * 100:.0f} "
+                f"(eşik: %{SLA_BREACH_HIGH_LOAD_THRESHOLD * 100:.0f})."
             )
         if avg_prep is not None and avg_prep > AVG_PREP_HIGH_LOAD_THRESHOLD:
             ctx.reasons.append(
-                f"Average prep time is {avg_prep:.1f} min "
-                f"(threshold: {AVG_PREP_HIGH_LOAD_THRESHOLD:.0f} min)."
+                f"Ortalama hazırlık süresi {avg_prep:.1f} dk "
+                f"(eşik: {AVG_PREP_HIGH_LOAD_THRESHOLD:.0f} dk)."
             )
         ctx.combo_boost = 1.0               # no combo push during high load
         ctx.max_upsell_suggestions = HIGH_LOAD_MAX_UPSELL_SUGGESTIONS
@@ -180,22 +180,22 @@ def compute_operational_context(
         ctx.mode = "boost_combos"
         if triggered_by_combo:
             ctx.reasons.append(
-                f"Combo usage rate is {combo_rate * 100:.0f}% "  # type: ignore[operator]
-                f"(threshold: {COMBO_RATE_BOOST_THRESHOLD * 100:.0f}%). "
-                "Increasing combo ingredient visibility in menu ranking."
+                f"Kombinasyon kullanım oranı %{combo_rate * 100:.0f} "  # type: ignore[operator]
+                f"(eşik: %{COMBO_RATE_BOOST_THRESHOLD * 100:.0f}). "
+                "Menü sıralamasında kombinasyon malzemeleri öne çıkarılıyor."
             )
         if triggered_by_upsell:
             ctx.reasons.append(
-                f"Upsell acceptance rate is {upsell_rate * 100:.0f}% "  # type: ignore[operator]
-                f"(threshold: {UPSELL_RATE_BOOST_THRESHOLD * 100:.0f}%). "
-                "Combo suggestions will be prioritized."
+                f"Ek malzeme kabul oranı %{upsell_rate * 100:.0f} "  # type: ignore[operator]
+                f"(eşik: %{UPSELL_RATE_BOOST_THRESHOLD * 100:.0f}). "
+                "Kombinasyon önerileri önceliklendirilecek."
             )
         ctx.combo_boost = COMBO_BOOST_MULTIPLIER
         ctx.max_upsell_suggestions = NORMAL_MAX_UPSELL_SUGGESTIONS
         return ctx
 
     # normal
-    ctx.reasons.append("All metrics within expected thresholds.")
+    ctx.reasons.append("Tüm ölçümler beklenen aralıkta.")
     return ctx
 
 

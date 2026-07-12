@@ -76,7 +76,7 @@ export async function login(
       body: JSON.stringify({ username, password }),
     });
   } catch {
-    throw new Error("Bağlantı hatası. Lütfen tekrar dene.");
+    throw new Error("Bağlantı hatası. Lütfen tekrar deneyin.");
   }
 
   if (res.ok) return res.json();
@@ -85,7 +85,7 @@ export async function login(
   const detail = body?.detail;
   const message =
     (detail && typeof detail === "object" && detail.message) ||
-    "Oturum açılamadı. Lütfen tekrar dene.";
+    "Oturum açılamadı. Lütfen tekrar deneyin.";
   throw new Error(message);
 }
 

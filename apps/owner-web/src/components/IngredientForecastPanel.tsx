@@ -61,7 +61,7 @@ export function IngredientForecastPanel({ refreshTick }: Props) {
   if (error) {
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-5 text-sm text-red-500">
-        Forecast data unavailable.
+        Tahmin verisi yüklenemedi.
       </div>
     );
   }
@@ -79,12 +79,12 @@ export function IngredientForecastPanel({ refreshTick }: Props) {
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-5 min-h-[280px] flex flex-col">
         <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
-          Forecast vs Baseline
+          Tahmin ve Ortalama
         </h3>
         <div className="flex-1 flex items-center justify-center text-gray-400 text-sm text-center">
-          Not enough history to forecast yet.
+          Tahmin için yeterli geçmiş veri yok.
           <br />
-          <span className="text-xs mt-1 block">Needs 7–14 days of data.</span>
+          <span className="text-xs mt-1 block">7–14 günlük veri gerekiyor.</span>
         </div>
       </div>
     );
@@ -106,10 +106,10 @@ export function IngredientForecastPanel({ refreshTick }: Props) {
     <div className="bg-white rounded-xl border border-gray-100 p-5 min-h-[280px] flex flex-col">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-          Forecast vs Baseline
+          Tahmin ve Ortalama
         </h3>
         <span className="text-[10px] text-gray-400">
-          {data.forecast_horizon_days}-day horizon
+          {data.forecast_horizon_days} günlük tahmin
         </span>
       </div>
 
@@ -135,14 +135,14 @@ export function IngredientForecastPanel({ refreshTick }: Props) {
               contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 11 }}
               formatter={(value: any, name: any) => [
                 Number(value).toFixed(1),
-                name === "predicted" ? "Forecast" : "Baseline",
+                name === "predicted" ? "Tahmin" : "Ortalama",
               ]}
             />
             <Legend
               iconType="square"
               iconSize={8}
               wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
-              formatter={(v) => (v === "predicted" ? "Forecast" : "Baseline")}
+              formatter={(v) => (v === "predicted" ? "Tahmin" : "Ortalama")}
             />
             <Bar dataKey="baseline" fill="#e5e7eb" radius={[2, 2, 0, 0]} />
             <Bar dataKey="predicted" radius={[2, 2, 0, 0]}>
@@ -179,7 +179,7 @@ export function IngredientForecastPanel({ refreshTick }: Props) {
           </div>
         ))}
         <span className="text-[10px] text-gray-300 ml-auto">
-          ● high&nbsp; ● med&nbsp; ● low confidence
+          Güven düzeyi: ● yüksek&nbsp; ● orta&nbsp; ● düşük
         </span>
       </div>
     </div>

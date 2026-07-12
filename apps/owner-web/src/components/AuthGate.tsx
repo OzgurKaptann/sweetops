@@ -107,7 +107,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-gray-50 text-center px-6">
         <p className="text-lg font-semibold text-gray-900">
-          Bu alana erişim yetkin yok.
+          Bu işlem için yetkiniz yok.
         </p>
         <button
           onClick={logout}
@@ -159,7 +159,7 @@ function LoginScreen({
       const profile = await apiLogin(username.trim(), password);
       onSuccess(profile);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Oturum açılamadı. Lütfen tekrar dene.");
+      setError(err instanceof Error ? err.message : "Oturum açılamadı. Lütfen tekrar deneyin.");
     } finally {
       setSubmitting(false);
     }
@@ -178,7 +178,7 @@ function LoginScreen({
 
         {expiredNotice && (
           <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-            Oturumun sona erdi. Lütfen yeniden giriş yap.
+            Oturumunuzun süresi doldu. Lütfen yeniden giriş yapın.
           </p>
         )}
 

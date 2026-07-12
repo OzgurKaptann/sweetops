@@ -10,6 +10,7 @@ import {
   BatchingSuggestion,
   OrderStatus,
 } from "@/lib/api";
+import { loadLevelLabel, orderStatusLabel } from "@/lib/labels";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/kitchen";
 const POLL_MS = 15_000;
@@ -29,9 +30,9 @@ function computeFlowStatus(data: KitchenDashboardResponse | null): FlowStatus {
 }
 
 const FLOW_STYLE: Record<FlowStatus, { bg: string; text: string; message: string }> = {
-  smooth:   { bg: "bg-emerald-600", text: "text-white", message: "Kitchen is running smoothly" },
-  stressed: { bg: "bg-amber-500",   text: "text-white", message: "Kitchen under pressure — watch SLA" },
-  critical: { bg: "bg-red-600",     text: "text-white", message: "Kitchen critical — prioritize speed now" },
+  smooth:   { bg: "bg-emerald-600", text: "text-white", message: "Mutfak akışı düzgün" },
+  stressed: { bg: "bg-amber-500",   text: "text-white", message: "Mutfak yoğun — hazırlık sürelerine dikkat" },
+  critical: { bg: "bg-red-600",     text: "text-white", message: "Mutfak kritik — önce hızı önceliklendirin" },
 };
 
 function FlowStatusBanner({ status }: { status: FlowStatus }) {
@@ -55,31 +56,33 @@ const NEXT_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
   READY: "DELIVERED",
 };
 
+// Keyed by the API's order-status enum; the button text is presentation only.
 const ACTION_LABEL: Partial<Record<OrderStatus, string>> = {
-  NEW: "Start Prep",
-  IN_PREP: "Mark Ready",
-  READY: "Mark Delivered",
+  NEW: "Hazırlamaya başla",
+  IN_PREP: "Hazır olarak işaretle",
+  READY: "Teslim edildi olarak işaretle",
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// `sla_severity` is an API enum (ok/warning/critical); only the badge is copy.
 const SLA_STYLE = {
   critical: {
     border: "border-l-red-500",
     badge: "bg-red-100 text-red-700",
-    label: "CRITICAL",
+    label: "SÜRE AŞILDI",
     ageBg: "bg-red-50 text-red-700",
   },
   warning: {
     border: "border-l-amber-400",
     badge: "bg-amber-100 text-amber-700",
-    label: "WARNING",
+    label: "SÜRE DOLUYOR",
     ageBg: "bg-amber-50 text-amber-700",
   },
   ok: {
     border: "border-l-gray-200",
     badge: "bg-gray-100 text-gray-500",
-    label: "OK",
+    label: "ZAMANINDA",
     ageBg: "bg-gray-50 text-gray-500",
   },
 };
@@ -90,17 +93,9 @@ const LOAD_STYLE = {
   high: "bg-red-50 text-red-700",
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  NEW: "Waiting",
-  IN_PREP: "In Prep",
-  READY: "Ready",
-  DELIVERED: "Done",
-  CANCELLED: "Cancelled",
-};
-
 function formatAge(minutes: number): string {
-  if (minutes < 1) return "<1 min";
-  return `${minutes.toFixed(1)} min`;
+  if (minutes < 1) return "1 dk'dan az";
+  return `${minutes.toFixed(1)} dk`;
 }
 
 // ── Kitchen Load Bar ──────────────────────────────────────────────────────────
@@ -117,7 +112,7 @@ function KitchenLoadHeader({
       <div className="max-w-screen-xl mx-auto px-6">
         <div className="flex items-center justify-between h-14">
           <div className="flex items-center gap-3">
-            <span className="text-sm font-bold text-gray-900">Kitchen</span>
+            <span className="text-sm font-bold text-gray-900">Mutfak</span>
             {load && (
               <>
                 <span className="text-gray-200">|</span>
@@ -126,7 +121,7 @@ function KitchenLoadHeader({
                     LOAD_STYLE[load.load_level]
                   }`}
                 >
-                  {load.load_level.charAt(0).toUpperCase() + load.load_level.slice(1)} Load
+                  {loadLevelLabel(load.load_level)}
                 </span>
               </>
             )}
@@ -136,15 +131,15 @@ function KitchenLoadHeader({
             {load && (
               <div className="hidden sm:flex items-center gap-5 text-xs text-gray-500">
                 <span>
-                  <b className="text-gray-900">{load.active_orders_count}</b> active
+                  <b className="text-gray-900">{load.active_orders_count}</b> açık sipariş
                 </span>
                 <span>
-                  <b className="text-gray-900">{load.in_prep_count}</b> in prep
+                  <b className="text-gray-900">{load.in_prep_count}</b> hazırlanıyor
                 </span>
                 <span>
-                  Avg age:{" "}
+                  Ort. bekleme:{" "}
                   <b className={load.average_age_minutes > 8 ? "text-red-600" : "text-gray-900"}>
-                    {load.average_age_minutes.toFixed(1)} min
+                    {load.average_age_minutes.toFixed(1)} dk
                   </b>
                 </span>
               </div>
@@ -153,7 +148,7 @@ function KitchenLoadHeader({
               href="/owner-web"
               className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
             >
-              ← Dashboard
+              ← Panel
             </a>
             <button
               onClick={onRefresh}
@@ -176,11 +171,11 @@ function BatchingBanner({ suggestions }: { suggestions: BatchingSuggestion[] }) 
   return (
     <div className="bg-blue-50 border-b border-blue-100 px-6 py-2">
       <div className="max-w-screen-xl mx-auto flex flex-wrap items-center gap-3">
-        <span className="text-xs font-semibold text-blue-700">Batching opportunity:</span>
+        <span className="text-xs font-semibold text-blue-700">Birlikte hazırlama fırsatı:</span>
         {suggestions.map((s, i) => (
           <span key={i} className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded">
-            Orders #{s.grouped_order_ids.join(" + #")} share{" "}
-            <b>{s.shared_ingredients.join(", ")}</b> — save {s.estimated_time_saved}
+            #{s.grouped_order_ids.join(" + #")} siparişlerinde ortak:{" "}
+            <b>{s.shared_ingredients.join(", ")}</b> — {s.estimated_time_saved} kazanç
           </span>
         ))}
       </div>
@@ -238,7 +233,7 @@ function OrderCard({ order, onAction }: CardProps) {
           </span>
           {order.should_be_started && (
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide bg-red-600 text-white animate-pulse">
-              START NOW
+              HEMEN BAŞLA
             </span>
           )}
         </div>
@@ -261,7 +256,7 @@ function OrderCard({ order, onAction }: CardProps) {
               : "bg-gray-100 text-gray-600"
           }`}
         >
-          {STATUS_LABEL[order.status] ?? order.status}
+          {orderStatusLabel(order.status)}
         </span>
         {order.urgency_reason && (
           <span className="text-xs text-gray-400 truncate">{order.urgency_reason}</span>
@@ -346,8 +341,8 @@ function EmptyKitchen() {
   return (
     <div className="flex flex-col items-center justify-center py-24 text-center">
       <div className="text-4xl mb-3">✓</div>
-      <p className="text-sm font-semibold text-gray-700">Kitchen is clear</p>
-      <p className="text-xs text-gray-400 mt-1">No active orders.</p>
+      <p className="text-sm font-semibold text-gray-700">Yeni sipariş yok</p>
+      <p className="text-xs text-gray-400 mt-1">Şu anda hazırlanacak sipariş bulunmuyor.</p>
     </div>
   );
 }
@@ -460,7 +455,7 @@ export default function KitchenPage() {
 
         {error && !loading && (
           <div className="p-4 text-sm text-red-600 bg-red-50 rounded-xl border border-red-100">
-            Kitchen data unavailable. Retrying…
+            Mutfak verileri yüklenemedi. Bağlantı yeniden kuruluyor…
           </div>
         )}
 
@@ -469,25 +464,25 @@ export default function KitchenPage() {
         {!loading && !error && orders.length > 0 && (
           <>
             <OrderSection
-              title="Urgent — SLA at risk"
+              title="Acil — süre riski var"
               orders={urgentOrders}
               accent="alert"
               onAction={handleAction}
             />
             <OrderSection
-              title="Ready for pickup"
+              title="Teslime hazır"
               orders={readyOrders}
               accent="neutral"
               onAction={handleAction}
             />
             <OrderSection
-              title="In preparation"
+              title="Hazırlanıyor"
               orders={inPrepOrders}
               accent="neutral"
               onAction={handleAction}
             />
             <OrderSection
-              title="Waiting to start"
+              title="Başlamayı bekliyor"
               orders={newOrders}
               accent="neutral"
               onAction={handleAction}

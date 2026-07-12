@@ -94,14 +94,16 @@ def _quality(
             status="no_data",
             sample_size=0,
             min_required=minimum,
-            message="No data for this date.",
+            message="Bu tarih için veri yok.",
         )
     if sample < minimum:
         return DataQuality(
             status="low_sample",
             sample_size=sample,
             min_required=minimum,
-            message=f"Only {sample} sample(s); {minimum} required for a reliable metric.",
+            message=(
+                f"Yalnızca {sample} kayıt var; güvenilir bir ölçüm için en az {minimum} kayıt gerekiyor."
+            ),
         )
     return DataQuality(status="valid", sample_size=sample, min_required=minimum)
 

@@ -104,28 +104,28 @@ export function KPICardGrid({ refreshTick }: Props) {
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <KPICard
         loading={loading}
-        label="Gross Revenue"
+        label="Ciro"
         value={kpis ? `${symbol}${kpis.kpis.gross_revenue.toLocaleString("tr-TR", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` : "—"}
         subtext="Teslim edilen siparişler"
         delta={revenueDelta}
       />
       <KPICard
         loading={loading}
-        label="Total Orders"
+        label="Toplam Sipariş"
         value={kpis ? String(kpis.kpis.total_orders) : "—"}
-        subtext={peakHour ? `Peak: ${peakHour}` : "Bugünkü tüm siparişler"}
+        subtext={peakHour ? `En yoğun saat: ${peakHour}` : "Bugünkü tüm siparişler"}
         delta={ordersDelta}
       />
       <KPICard
         loading={loading}
-        label="Active Orders"
+        label="Açık Sipariş"
         value={kpis ? String(kpis.kpis.active_orders_count) : "—"}
-        subtext="Currently in kitchen"
+        subtext="Şu anda mutfakta"
         delta={null}
       />
       <KPICard
         loading={loading}
-        label="Avg Order Value"
+        label="Ortalama Sepet"
         value={kpis ? `${symbol}${kpis.kpis.average_order_value.toFixed(2)}` : "—"}
         subtext="Sipariş başı ortalama"
         delta={aovDelta}

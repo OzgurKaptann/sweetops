@@ -61,10 +61,11 @@ function formatSeconds(s: number): string {
   return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
 }
 
+// Load level is an API enum (low/medium/high) — the label is presentation only.
 const LOAD_STYLE = {
-  low: { bg: "bg-emerald-50", text: "text-emerald-700", label: "Low Load" },
-  medium: { bg: "bg-amber-50", text: "text-amber-700", label: "Medium Load" },
-  high: { bg: "bg-red-50", text: "text-red-700", label: "High Load" },
+  low: { bg: "bg-emerald-50", text: "text-emerald-700", label: "Sakin" },
+  medium: { bg: "bg-amber-50", text: "text-amber-700", label: "Normal yoğunluk" },
+  high: { bg: "bg-red-50", text: "text-red-700", label: "Yoğun" },
 };
 
 interface Props {
@@ -128,7 +129,7 @@ export function OperationsPanel({ refreshTick }: Props) {
       {/* Header row */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-          Operations
+          Operasyon
         </h3>
         {load && (
           <span
@@ -142,22 +143,22 @@ export function OperationsPanel({ refreshTick }: Props) {
       {/* Stats grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-4">
         <StatCell
-          label="Active Orders"
+          label="Açık Sipariş"
           value={String(activeOrders)}
           accent={activeOrders > 6 ? "warn" : "neutral"}
         />
         <StatCell
-          label="In Prep"
+          label="Hazırlanıyor"
           value={String(inPrepCount)}
           accent="neutral"
         />
         <StatCell
-          label="Avg Prep Time"
+          label="Ort. Hazırlık Süresi"
           value={avgDisplay}
           accent="neutral"
         />
         <StatCell
-          label="P90 Prep Time"
+          label="P90 Hazırlık Süresi"
           value={p90Display}
           accent={
             p90Seconds !== null && p90Seconds > 600
@@ -168,18 +169,18 @@ export function OperationsPanel({ refreshTick }: Props) {
           }
         />
         <StatCell
-          label="SLA Breached"
+          label="Süre Aşımı"
           value={String(slaBreachCount)}
           accent={slaBreachCount > 0 ? "crit" : "ok"}
         />
         <StatCell
-          label="SLA Warning"
+          label="Süre Uyarısı"
           value={String(slaWarnCount)}
           accent={slaWarnCount > 0 ? "warn" : "ok"}
         />
         <StatCell
-          label="Avg Queue Age"
-          value={load ? `${load.average_age_minutes.toFixed(1)} min` : "—"}
+          label="Ort. Bekleme"
+          value={load ? `${load.average_age_minutes.toFixed(1)} dk` : "—"}
           accent={
             load && load.average_age_minutes > 8 ? "crit" :
             load && load.average_age_minutes > 5 ? "warn" : "ok"

@@ -28,16 +28,16 @@ type Metric = "revenue" | "orders" | "aov" | "ingredients";
 type TimeRange = "today" | "7d" | "30d";
 
 const METRICS: { key: Metric; label: string }[] = [
-  { key: "revenue", label: "Revenue" },
-  { key: "orders", label: "Orders" },
-  { key: "aov", label: "Avg Order Value" },
-  { key: "ingredients", label: "Ingredient Usage" },
+  { key: "revenue", label: "Ciro" },
+  { key: "orders", label: "Sipariş" },
+  { key: "aov", label: "Ortalama Sepet" },
+  { key: "ingredients", label: "Malzeme Kullanımı" },
 ];
 
 const RANGES: { key: TimeRange; label: string }[] = [
-  { key: "today", label: "Today" },
-  { key: "7d", label: "7 Days" },
-  { key: "30d", label: "30 Days" },
+  { key: "today", label: "Bugün" },
+  { key: "7d", label: "7 Gün" },
+  { key: "30d", label: "30 Gün" },
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ function IngredientUsageChart({ data }: { data: TopIngredientsData }) {
           />
           <Tooltip
             formatter={(value: any, _: any, entry: any) => [
-              `${value} uses (${entry.payload.share}%)`,
+              `${value} kez (%${entry.payload.share})`,
               "Kullanım",
             ]}
             contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 12 }}
@@ -211,7 +211,7 @@ export function MainAnalyticsChart({ refreshTick }: Props) {
         value: p[dataKey[metric as Exclude<Metric, "ingredients">] as keyof typeof p] as number,
       }));
 
-  const effectiveMetricLabel = isToday ? "Orders (hourly)" : METRICS.find((m) => m.key === metric)!.label;
+  const effectiveMetricLabel = isToday ? "Sipariş (saatlik)" : METRICS.find((m) => m.key === metric)!.label;
 
   // Average reference line
   const avg = chartData.length > 0
@@ -263,10 +263,10 @@ export function MainAnalyticsChart({ refreshTick }: Props) {
       <div className="flex items-baseline gap-2 mb-3">
         <span className="text-sm font-semibold text-gray-700">{effectiveMetricLabel}</span>
         {isToday && metric !== "orders" && (
-          <span className="text-xs text-gray-400 italic">— today view shows order count (hourly)</span>
+          <span className="text-xs text-gray-400 italic">— bugün görünümü saatlik sipariş sayısını gösterir</span>
         )}
         {showIngredientSnapshot && (
-          <span className="text-xs text-gray-400 italic">— point-in-time snapshot</span>
+          <span className="text-xs text-gray-400 italic">— anlık görünüm</span>
         )}
       </div>
 
@@ -319,7 +319,7 @@ export function MainAnalyticsChart({ refreshTick }: Props) {
                       strokeDasharray="4 4"
                       strokeOpacity={0.5}
                       label={{
-                        value: `Avg: ${cfg.formatter(avg)}`,
+                        value: `Ortalama: ${cfg.formatter(avg)}`,
                         position: "insideTopRight",
                         fontSize: 10,
                         fill: cfg.color,

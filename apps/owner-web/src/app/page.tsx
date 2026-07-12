@@ -53,7 +53,7 @@ function LiveDot({ connected }: { connected: boolean }) {
   return (
     <div className="flex items-center gap-1.5">
       <span className={`w-2 h-2 rounded-full ${connected ? "bg-emerald-500 animate-pulse" : "bg-gray-300"}`} />
-      <span className="text-xs text-gray-500">{connected ? "Live" : "Offline"}</span>
+      <span className="text-xs text-gray-500">{connected ? "Canlı" : "Bağlantı yok"}</span>
     </div>
   );
 }
@@ -107,16 +107,16 @@ export default function OwnerDashboard() {
             <div className="flex items-center gap-3">
               <span className="text-base font-bold text-gray-900 tracking-tight">SweetOps</span>
               <span className="text-gray-300 text-sm">|</span>
-              <span className="text-sm text-gray-500 font-medium">Owner Dashboard</span>
+              <span className="text-sm text-gray-500 font-medium">Yönetici Paneli</span>
             </div>
             <div className="flex items-center gap-4">
               <span className="text-xs text-gray-400 hidden sm:block">{now}</span>
               <a href="/kitchen" className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors font-medium">
-                Kitchen →
+                Mutfak →
               </a>
               <LiveDot connected={wsConnected} />
               <button onClick={refresh} className="text-xs px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors font-medium">
-                ↻ Refresh
+                ↻ Yenile
               </button>
             </div>
           </div>
@@ -138,7 +138,7 @@ export default function OwnerDashboard() {
 
         {/* ━━━ ZONE 1 · TODAY'S PERFORMANCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
         <section>
-          <SectionHeader title="Today's Performance" subtitle="Key metrics vs previous period" accent="neutral" />
+          <SectionHeader title="Bugünün Performansı" subtitle="Önemli göstergeler ve önceki döneme göre değişim" accent="neutral" />
           <KPICardGrid key={`kpi-${refreshTick}`} refreshTick={refreshTick} />
           <div className="mt-4">
             <OperationsPanel key={`ops-${refreshTick}`} refreshTick={refreshTick} />
@@ -150,7 +150,7 @@ export default function OwnerDashboard() {
 
         {/* ━━━ ZONE 2 · ALERTS & DECISIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
         <section>
-          <SectionHeader title="Alerts & Decisions" subtitle="Sorted by urgency · act on the primary focus first" accent="alert" />
+          <SectionHeader title="Uyarılar ve Kararlar" subtitle="Aciliyete göre sıralı · önce öncelikli uyarıyı ele alın" accent="alert" />
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2">
               <DecisionPanel
@@ -168,13 +168,13 @@ export default function OwnerDashboard() {
 
         {/* ━━━ ZONE 3 · MEASUREMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
         <section id="metrics-section">
-          <SectionHeader title="Measurement" subtitle="Is the system actually working? · day-over-day trends" accent="neutral" />
+          <SectionHeader title="Ölçüm" subtitle="Sistem gerçekten işe yarıyor mu? · güne göre değişim" accent="neutral" />
           <MetricsPanel key={`metrics-${refreshTick}`} refreshTick={refreshTick} />
         </section>
 
         {/* ━━━ ZONE 4 · ANALYTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
         <section>
-          <SectionHeader title="Analytics" subtitle="Demand patterns · forecast · ingredient breakdown" accent="analytics" />
+          <SectionHeader title="Analiz" subtitle="Talep örüntüsü · tahmin · malzeme dağılımı" accent="analytics" />
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <HourlyDemandChart key={`hourly-${refreshTick}`} refreshTick={refreshTick} />
             <IngredientForecastPanel key={`forecast-${refreshTick}`} refreshTick={refreshTick} />
