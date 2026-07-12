@@ -79,8 +79,9 @@ def test_x_actor_id_header_cannot_override_audit_actor(db, make_staff):
 
 def test_owner_decision_body_actor_cannot_override(db, make_staff, make_store):
     # Fresh store so the SLA decision starts clean (store 1 carries history).
+    # Its stock must be its own: the order below reserves from THIS store.
     store = make_store()
-    ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("100.00"), store_id=store.id)
     payload = {
         "store_id": store.id,
         "items": [{"product_id": 1, "quantity": 1,

@@ -3,13 +3,22 @@ from sqlalchemy.orm import Session
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock
 from app.models.product import Product
-from app.services.conversion_engine import enrich_menu
+from app.services.conversion_engine import enrich_menu, load_store_stocks
 from app.services.operational_context_service import compute_operational_context
 
 
-def get_menu(db: Session) -> dict:
+def get_menu(db: Session, store_id: int) -> dict:
     """
-    Return the enriched menu with conversion signals.
+    Return the enriched menu for ONE STORE, with conversion signals.
+
+    The catalog half of the menu — products, ingredients, prices, recipes — is
+    global: every branch sells the same waffle. The ``stock_status`` half is
+    physical, and therefore belongs to the branch the customer is sitting in.
+    ``store_id`` comes from the QR token they scanned, so a table in Kadıköy is
+    told what Kadıköy can actually make.
+
+    An ingredient this branch does not stock has no row and reads as
+    out_of_stock. There is no fallback to another branch's shelves.
 
     Operational context (from today's metrics) is applied to the ranking:
       - boost_combos mode: popular combo ingredients get a higher ranking_score
@@ -31,12 +40,9 @@ def get_menu(db: Session) -> dict:
         db.query(Ingredient).filter(Ingredient.is_active == True).all()
     )
 
-    stocks: dict[int, IngredientStock] = {
-        row.ingredient_id: row
-        for row in db.query(IngredientStock).filter(
-            IngredientStock.ingredient_id.in_([i.id for i in active_ingredients])
-        ).all()
-    }
+    stocks: dict[int, IngredientStock] = load_store_stocks(
+        db, store_id, [i.id for i in active_ingredients]
+    )
 
     # Enriched + ranked ingredient dicts with operational-context-aware ranking
     enriched = enrich_menu(db, active_ingredients, stocks, combo_boost=ctx.combo_boost)
@@ -57,6 +63,9 @@ def get_menu(db: Session) -> dict:
     ]
 
     return {
+        # Echoed so a client can never be confused about whose shelves the
+        # stock_status figures describe.
+        "store_id":    store_id,
         "products":    products,
         "ingredients": enriched,
         "categories":  categorized,

@@ -1,25 +1,35 @@
 """
-Inventory API — protected stock reads and manual stock mutations.
+Inventory API — protected, store-scoped stock reads and manual stock mutations.
 
 Every route requires an authenticated staff session. Reads need
 ``inventory:read``; every mutation needs ``inventory:adjust`` plus a trusted
 Origin, a valid CSRF token (both enforced by ``require_permission`` on
 state-changing methods) and an ``Idempotency-Key`` header.
 
-Nothing here is public. Customers never see inventory internals: the customer
-menu only exposes a coarse in_stock/low_stock/out_of_stock status, and order
-rejection returns a Turkish message with no stock figures.
+Store scope
+-----------
+The store is ALWAYS ``staff.store_id``, taken from the authenticated session.
+It is never read from the request body, the query string, or a header — so a
+Store A manager cannot list, and cannot write off, Store B's stock by naming
+Store B in a payload. There is deliberately no "all stores" view and no
+store_id parameter to tamper with: the absence of the parameter is the security
+property.
 
-Inventory is GLOBAL in this schema (no store_id), so every route fails closed
-with a Turkish 409 when more than one operational store exists — a Store-B
-manager must never be shown, let alone allowed to write off, Store-A's stock.
-See docs/INVENTORY_LIFECYCLE.md.
+Because stock is genuinely store-scoped now, these routes no longer fail closed
+when a second branch opens. A member of staff with no store assignment is
+refused, however — there is no meaningful chain-wide inventory to show them.
+
+Nothing here is public. Customers never see inventory internals: the customer
+menu only exposes a coarse in_stock/low_stock/out_of_stock status for their own
+branch, and order rejection returns a Turkish message with no stock figures.
+See docs/STORE_SCOPED_INVENTORY.md.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 
+from app.core import messages
 from app.core.db import get_db
 from app.core.deps import require_permission
 from app.core.permissions import PERM_INVENTORY_ADJUST, PERM_INVENTORY_READ
@@ -39,9 +49,27 @@ from app.schemas.inventory import (
 )
 from app.services import inventory_service
 from app.services.auth_service import CurrentStaff
-from app.services.inventory_guard import assert_single_operational_store
 
 router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+def _store_id(staff: CurrentStaff) -> int:
+    """
+    The ONE source of store scope for every route in this module.
+
+    Inventory is physical, and physical stock sits in a named branch. A session
+    with no store cannot be answered — not with an empty list, and certainly not
+    with somebody else's stock — so it is refused outright.
+    """
+    if staff.store_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "no_store_assigned",
+                "message": messages.INVENTORY_NO_STORE_ASSIGNED,
+            },
+        )
+    return staff.store_id
 
 
 def _no_store(response: Response) -> None:
@@ -61,11 +89,15 @@ def _receipt(
 ) -> MovementReceipt:
     stock = (
         db.query(IngredientStock)
-        .filter(IngredientStock.ingredient_id == movement.ingredient_id)
+        .filter(
+            IngredientStock.store_id == movement.store_id,
+            IngredientStock.ingredient_id == movement.ingredient_id,
+        )
         .first()
     )
     return MovementReceipt(
         movement_id=movement.id,
+        store_id=movement.store_id,
         ingredient_id=movement.ingredient_id,
         movement_type=movement.movement_type,
         quantity=movement.quantity,
@@ -88,13 +120,24 @@ def list_stock(
     db: Session = Depends(get_db),
     staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
 ):
-    """On-hand, reserved and available quantities for every active ingredient."""
+    """
+    On-hand, reserved and available quantities for every active ingredient IN
+    THE CALLER'S STORE.
+
+    An ingredient this branch does not stock simply does not appear — the join
+    is on (store_id, ingredient_id), so there is no row and no fallback to any
+    other branch's figures.
+    """
     _no_store(response)
-    assert_single_operational_store(db)
+    store_id = _store_id(staff)
 
     rows = (
         db.query(Ingredient, IngredientStock)
-        .join(IngredientStock, IngredientStock.ingredient_id == Ingredient.id)
+        .join(
+            IngredientStock,
+            (IngredientStock.ingredient_id == Ingredient.id)
+            & (IngredientStock.store_id == store_id),
+        )
         .filter(Ingredient.is_active == True)  # noqa: E712
         .order_by(Ingredient.name)
         .all()
@@ -124,13 +167,13 @@ def list_movements(
     db: Session = Depends(get_db),
     staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
 ):
-    """The append-only movement ledger, newest first."""
+    """The append-only movement ledger for the caller's store, newest first."""
     _no_store(response)
-    assert_single_operational_store(db)
+    store_id = _store_id(staff)
 
     q = db.query(IngredientStockMovement, Ingredient).join(
         Ingredient, Ingredient.id == IngredientStockMovement.ingredient_id
-    )
+    ).filter(IngredientStockMovement.store_id == store_id)
     if ingredient_id is not None:
         q = q.filter(IngredientStockMovement.ingredient_id == ingredient_id)
     if movement_type is not None:
@@ -170,12 +213,16 @@ def create_purchase_receipt(
     db: Session = Depends(get_db),
     staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_ADJUST)),
 ):
-    """Record goods received from a supplier — physical stock goes up."""
+    """
+    Record goods received from a supplier — the caller's store's physical stock
+    goes up. This is also how a newly opened branch gets its opening stock: no
+    store ever inherits another store's inventory.
+    """
     _no_store(response)
-    assert_single_operational_store(db)
 
     result = inventory_service.record_purchase_receipt(
         db,
+        store_id=_store_id(staff),
         ingredient_id=body.ingredient_id,
         quantity=body.quantity,
         reason=body.reason,
@@ -194,12 +241,13 @@ def create_manual_adjustment(
     db: Session = Depends(get_db),
     staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_ADJUST)),
 ):
-    """Correct on-hand stock to a real physical count (signed delta + reason)."""
+    """Correct the caller's store's on-hand stock to a real physical count
+    (signed delta + reason). A count is taken of one branch's shelves."""
     _no_store(response)
-    assert_single_operational_store(db)
 
     result = inventory_service.record_manual_adjustment(
         db,
+        store_id=_store_id(staff),
         ingredient_id=body.ingredient_id,
         delta=body.delta,
         reason=body.reason,
@@ -218,12 +266,13 @@ def create_waste(
     db: Session = Depends(get_db),
     staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_ADJUST)),
 ):
-    """Record stock physically thrown away. Stays visible as WASTE, never consumption."""
+    """Record stock physically thrown away at the caller's store. Stays visible
+    as WASTE, never consumption, and is attributed to the branch that lost it."""
     _no_store(response)
-    assert_single_operational_store(db)
 
     result = inventory_service.record_waste(
         db,
+        store_id=_store_id(staff),
         ingredient_id=body.ingredient_id,
         quantity=body.quantity,
         reason=body.reason,

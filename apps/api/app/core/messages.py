@@ -52,11 +52,30 @@ AUTH_ORIGIN_REJECTED = "İstek kaynağı doğrulanamadı."
 # Login field validation.
 AUTH_MISSING_FIELDS = "Kullanıcı adı ve şifre gerekli."
 
-# Fail-closed guard: global inventory cannot be safely shown when more than one
-# operational store exists (inventory is not yet store-scoped).
+# Fail-closed guard. Physical stock is store-scoped since the store-scoped
+# inventory refactor, so this NO LONGER fires for staff inventory, owner
+# analytics or the kitchen. It survives for the one genuinely storeless surface
+# that is left: the UNGATED public menu reads (no QR token ⇒ no store context).
+# Those cannot pick a branch's stock to report without guessing, so when more
+# than one operational store exists they refuse rather than guess.
+# See docs/STORE_SCOPED_INVENTORY.md § "Remaining limitation".
 INVENTORY_MULTISTORE_BLOCKED = (
     "Stok verisi şu anda birden fazla mağaza için güvenli şekilde gösterilemiyor. "
     "Lütfen işletme yöneticisiyle iletişime geç."
+)
+
+# A member of staff whose account is not attached to any store tried to reach a
+# store-scoped inventory route. There is no "all stores" inventory view.
+INVENTORY_NO_STORE_ASSIGNED = (
+    "Hesabın bir mağazaya bağlı değil. Stok işlemleri için mağaza ataması gerekli."
+)
+
+# This store has never stocked this ingredient. Deliberately distinct from
+# "ingredient not found": the ingredient exists in the shared catalog, but this
+# branch has no physical stock row for it. Another store's stock is NOT used as
+# a fallback — the branch must receive or count stock in explicitly.
+INVENTORY_STOCK_NOT_CONFIGURED = (
+    "Bu malzeme için mağazanda stok tanımlı değil. Önce mal kabul veya sayım girişi yap."
 )
 
 

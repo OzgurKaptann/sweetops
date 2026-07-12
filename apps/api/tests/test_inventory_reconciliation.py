@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
 from tests.conftest import (
+    DEFAULT_STORE_ID,
     _inventory_maintenance,
     cleanup_ingredient,
     make_ingredient,
@@ -61,6 +62,7 @@ class TestCleanLedgerReconciles:
             # history, so it legitimately shows a drift of its whole balance.
             # Give it the opening receipt the real world would have.
             db.add(IngredientStockMovement(
+                store_id=DEFAULT_STORE_ID,
                 ingredient_id=ing.id,
                 movement_type="PURCHASE_RECEIPT",
                 quantity=Decimal("100.000"),
@@ -72,7 +74,7 @@ class TestCleanLedgerReconciles:
             ))
             db.commit()
 
-            row = _row_for(reconciler.reconcile(ing.id), ing.id)
+            row = _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)
             assert row["mismatch"] is False, row
             assert Decimal(row["stored_on_hand_quantity"]) == Decimal("100.000")
             assert Decimal(row["computed_on_hand_from_ledger"]) == Decimal("100.000")
@@ -89,6 +91,7 @@ class TestCleanLedgerReconciles:
         )
         try:
             db.add(IngredientStockMovement(
+                store_id=DEFAULT_STORE_ID,
                 ingredient_id=ing.id,
                 movement_type="PURCHASE_RECEIPT",
                 quantity=Decimal("100.000"),
@@ -106,13 +109,13 @@ class TestCleanLedgerReconciles:
             ).json()["order_id"]
 
             # While merely reserved, the books still reconcile.
-            assert _row_for(reconciler.reconcile(ing.id), ing.id)["mismatch"] is False
+            assert _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)["mismatch"] is False
 
             kitchen_client.patch(
                 f"/kitchen/orders/{oid}/status", json={"status": "IN_PREP"}
             )
 
-            row = _row_for(reconciler.reconcile(ing.id), ing.id)
+            row = _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)
             assert row["mismatch"] is False, row
             assert Decimal(row["stored_on_hand_quantity"]) == Decimal("90.000")
             assert Decimal(row["computed_on_hand_from_ledger"]) == Decimal("90.000")
@@ -133,6 +136,7 @@ class TestDriftDetection:
         ing, _ = make_ingredient(db, on_hand=Decimal("100.000"))
         try:
             db.add(IngredientStockMovement(
+                store_id=DEFAULT_STORE_ID,
                 ingredient_id=ing.id,
                 movement_type="PURCHASE_RECEIPT",
                 quantity=Decimal("100.000"),
@@ -141,7 +145,7 @@ class TestDriftDetection:
                 unit="g", reason="acilis", legacy_backfill=True,
             ))
             db.commit()
-            assert _row_for(reconciler.reconcile(ing.id), ing.id)["mismatch"] is False
+            assert _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)["mismatch"] is False
 
             # Behind the service's back: bump on-hand with no movement.
             db.execute(
@@ -151,7 +155,7 @@ class TestDriftDetection:
             )
             db.commit()
 
-            row = _row_for(reconciler.reconcile(ing.id), ing.id)
+            row = _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)
             assert row["mismatch"] is True
             assert row["on_hand_mismatch"] is True
             assert Decimal(row["stored_on_hand_quantity"]) == Decimal("137.000")
@@ -167,6 +171,7 @@ class TestDriftDetection:
         )
         try:
             db.add(IngredientStockMovement(
+                store_id=DEFAULT_STORE_ID,
                 ingredient_id=ing.id,
                 movement_type="PURCHASE_RECEIPT",
                 quantity=Decimal("100.000"),
@@ -178,7 +183,7 @@ class TestDriftDetection:
 
             payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
             client.post("/public/orders/", json=payload, headers=headers)
-            assert _row_for(reconciler.reconcile(ing.id), ing.id)["mismatch"] is False
+            assert _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)["mismatch"] is False
 
             # Corrupt only the reserved summary; the order line still says 10.
             db.execute(
@@ -188,7 +193,7 @@ class TestDriftDetection:
             )
             db.commit()
 
-            row = _row_for(reconciler.reconcile(ing.id), ing.id)
+            row = _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)
             assert row["mismatch"] is True
             assert row["reserved_mismatch"] is True
             assert Decimal(row["stored_reserved_quantity"]) == Decimal("3.000")
@@ -201,6 +206,7 @@ class TestDriftDetection:
         ing, _ = make_ingredient(db, on_hand=Decimal("100.000"))
         try:
             db.add(IngredientStockMovement(
+                store_id=DEFAULT_STORE_ID,
                 ingredient_id=ing.id,
                 movement_type="PURCHASE_RECEIPT",
                 quantity=Decimal("100.000"),
@@ -209,7 +215,7 @@ class TestDriftDetection:
                 unit="g", reason="acilis", legacy_backfill=True,
             ))
             db.commit()
-            assert _row_for(reconciler.reconcile(ing.id), ing.id)["mismatch"] is False
+            assert _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)["mismatch"] is False
 
             # Deleting requires the ownership-gated escape hatch, because the
             # ledger refuses DELETE — which is itself the point.
@@ -219,7 +225,7 @@ class TestDriftDetection:
                 ).delete(synchronize_session=False)
             db.commit()
 
-            row = _row_for(reconciler.reconcile(ing.id), ing.id)
+            row = _row_for(reconciler.reconcile(ingredient_id=ing.id), ing.id)
             assert row["mismatch"] is True
             assert Decimal(row["computed_on_hand_from_ledger"]) == Decimal("0")
             assert Decimal(row["on_hand_mismatch_amount"]) == Decimal("100.000")
@@ -239,6 +245,7 @@ class TestReconcilerCli:
         ing, _ = make_ingredient(db, on_hand=Decimal("100.000"))
         try:
             db.add(IngredientStockMovement(
+                store_id=DEFAULT_STORE_ID,
                 ingredient_id=ing.id,
                 movement_type="PURCHASE_RECEIPT",
                 quantity=Decimal("100.000"),
@@ -287,7 +294,7 @@ class TestReconcilerCli:
                 ingredient_id=ing.id
             ).count()
 
-            rows = reconciler.reconcile(ing.id)
+            rows = reconciler.reconcile(ingredient_id=ing.id)
             assert _row_for(rows, ing.id)["mismatch"] is True
 
             db.expire_all()

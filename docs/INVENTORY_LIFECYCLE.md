@@ -385,9 +385,15 @@ It cross-checks the three independent records of what stock should be:
    ORDER LINES    SUM(reserved − consumed − released) over order_inventory_lines
 ```
 
-Reports per ingredient: stored on-hand, computed on-hand from the ledger, stored
-reserved, computed reserved from the order lines, and the mismatch amount.
-Supports `--json`, `--ingredient N`, `--all`. Exits **non-zero** on any mismatch.
+Reports per **(store, ingredient)**: stored on-hand, computed on-hand from the
+ledger, stored reserved, computed reserved from the order lines, and the mismatch
+amount. Supports `--json`, `--store-id N`, `--ingredient N`, `--all`. Exits
+**non-zero** if *any* store mismatches.
+
+The store is part of the grain for a reason: if Kadıköy is 40 g short and
+Beşiktaş is 40 g over, a chain-wide total is zero and the report says "OK" while
+both branches are broken. Totals are never summed across stores. See
+[STORE_SCOPED_INVENTORY.md](STORE_SCOPED_INVENTORY.md) § Reconciliation.
 
 It **never writes**. A reconciler that "repairs" drift by overwriting the summary
 destroys the evidence needed to find the bug that caused it.
@@ -507,31 +513,33 @@ survived. Alembic remains single-head.
 
 ---
 
-## 20. Single-store inventory limitation — read this
+## 20. Single-store inventory limitation — RESOLVED
 
-**Inventory is GLOBAL. It is not store-scoped, and this branch does not claim
-otherwise.**
+> **Superseded.** This section described the central limitation of the lifecycle
+> branch: `ingredient_stock` and `ingredient_stock_movements` had **no
+> `store_id`**, so the schema physically could not tell one shop's pistachio from
+> another's, and every inventory endpoint had to **fail closed** with a Turkish
+> `409` once a second operational store existed.
+>
+> That limitation is **gone**. Physical stock is now store-scoped — see
+> **[docs/STORE_SCOPED_INVENTORY.md](STORE_SCOPED_INVENTORY.md)**.
+>
+> What changed, in one line: the stock grain moved from `UNIQUE(ingredient_id)`
+> to `UNIQUE(store_id, ingredient_id)`, and movements and order inventory lines
+> carry a `store_id` that composite foreign keys force to agree with the store of
+> the stock row, the order, the line and the actor they reference. Multi-store
+> operation is no longer an error condition, and the fail-closed guard has been
+> narrowed to the only genuinely storeless surface left (the *ungated* public
+> menu reads, which carry no QR token and therefore no store context).
 
-`ingredients`, `ingredient_stock` and `ingredient_stock_movements` have **no
-`store_id`**. The schema physically cannot tell one shop's pistachio from
-another's. This branch deliberately did **not** add store scoping — that is a
-schema change with its own migration, backfill and isolation-testing burden, and
-mixing it into a lifecycle refactor would make both harder to review.
+## 21. Store-scoped inventory — where it lives now
 
-The existing **fail-closed** guard is preserved and extended to every new
-endpoint: when more than one operational store exists,
-`assert_single_operational_store()` returns a Turkish `409` rather than showing —
-or worse, letting a manager *write off* — another store's stock.
-
-So: correct under the current single-operational-store assumption; safely refused
-otherwise. Nothing here provides multi-store inventory isolation.
-
-## 21. Future: store-scoped inventory
-
-Deferred to `refactor/store-scoped-inventory`: add `store_id` to the ingredient,
-stock and movement tables, backfill to the single operational store, scope every
-query and lock by store, remove the fail-closed guard, and add cross-store
-isolation tests.
+Delivered in `refactor/store-scoped-inventory`. Everything in this document
+about *lifecycle* (reservation ≠ consumption, exactly-once settlement, the
+append-only ledger, cancellation rules, manual-operation idempotency) still
+holds exactly as written — store scoping added a dimension, it did not change the
+lifecycle. Read this document for **what happens to stock**, and
+[STORE_SCOPED_INVENTORY.md](STORE_SCOPED_INVENTORY.md) for **whose stock it is**.
 
 ## 22. Deferred inventory UI
 

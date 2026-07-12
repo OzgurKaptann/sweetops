@@ -5,6 +5,7 @@ from sqlalchemy import (
     ForeignKey,
     DateTime,
     Boolean,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -33,6 +34,14 @@ class User(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        # FK target for ingredient_stock_movements (store_id, actor_user_id):
+        # a member of staff can only be recorded as moving stock in the store
+        # they actually belong to. Redundant against the primary key, but
+        # PostgreSQL requires a unique constraint on exactly the referenced pair.
+        UniqueConstraint("store_id", "id", name="uq_users_store_id"),
     )
 
     role = relationship("Role", back_populates="users")

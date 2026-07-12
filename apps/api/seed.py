@@ -75,7 +75,11 @@ def seed_db():
         db.add(ing)
     db.commit()
 
-    # --- Initial stock for all ingredients ---
+    # --- Initial stock, explicitly for THIS store ---
+    # Ingredients are catalog (global); stock is physical and belongs to a named
+    # branch. Every store must be given its own opening stock explicitly — a new
+    # branch never inherits another branch's shelves. This seed creates one
+    # store, so it stocks that one store.
     all_ingredients = db.query(Ingredient).all()
     for ing in all_ingredients:
         # Generous initial stock for demo
@@ -87,6 +91,7 @@ def seed_db():
             initial_qty = Decimal('100.00')
 
         stock = IngredientStock(
+            store_id=store.id,
             ingredient_id=ing.id,
             on_hand_quantity=initial_qty,
             reserved_quantity=Decimal('0'),
@@ -96,7 +101,10 @@ def seed_db():
         db.add(stock)
     db.commit()
 
-    print(f"Database seeded: 1 store, 6 tables, 1 product, {len(ingredients_data)} ingredients with stock.")
+    print(
+        f"Database seeded: 1 store, 6 tables, 1 product, "
+        f"{len(ingredients_data)} ingredients with stock for store {store.id}."
+    )
     db.close()
 
 if __name__ == "__main__":

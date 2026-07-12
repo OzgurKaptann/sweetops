@@ -3,6 +3,13 @@ Inventory API schemas.
 
 Quantities are Decimal end-to-end (never float), and every mutating request
 carries the reason/quantity the ledger constraints demand.
+
+No request model here has a ``store_id`` field, and that is deliberate. The
+store is derived from the authenticated session (see routers/inventory.py), so
+there is nothing for a client to set. Pydantic ignores unknown keys, so a body
+that smuggles in ``"store_id": 2`` is simply not read — the movement still lands
+in the caller's own store. Responses DO carry ``store_id``, so a client can
+always see which branch a figure belongs to.
 """
 from __future__ import annotations
 
@@ -83,8 +90,13 @@ class WasteRequest(BaseModel):
 
 
 class MovementReceipt(BaseModel):
-    """Result of a manual stock command, including the resulting stock state."""
+    """Result of a manual stock command, including the resulting stock state.
+
+    ``store_id`` echoes the store the movement was actually booked against —
+    always the session's store, never anything the request asked for.
+    """
     movement_id: int
+    store_id: int
     ingredient_id: int
     movement_type: str
     quantity: Decimal

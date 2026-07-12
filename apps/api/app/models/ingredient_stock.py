@@ -1,24 +1,50 @@
 """
-Inventory summary + append-only movement ledger.
+Store-scoped inventory summary + append-only movement ledger.
 
-Stock is GLOBAL in this schema (no store_id) — see app/services/inventory_guard.py
-and docs/INVENTORY_LIFECYCLE.md. Store-scoped inventory is deferred to
-refactor/store-scoped-inventory.
+Catalog versus physical stock
+-----------------------------
+``ingredients`` is CATALOG: the definition of a thing the chain sells (name,
+unit, recipe standard quantity, price). It is deliberately global — every branch
+sells the same Nutella, and duplicating the recipe per store would make a menu
+change a per-branch migration.
+
+Everything in THIS module is PHYSICAL: jars actually sitting on a shelf in one
+named branch. Physical stock cannot be global, because a jar in Kadıköy is not a
+jar in Beşiktaş. Every row here therefore carries ``store_id``, and the database
+— not the application — is what refuses to mix two stores (see the composite
+foreign keys below).
 
 Quantity model
 --------------
     available_quantity = on_hand_quantity - reserved_quantity
 
-  on_hand_quantity  physical stock in the shop, right now. Only a real physical
+  on_hand_quantity  physical stock in THIS store, right now. Only a real physical
                     event moves it: consumption in the kitchen, waste, a return,
                     a purchase receipt, or a manual count adjustment.
-  reserved_quantity claimed by accepted-but-not-yet-cooked orders. It is a
-                    promise, not a physical fact — it never touches on-hand.
+  reserved_quantity claimed by accepted-but-not-yet-cooked orders OF THIS STORE.
+                    It is a promise, not a physical fact — it never touches
+                    on-hand.
   available_quantity generated (STORED) by PostgreSQL, so the identity above can
                     never drift from the two columns it is derived from.
 
 Placing an order reserves; it does not consume. The waffle batter is only gone
 once the kitchen actually starts cooking.
+
+Cross-store integrity
+---------------------
+Scoping is not "the application remembers to add WHERE store_id = ?". A single
+forgotten filter would let Store A's order eat Store B's chocolate, and no test
+would necessarily catch it. So the invariants are composite foreign keys, which
+a query cannot forget:
+
+    movement (store_id, ingredient_id)          → ingredient_stock
+    movement (store_id, order_id)               → orders
+    movement (store_id, order_inventory_line_id)→ order_inventory_lines
+    movement (store_id, actor_user_id)          → users
+    line     (store_id, order_id)               → orders
+    line     (store_id, ingredient_id)          → ingredient_stock
+
+Each one makes a cross-store row unrepresentable rather than merely unwritten.
 """
 from sqlalchemy import (
     CheckConstraint,
@@ -26,12 +52,14 @@ from sqlalchemy import (
     Computed,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     BigInteger,
     Boolean,
     Numeric,
     String,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import relationship
@@ -79,12 +107,20 @@ _REASON_TYPE_SQL = ",".join(f"'{t}'" for t in REASON_REQUIRED_TYPES)
 
 
 class IngredientStock(Base):
-    """One summary row per ingredient — a fast-query mirror of the ledger."""
+    """
+    One summary row per (store, ingredient) — a fast-query mirror of that
+    store's slice of the ledger.
+
+    The grain is the whole point of this model. Before store scoping the grain
+    was one row per ingredient for the entire chain, which silently asserted
+    that all branches share one jar of Nutella.
+    """
 
     __tablename__ = "ingredient_stock"
 
     id = Column(Integer, primary_key=True, index=True)
-    ingredient_id = Column(Integer, ForeignKey("ingredients.id"), unique=True, nullable=False)
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False, index=True)
+    ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False, index=True)
 
     # Renamed from the pre-lifecycle `stock_quantity`, which conflated on-hand
     # with available because orders deducted physical stock at creation time.
@@ -103,9 +139,15 @@ class IngredientStock(Base):
     last_restocked = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    ingredient = relationship("Ingredient")
+    ingredient = relationship("Ingredient", foreign_keys=[ingredient_id])
+    store = relationship("Store", foreign_keys=[store_id])
 
     __table_args__ = (
+        # The grain. Two rows for the same ingredient in one store would let two
+        # concurrent orders lock different rows and each believe it had the last
+        # 200 g of pistachio. It is also the target the composite foreign keys
+        # below point at, so it is what makes cross-store rows unrepresentable.
+        UniqueConstraint("store_id", "ingredient_id", name="uq_stock_store_ingredient"),
         CheckConstraint("on_hand_quantity >= 0", name="ck_stock_on_hand_nonneg"),
         CheckConstraint("reserved_quantity >= 0", name="ck_stock_reserved_nonneg"),
         # Backorders are NOT allowed: a shop cannot promise batter it does not
@@ -134,11 +176,16 @@ class OrderInventoryLine(Base):
 
     ``waste_quantity`` / ``returned_quantity`` record physical events booked
     against this order after consumption. They do not unwind the reservation.
+
+    ``store_id`` is the order's store, and the database enforces that: a line
+    cannot claim a store its order does not belong to, and it cannot point at a
+    stock row in a different store.
     """
 
     __tablename__ = "order_inventory_lines"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
     order_item_id = Column(Integer, ForeignKey("order_items.id"), nullable=False, index=True)
     ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False, index=True)
@@ -154,11 +201,30 @@ class OrderInventoryLine(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    order = relationship("Order")
+    # foreign_keys is required, not decorative: there are now TWO foreign keys
+    # from this table to orders — the plain order_id, and the composite
+    # (store_id, order_id) that enforces the store match — so the ORM cannot
+    # infer which one to join on.
+    order = relationship("Order", foreign_keys=[order_id])
     order_item = relationship("OrderItem")
-    ingredient = relationship("Ingredient")
+    ingredient = relationship("Ingredient", foreign_keys=[ingredient_id])
+    store = relationship("Store", foreign_keys=[store_id])
 
     __table_args__ = (
+        # A line's store must BE its order's store — not merely equal it at the
+        # moment the application wrote the row.
+        ForeignKeyConstraint(
+            ["store_id", "order_id"],
+            ["orders.store_id", "orders.id"],
+            name="fk_oil_order_store",
+        ),
+        # ...and it must allocate against a stock row that exists in that same
+        # store. A store cannot reserve an ingredient it does not stock.
+        ForeignKeyConstraint(
+            ["store_id", "ingredient_id"],
+            ["ingredient_stock.store_id", "ingredient_stock.ingredient_id"],
+            name="fk_oil_stock_store",
+        ),
         CheckConstraint("reserved_quantity >= 0", name="ck_oil_reserved_nonneg"),
         CheckConstraint("consumed_quantity >= 0", name="ck_oil_consumed_nonneg"),
         CheckConstraint("released_quantity >= 0", name="ck_oil_released_nonneg"),
@@ -170,6 +236,10 @@ class OrderInventoryLine(Base):
             name="ck_oil_settled_le_reserved",
         ),
         Index("uq_oil_item_ingredient", "order_item_id", "ingredient_id", unique=True),
+        # Target for the movement ledger's (store_id, order_inventory_line_id)
+        # composite FK: a movement cannot cite a line from another store.
+        UniqueConstraint("id", "store_id", name="uq_oil_id_store"),
+        Index("ix_oil_store_order_ingredient", "store_id", "order_id", "ingredient_id"),
     )
 
 
@@ -194,11 +264,17 @@ class IngredientStockMovement(Base):
 
     UPDATE and DELETE are refused by a database trigger. A correction is a new
     compensating row, never an edit.
+
+    Every row belongs to exactly one store, and every one of its references —
+    the stock row it moves, the order it serves, the line it settles, the member
+    of staff who caused it — must belong to that same store. Those are composite
+    foreign keys, so a cross-store ledger row cannot be written at all.
     """
 
     __tablename__ = "ingredient_stock_movements"
 
     id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), nullable=False, index=True)
     ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False, index=True)
 
     movement_type = Column(String(30), nullable=False, index=True)
@@ -234,10 +310,42 @@ class IngredientStockMovement(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    ingredient = relationship("Ingredient")
-    actor = relationship("User")
+    # Explicit foreign_keys throughout: the composite cross-store keys below add
+    # a second FK path to users (and to orders), so the ORM can no longer infer
+    # which columns a relationship joins on.
+    ingredient = relationship("Ingredient", foreign_keys=[ingredient_id])
+    actor = relationship("User", foreign_keys=[actor_user_id])
+    store = relationship("Store", foreign_keys=[store_id])
 
     __table_args__ = (
+        # ── Cross-store integrity, enforced by the database ──────────────────
+        # Each of these is MATCH SIMPLE: when the nullable half is NULL (a
+        # manual movement has no order; an order movement has no actor) the
+        # constraint simply does not apply. When it is present, the referenced
+        # row MUST be in this movement's store.
+        ForeignKeyConstraint(
+            ["store_id", "ingredient_id"],
+            ["ingredient_stock.store_id", "ingredient_stock.ingredient_id"],
+            name="fk_movement_stock_store",
+        ),
+        ForeignKeyConstraint(
+            ["store_id", "order_id"],
+            ["orders.store_id", "orders.id"],
+            name="fk_movement_order_store",
+        ),
+        ForeignKeyConstraint(
+            ["store_id", "order_inventory_line_id"],
+            ["order_inventory_lines.store_id", "order_inventory_lines.id"],
+            name="fk_movement_line_store",
+        ),
+        # Staff may only move stock in their own store. Because users.store_id
+        # is nullable, a user with no store assignment can never be the actor of
+        # a movement — which is the correct answer, not an accident.
+        ForeignKeyConstraint(
+            ["store_id", "actor_user_id"],
+            ["users.store_id", "users.id"],
+            name="fk_movement_actor_store",
+        ),
         CheckConstraint("quantity > 0", name="ck_movement_quantity_positive"),
         CheckConstraint(
             f"movement_type IN ({_MOVEMENT_TYPE_SQL})",
@@ -277,14 +385,22 @@ class IngredientStockMovement(Base):
             """,
             name="ck_movement_delta_matches_type",
         ),
-        # Partial: only rows that actually carry a key participate in the
-        # uniqueness guarantee, so the many order-driven movements (which have
-        # no key of their own) do not collide on NULL.
+        # Idempotency is scoped to the store. Two branches are two independent
+        # operations run by two independent managers; that they both happened to
+        # send "Idempotency-Key: 1" is a coincidence, not a replay, and must not
+        # make Beşiktaş's purchase receipt silently return Kadıköy's result.
+        #
+        # Partial: only rows that actually carry a key participate, so the many
+        # order-driven movements (which have no key of their own) never collide
+        # on NULL.
         Index(
-            "uq_movement_idem",
+            "uq_movement_store_idem",
+            "store_id",
             "idempotency_key_hash",
             unique=True,
             postgresql_where=text("idempotency_key_hash IS NOT NULL"),
         ),
         Index("ix_movement_type_created", "movement_type", "created_at"),
+        Index("ix_movement_store_ingredient_created",
+              "store_id", "ingredient_id", "created_at"),
     )

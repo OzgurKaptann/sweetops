@@ -20,6 +20,7 @@ import pytest
 from app.models.ingredient_stock import IngredientStock, IngredientStockMovement
 from app.services.decision_engine import _slow_moving_signals, _stock_risk_signals
 from tests.conftest import (
+    DEFAULT_STORE_ID,
     cleanup_ingredient,
     make_authed_client,
     make_ingredient,
@@ -66,7 +67,7 @@ class TestStockRiskUsesAvailable:
         )
         try:
             # Before any order there is no risk at all.
-            assert _signal_for(_stock_risk_signals(db), ing.id) is None
+            assert _signal_for(_stock_risk_signals(db, DEFAULT_STORE_ID), ing.id) is None
 
             payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
             r = client.post("/public/orders/", json=payload, headers=headers)
@@ -76,7 +77,7 @@ class TestStockRiskUsesAvailable:
             assert s.on_hand_quantity == Decimal("100.000"), "still physically there"
             assert s.available_quantity == Decimal("0")
 
-            signal = _signal_for(_stock_risk_signals(db), ing.id)
+            signal = _signal_for(_stock_risk_signals(db, DEFAULT_STORE_ID), ing.id)
             assert signal is not None, (
                 "Stock that is entirely reserved must raise a stockout risk — "
                 "judging on on-hand alone would hide it"
@@ -112,7 +113,7 @@ class TestConsumptionAnalyticsUseConsumptionMovements:
                 ingredient_id=ing.id, movement_type="CONSUMPTION"
             ).count() == 0
 
-            signal = _signal_for(_stock_risk_signals(db), ing.id)
+            signal = _signal_for(_stock_risk_signals(db, DEFAULT_STORE_ID), ing.id)
             if signal is not None:
                 assert signal["data"]["velocity_per_hour"] == 0.0, (
                     "A reservation is not consumption — it must not create burn rate"
@@ -142,7 +143,7 @@ class TestConsumptionAnalyticsUseConsumptionMovements:
             payload, headers = order_payload(ing.id, idem_key=uuid.uuid4().hex)
             client.post("/public/orders/", json=payload, headers=headers)
 
-            signal = _signal_for(_slow_moving_signals(db), ing.id)
+            signal = _signal_for(_slow_moving_signals(db, DEFAULT_STORE_ID), ing.id)
             assert signal is not None, (
                 "A reservation that was never cooked does not make stock 'moving'"
             )

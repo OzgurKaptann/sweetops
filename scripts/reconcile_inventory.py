@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-Read-only inventory reconciliation.
+Read-only, STORE-SCOPED inventory reconciliation.
 
 Cross-checks the three independent records of what stock should be, per
-ingredient:
+(store, ingredient):
 
     1. the SUMMARY      ingredient_stock.on_hand_quantity / reserved_quantity
     2. the LEDGER       SUM(ingredient_stock_movements.quantity_delta_on_hand)
@@ -14,22 +14,28 @@ The summary is a fast-query mirror; the ledger and the order lines are the
 sources of truth it is derived from. If they disagree, something wrote stock
 outside the inventory service and the summary can no longer be trusted.
 
+Why the store is part of the grain
+----------------------------------
+Reconciling across stores would be worse than not reconciling at all. Suppose
+Kadıköy is 500 g of pistachio SHORT and Beşiktaş is 500 g OVER — two real,
+serious, opposite faults. Summed into one global figure they are zero, and the
+report says everything is fine. Mismatches must never be allowed to cancel each
+other out across branches, so every total here is computed per store, and every
+mismatch names the store it belongs to.
+
 It NEVER writes. A reconciliation that "fixes" drift by overwriting the summary
 would destroy the very evidence needed to find the bug that caused it.
 
 Usage:
-    python scripts/reconcile_inventory.py                 # all ingredients
-    python scripts/reconcile_inventory.py --ingredient 3  # one ingredient
-    python scripts/reconcile_inventory.py --json          # machine-readable
-    python scripts/reconcile_inventory.py --all           # include matching rows
+    python scripts/reconcile_inventory.py                    # every store, grouped by store
+    python scripts/reconcile_inventory.py --store-id 2       # one store
+    python scripts/reconcile_inventory.py --ingredient 3     # one ingredient, all stores
+    python scripts/reconcile_inventory.py --json             # machine-readable
+    python scripts/reconcile_inventory.py --all              # include matching rows
 
 Exit code:
-    0  every ingredient's summary matches the ledger AND the order lines
-    1  at least one mismatch (or a usage error)
-
-Single-store note: inventory is GLOBAL in this schema (no store_id), so this
-reports across the whole installation. Store-scoped reconciliation arrives with
-refactor/store-scoped-inventory.
+    0  every (store, ingredient) summary matches its ledger AND its order lines
+    1  at least one mismatch in ANY store (or a usage error)
 
 No credentials, tokens or idempotency keys are ever printed.
 """
@@ -55,16 +61,36 @@ def _q3(v) -> Decimal:
     return Decimal(str(v if v is not None else "0")).quantize(THREE)
 
 
-def reconcile(ingredient_id: int | None = None) -> list[dict]:
-    """Return one row per ingredient with stored vs computed quantities."""
+def reconcile(
+    store_id: int | None = None,
+    ingredient_id: int | None = None,
+) -> list[dict]:
+    """
+    Return one row per (store, ingredient) with stored vs computed quantities.
+
+    Every correlated subquery is keyed on BOTH s.store_id and s.ingredient_id.
+    Dropping the store from either one would silently pool another branch's
+    movements into this branch's expected total — which is exactly the class of
+    bug this script exists to catch, so it must not commit it itself.
+    """
     db = SessionLocal()
     try:
-        where = "WHERE s.ingredient_id = :iid" if ingredient_id is not None else ""
-        params = {"iid": ingredient_id} if ingredient_id is not None else {}
+        filters = []
+        params: dict = {}
+        if store_id is not None:
+            filters.append("s.store_id = :sid")
+            params["sid"] = store_id
+        if ingredient_id is not None:
+            filters.append("s.ingredient_id = :iid")
+            params["iid"] = ingredient_id
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+
         rows = db.execute(
             text(
                 f"""
                 SELECT
+                    s.store_id                             AS store_id,
+                    st.name                                AS store_name,
                     s.ingredient_id                        AS ingredient_id,
                     i.name                                 AS ingredient_name,
                     s.unit                                 AS unit,
@@ -73,19 +99,22 @@ def reconcile(ingredient_id: int | None = None) -> list[dict]:
                     COALESCE((
                         SELECT SUM(m.quantity_delta_on_hand)
                         FROM ingredient_stock_movements m
-                        WHERE m.ingredient_id = s.ingredient_id
+                        WHERE m.store_id      = s.store_id
+                          AND m.ingredient_id = s.ingredient_id
                     ), 0)                                  AS ledger_on_hand,
                     COALESCE((
                         SELECT SUM(l.reserved_quantity
                                    - l.consumed_quantity
                                    - l.released_quantity)
                         FROM order_inventory_lines l
-                        WHERE l.ingredient_id = s.ingredient_id
+                        WHERE l.store_id      = s.store_id
+                          AND l.ingredient_id = s.ingredient_id
                     ), 0)                                  AS lines_reserved
                 FROM ingredient_stock s
                 JOIN ingredients i ON i.id = s.ingredient_id
+                JOIN stores      st ON st.id = s.store_id
                 {where}
-                ORDER BY s.ingredient_id
+                ORDER BY s.store_id, s.ingredient_id
                 """
             ),
             params,
@@ -104,6 +133,8 @@ def reconcile(ingredient_id: int | None = None) -> list[dict]:
         reserved_diff = stored_reserved - lines_reserved
 
         results.append({
+            "store_id": r.store_id,
+            "store_name": r.store_name,
             "ingredient_id": r.ingredient_id,
             "ingredient_name": r.ingredient_name,
             "unit": r.unit,
@@ -120,62 +151,104 @@ def reconcile(ingredient_id: int | None = None) -> list[dict]:
     return results
 
 
+def _group_by_store(rows: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["store_id"], []).append(row)
+    return dict(sorted(grouped.items()))
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read-only inventory reconciliation.")
+    parser = argparse.ArgumentParser(
+        description="Read-only, store-scoped inventory reconciliation."
+    )
+    parser.add_argument("--store-id", type=int, default=None,
+                        help="Restrict to one store. Omit to reconcile every store, "
+                             "each grouped and totalled separately.")
     parser.add_argument("--ingredient", type=int, default=None,
                         help="Restrict to one ingredient id.")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     parser.add_argument("--all", action="store_true",
-                        help="Include ingredients that reconcile cleanly.")
+                        help="Include rows that reconcile cleanly.")
     args = parser.parse_args()
 
-    rows = reconcile(args.ingredient)
+    rows = reconcile(store_id=args.store_id, ingredient_id=args.ingredient)
     mismatches = [r for r in rows if r["mismatch"]]
-    reported = rows if args.all else mismatches
+    by_store = _group_by_store(rows)
 
     if args.json:
+        # Per-store counts as well as the overall count: a caller must be able to
+        # see that store 1 is clean and store 2 is not, without those two facts
+        # ever having been added together.
         print(json.dumps({
             "checked_count": len(rows),
             "mismatch_count": len(mismatches),
-            "results": reported,
+            "stores": [
+                {
+                    "store_id": sid,
+                    "store_name": store_rows[0]["store_name"],
+                    "checked_count": len(store_rows),
+                    "mismatch_count": sum(1 for r in store_rows if r["mismatch"]),
+                    "results": [
+                        r for r in store_rows if args.all or r["mismatch"]
+                    ],
+                }
+                for sid, store_rows in by_store.items()
+            ],
         }, indent=2))
-    else:
-        scope = (
-            f"ingredient {args.ingredient}" if args.ingredient is not None
-            else "all ingredients"
+        return 1 if mismatches else 0
+
+    scope = "all stores" if args.store_id is None else f"store {args.store_id}"
+    if args.ingredient is not None:
+        scope += f", ingredient {args.ingredient}"
+
+    if not rows:
+        print(f"Inventory reconciliation: no stock rows found ({scope}).")
+        return 0
+
+    if not mismatches:
+        print(
+            f"Inventory reconciliation OK ({scope}): {len(rows)} (store, ingredient) "
+            f"row(s) across {len(by_store)} store(s); every summary matches its "
+            f"ledger and its order inventory lines."
         )
-        if not mismatches:
-            print(
-                f"Inventory reconciliation OK ({scope}): "
-                f"{len(rows)} ingredient(s); every summary matches the ledger "
-                f"and the order inventory lines."
-            )
-            if args.all:
-                for r in reported:
-                    print(
-                        f"  ingredient {r['ingredient_id']} ({r['ingredient_name']}): "
-                        f"on-hand {r['stored_on_hand_quantity']} {r['unit']}, "
-                        f"reserved {r['stored_reserved_quantity']} {r['unit']}"
-                    )
-        else:
-            print(
-                f"Inventory reconciliation FOUND {len(mismatches)} mismatch(es) "
-                f"of {len(rows)} ingredient(s) ({scope}):"
-            )
-            for r in mismatches:
-                print(f"  ingredient {r['ingredient_id']} ({r['ingredient_name']}):")
-                if r["on_hand_mismatch"]:
-                    print(
-                        f"    on-hand  stored={r['stored_on_hand_quantity']} "
-                        f"ledger={r['computed_on_hand_from_ledger']} "
-                        f"drift={r['on_hand_mismatch_amount']} {r['unit']}"
-                    )
-                if r["reserved_mismatch"]:
-                    print(
-                        f"    reserved stored={r['stored_reserved_quantity']} "
-                        f"order_lines={r['computed_reserved_from_order_lines']} "
-                        f"drift={r['reserved_mismatch_amount']} {r['unit']}"
-                    )
+    else:
+        print(
+            f"Inventory reconciliation FOUND {len(mismatches)} mismatch(es) of "
+            f"{len(rows)} (store, ingredient) row(s) ({scope}):"
+        )
+
+    for sid, store_rows in by_store.items():
+        store_mismatches = [r for r in store_rows if r["mismatch"]]
+        reported = store_rows if args.all else store_mismatches
+        if not reported:
+            continue
+
+        name = store_rows[0]["store_name"]
+        print(f"\n  store {sid} ({name}) — "
+              f"{len(store_mismatches)} mismatch(es) of {len(store_rows)} row(s)")
+
+        for r in reported:
+            if not r["mismatch"]:
+                print(
+                    f"    ok  ingredient {r['ingredient_id']} ({r['ingredient_name']}): "
+                    f"on-hand {r['stored_on_hand_quantity']} {r['unit']}, "
+                    f"reserved {r['stored_reserved_quantity']} {r['unit']}"
+                )
+                continue
+            print(f"    MISMATCH ingredient {r['ingredient_id']} ({r['ingredient_name']}):")
+            if r["on_hand_mismatch"]:
+                print(
+                    f"      on-hand  stored={r['stored_on_hand_quantity']} "
+                    f"ledger={r['computed_on_hand_from_ledger']} "
+                    f"drift={r['on_hand_mismatch_amount']} {r['unit']}"
+                )
+            if r["reserved_mismatch"]:
+                print(
+                    f"      reserved stored={r['stored_reserved_quantity']} "
+                    f"order_lines={r['computed_reserved_from_order_lines']} "
+                    f"drift={r['reserved_mismatch_amount']} {r['unit']}"
+                )
 
     return 1 if mismatches else 0
 

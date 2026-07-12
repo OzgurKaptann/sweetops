@@ -220,27 +220,42 @@ def _expected_impact(signal_type: str, severity: str, data: dict, blocking: bool
 # (Each returns a list of raw signal dicts — no DB interaction here.)
 # ---------------------------------------------------------------------------
 
-def _stock_risk_signals(db: Session) -> list[dict]:
+def _stock_risk_signals(db: Session, store_id: int) -> list[dict]:
+    """
+    Stockout risk for ONE store.
+
+    Both halves of the calculation must come from the same branch, and this is
+    where getting it wrong would be most invisible: divide Kadıköy's available
+    quantity by Beşiktaş's burn rate and you get a plausible-looking number of
+    hours that is simply about nothing. So the stock rows are filtered to the
+    store, and so are the CONSUMPTION movements the velocity is measured from.
+    """
     now = _now_utc()
     window_start = now - timedelta(hours=24)
 
     rows = (
         db.query(Ingredient, IngredientStock)
-        .join(IngredientStock, IngredientStock.ingredient_id == Ingredient.id)
+        .join(
+            IngredientStock,
+            (IngredientStock.ingredient_id == Ingredient.id)
+            & (IngredientStock.store_id == store_id),
+        )
         .filter(Ingredient.is_active == True)
         .all()
     )
 
-    # Velocity is the rate at which stock is PHYSICALLY consumed — CONSUMPTION
-    # movements only. Reservations are not consumption: an order that is sitting
-    # in the queue (or is about to be cancelled) has not burned any batter, and
-    # counting it here would inflate the burn rate and cry stockout too early.
+    # Velocity is the rate at which THIS STORE physically consumes stock —
+    # CONSUMPTION movements only. Reservations are not consumption: an order
+    # that is sitting in the queue (or is about to be cancelled) has not burned
+    # any batter, and counting it here would inflate the burn rate and cry
+    # stockout too early.
     movements = (
         db.query(
             IngredientStockMovement.ingredient_id,
             func.sum(IngredientStockMovement.quantity).label("total_consumed"),
         )
         .filter(
+            IngredientStockMovement.store_id == store_id,
             IngredientStockMovement.movement_type == MOVEMENT_CONSUMPTION,
             IngredientStockMovement.created_at >= window_start,
         )
@@ -413,16 +428,26 @@ def _demand_spike_signals(db: Session, store_id: int) -> list[dict]:
     }]
 
 
-def _slow_moving_signals(db: Session) -> list[dict]:
+def _slow_moving_signals(db: Session, store_id: int) -> list[dict]:
+    """
+    Capital sitting idle on ONE store's shelves.
+
+    Store scope matters in both directions here. An ingredient that Beşiktaş
+    sells briskly can still be dead stock in Kadıköy, and the Kadıköy manager is
+    the one who has to run the promotion — so "has this moved?" is asked of this
+    store's movements, against this store's on-hand.
+    """
     now          = _now_utc()
     window_start = now - timedelta(hours=24)
 
-    # "Moving" means physically consumed in the kitchen. An ingredient that only
-    # sat in reservations for orders that never got cooked has not moved.
+    # "Moving" means physically consumed in THIS store's kitchen. An ingredient
+    # that only sat in reservations for orders that never got cooked has not
+    # moved, and one that moved in another branch has not moved here.
     active_ids: set[int] = {
         row.ingredient_id
         for row in db.query(IngredientStockMovement.ingredient_id)
         .filter(
+            IngredientStockMovement.store_id == store_id,
             IngredientStockMovement.movement_type == MOVEMENT_CONSUMPTION,
             IngredientStockMovement.created_at >= window_start,
         )
@@ -432,7 +457,11 @@ def _slow_moving_signals(db: Session) -> list[dict]:
 
     rows = (
         db.query(Ingredient, IngredientStock)
-        .join(IngredientStock, IngredientStock.ingredient_id == Ingredient.id)
+        .join(
+            IngredientStock,
+            (IngredientStock.ingredient_id == Ingredient.id)
+            & (IngredientStock.store_id == store_id),
+        )
         .filter(Ingredient.is_active == True)
         .all()
     )
@@ -1033,45 +1062,36 @@ def get_owner_decisions(db: Session, store_id: int) -> dict:
     4. Return envelope.
 
     Store scoping:
-      Order-derived signals (demand_spike, sla_risk, revenue_anomaly) and the
-      metric-driven signals are filtered to store_id. Inventory-derived signals
-      (stock_risk, slow_moving) read the GLOBAL inventory tables and are only
-      generated while a single operational store exists — otherwise they are
-      skipped (fail closed) so one store's global inventory never leaks into
-      another store's decision feed.
+      EVERY evaluator is store-scoped, including the two inventory ones. This
+      used to be the awkward case: stock_risk and slow_moving read global
+      inventory tables, so they had to be SKIPPED entirely once a second store
+      existed — a multi-branch owner simply lost their stock signals. Now that
+      physical stock carries a store_id, they are ordinary store-scoped
+      evaluators like the rest, and a second branch opening costs nobody their
+      decision feed.
     """
-    from app.services.inventory_guard import is_single_operational_store
-
     now = _now_utc()
     all_signals: list[dict] = []
-    single_store = is_single_operational_store(db)
 
-    # Distinct signal evaluators for this request. Inventory evaluators read the
-    # GLOBAL inventory tables and only run while a single operational store
-    # exists (fail-closed multi-store scoping — see inventory_guard); when they
-    # are skipped they are consistently excluded from signals_evaluated too, so
-    # the count never claims an evaluator ran when it did not.
-    store_scoped_fns = [
+    # Distinct signal evaluators for this request. All take (db, store_id) and
+    # all always run, so signals_evaluated is a constant of the code rather than
+    # something that silently shrinks with the shape of the installation.
+    signal_fns = [
+        _stock_risk_signals,
+        _slow_moving_signals,
         _demand_spike_signals,
         _sla_risk_signals,
         _revenue_anomaly_signals,
         _metric_driven_signals,
     ]
-    inventory_fns = [_stock_risk_signals, _slow_moving_signals] if single_store else []
 
     # signals_evaluated = number of distinct evaluators executed for this store
     # and request. Deterministic and computed from the evaluator set itself so
     # it can never drift from the code, and independent of how many decisions
     # each evaluator emits (an evaluator that returns zero decisions still ran).
-    signals_evaluated = len(inventory_fns) + len(store_scoped_fns)
+    signals_evaluated = len(signal_fns)
 
-    for fn in inventory_fns:
-        try:
-            all_signals.extend(fn(db))
-        except Exception as exc:
-            logger.error("decision_engine signal_fn=%s err=%s", fn.__name__, exc)
-
-    for fn in store_scoped_fns:
+    for fn in signal_fns:
         try:
             all_signals.extend(fn(db, store_id))
         except Exception as exc:

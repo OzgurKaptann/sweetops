@@ -104,6 +104,28 @@ def _load_combo_counts(db: Session) -> dict[tuple[int, int], int]:
     return dict(combo_counts)
 
 
+def load_store_stocks(
+    db: Session, store_id: int, ingredient_ids: list[int]
+) -> dict[int, IngredientStock]:
+    """
+    This store's stock rows for these ingredients, keyed by ingredient_id.
+
+    An ingredient the branch does not stock is simply absent from the result,
+    and ``_stock_status`` reports it as out_of_stock for that branch. It is NEVER
+    filled in from another branch's row: a customer in Kadıköy must not be shown
+    "in stock" because Beşiktaş has some.
+    """
+    if not ingredient_ids:
+        return {}
+    return {
+        row.ingredient_id: row
+        for row in db.query(IngredientStock).filter(
+            IngredientStock.store_id == store_id,
+            IngredientStock.ingredient_id.in_(ingredient_ids),
+        ).all()
+    }
+
+
 def _stock_status(stock: IngredientStock | None) -> str:
     """
     Returns 'in_stock' | 'low_stock' | 'out_of_stock' for the customer menu.
@@ -351,19 +373,24 @@ def enrich_menu(
 
 def compute_upsell(
     db: Session,
+    store_id: int,
     selected_ids: list[int],
     max_suggestions: int = MAX_UPSELL_SUGGESTIONS,
 ) -> dict:
     """
     Given currently selected ingredient IDs, return up to max_suggestions
-    additional ingredients worth adding.
+    additional ingredients worth adding, IN THIS STORE.
 
     Algorithm:
       1. Load combo frequency for last COMBO_WINDOW_DAYS
       2. For each selected ingredient, collect co-occurring candidates
       3. Score: combo_freq × (1 + price_rank_norm)  — rewards high-freq + high-margin combos
-      4. Filter: not already selected, is_active, in_stock
+      4. Filter: not already selected, is_active, in_stock IN THIS STORE
       5. Return top N sorted by score DESC, then id ASC
+
+    Step 4 is why ``store_id`` is required. Suggesting an ingredient the branch
+    has run out of is worse than suggesting nothing: the customer adds it, and
+    the order is then rejected at checkout for being out of stock.
 
     max_suggestions:
       Default = MAX_UPSELL_SUGGESTIONS (3). Reduced to 1 during high kitchen load to
@@ -374,18 +401,13 @@ def compute_upsell(
 
     combo_counts = _load_combo_counts(db)
 
-    # Load all active ingredients + stocks
+    # Catalog is global; stock is this store's.
     ingredients = (
         db.query(Ingredient)
         .filter(Ingredient.is_active == True)
         .all()
     )
-    stocks = {
-        row.ingredient_id: row
-        for row in db.query(IngredientStock).filter(
-            IngredientStock.ingredient_id.in_([i.id for i in ingredients])
-        ).all()
-    }
+    stocks = load_store_stocks(db, store_id, [i.id for i in ingredients])
 
     stock_statuses = {ing.id: _stock_status(stocks.get(ing.id)) for ing in ingredients}
     ing_by_id      = {ing.id: ing for ing in ingredients}
@@ -446,14 +468,20 @@ def compute_upsell(
 
 def validate_ingredient_selection(
     db: Session,
+    store_id: int,
     selected_ids: list[int],
 ) -> dict:
     """
-    Validate a customer's ingredient selection:
+    Validate a customer's ingredient selection AGAINST THIS STORE's stock:
       - Unknown IDs → removed with reason "not_found"
       - Inactive IDs → removed with reason "not_available"
-      - Out-of-stock → removed with reason "out_of_stock", alternative suggested
-      - Low-stock    → kept, alternative suggested (proactive)
+      - Out-of-stock here → removed with reason "out_of_stock", alternative suggested
+      - Low-stock here    → kept, alternative suggested (proactive)
+
+    "Out of stock" is a fact about one branch's shelves. The same ingredient can
+    be freely orderable in one store and unavailable in another, and this is the
+    function that must say so — the alternative it suggests is likewise chosen
+    from what THIS branch can actually make.
 
     Returns:
       valid_ids       — IDs that can proceed to ordering
@@ -469,17 +497,12 @@ def validate_ingredient_selection(
             "price_breakdown": {},
         }
 
-    # Load all active ingredients
+    # Catalog is global; stock is this store's.
     all_ings = {
         ing.id: ing
         for ing in db.query(Ingredient).filter(Ingredient.is_active == True).all()
     }
-    all_stocks = {
-        row.ingredient_id: row
-        for row in db.query(IngredientStock).filter(
-            IngredientStock.ingredient_id.in_(list(all_ings.keys()))
-        ).all()
-    }
+    all_stocks = load_store_stocks(db, store_id, list(all_ings.keys()))
 
     stock_statuses = {
         ing_id: _stock_status(all_stocks.get(ing_id))
