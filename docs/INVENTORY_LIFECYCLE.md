@@ -321,8 +321,29 @@ There are **no ambiguous bare signs**. A `-500` means nothing on its own;
 | `RETURNED` | +quantity | 0 |
 | `PURCHASE_RECEIPT` | +quantity | 0 |
 | `MANUAL_ADJUSTMENT` | ±quantity | 0 |
+| `TRANSFER_OUT` | −quantity | 0 |
+| `TRANSFER_IN` | +quantity | 0 |
 
 A row cannot claim to be a `CONSUMPTION` while *adding* to physical stock.
+
+### The two transfer types
+
+`TRANSFER_OUT` and `TRANSFER_IN` are the two halves of **one** store-to-store
+shipment, and they are never written alone. Both carry a `transfer_id`, and
+composite foreign keys pin each to the correct **side** of that transfer — the OUT
+leg to its source store, the IN leg to its destination store, both to its
+ingredient. A **deferred constraint trigger** then refuses, at `COMMIT`, any
+transfer that does not have exactly one of each: stock that left a branch and
+arrived nowhere cannot be committed at all.
+
+They exist as their own types rather than as a signed `MANUAL_ADJUSTMENT` precisely
+because analytics read the ledger by **type**. A transfer booked as an adjustment,
+a waste, or a purchase receipt tells the owner a specific falsehood — see
+[`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md) § 1.
+
+The inbound leg carries **no actor**: the person who authorised it works in the
+*source* store, and `fk_movement_actor_store` says staff only move stock in their
+own store. Accountability lives on the transfer row's `initiated_by_user_id`.
 
 **Append-only** is enforced by `trg_ingredient_stock_movements_immutable`, which
 refuses `UPDATE` and `DELETE` outright. Same hardening as the payment ledger:
@@ -390,6 +411,20 @@ ledger, stored reserved, computed reserved from the order lines, and the mismatc
 amount. Supports `--json`, `--store-id N`, `--ingredient N`, `--all`. Exits
 **non-zero** if *any* store mismatches.
 
+Since the transfer workflow there is a **fourth** check, on a different axis:
+
+```
+   TRANSFER PAIRING   every transfer has exactly one TRANSFER_OUT in its source
+                      store and one TRANSFER_IN in its destination store, for its
+                      ingredient, at its quantity, with the correct signs
+```
+
+The first three are **totals**, and totals cannot see a **half** transfer: stock
+that left one branch and arrived nowhere leaves that branch's ledger and summary in
+perfect agreement with each other — both simply short of physical reality — so no
+per-store check is wrong. Only comparing the transfer row against its legs finds it.
+A broken pair fails the run and is reported to **both** branches.
+
 The store is part of the grain for a reason: if Kadıköy is 40 g short and
 Beşiktaş is 40 g over, a chain-wide total is zero and the report says "OK" while
 both branches are broken. Totals are never summed across stores. See
@@ -415,8 +450,18 @@ python scripts/reconcile_inventory.py --json     # machine-readable, exit 1 on d
 | `consumed_quantity` | physically used by the kitchen (`CONSUMPTION` movements) |
 | `waste_quantity` | physically thrown away (`WASTE` movements) |
 | `manual_adjustment_quantity` | count corrections (`MANUAL_ADJUSTMENT`) |
-| `purchase_receipt_quantity` | goods received (`PURCHASE_RECEIPT`) |
+| `purchase_receipt_quantity` | goods received (`PURCHASE_RECEIPT`) — **excludes `TRANSFER_IN`** |
+| `transfer_out_quantity` | shipped to another branch (`TRANSFER_OUT`) — **not waste** |
+| `transfer_in_quantity` | received from another branch (`TRANSFER_IN`) — **not a purchase** |
 | `stockout_risk` | computed from **`available`**, with velocity from **`CONSUMPTION`** |
+
+**Transfers are excluded from waste, purchase receipts and consumption velocity**,
+and this holds *by construction* rather than by a filter someone must remember: the
+analytics queries select `movement_type == CONSUMPTION` explicitly, so a new type is
+excluded from velocity unless someone deliberately adds it. A transfer *does* move
+`on_hand` and therefore `available`, so it legitimately changes **stockout risk** on
+both sides — a branch that ships away its last chocolate really is about to run out.
+Full definitions: [`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md) § 9.
 
 Two corrections were needed, and both are now enforced by tests:
 

@@ -30,6 +30,7 @@ from app.models.ingredient_stock import (
     IngredientStockMovement,
     OrderInventoryLine,
 )
+from app.models.inventory_transfer import InventoryTransfer
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_item_ingredient import OrderItemIngredient
@@ -296,9 +297,33 @@ def purge_inventory_for_store(db: Session, store_id: int) -> None:
     migration downgrade test run: downgrading to a global-stock schema refuses,
     correctly, while a second store still holds stock.
     """
+    # A transfer's two legs live in TWO different stores, and both FK to the
+    # transfer row. Deleting only THIS store's movements would leave the
+    # counterparty's leg pointing at a transfer that is about to go, so every
+    # transfer this store took part in is removed whole — both legs, then the
+    # transfer — regardless of which side of it this store was on.
+    transfer_ids = [
+        row.id
+        for row in db.query(InventoryTransfer.id)
+        .filter(
+            (InventoryTransfer.source_store_id == store_id)
+            | (InventoryTransfer.destination_store_id == store_id)
+        )
+        .all()
+    ]
+
     with _inventory_maintenance(db):
+        if transfer_ids:
+            db.query(IngredientStockMovement).filter(
+                IngredientStockMovement.transfer_id.in_(transfer_ids)
+            ).delete(synchronize_session=False)
         db.query(IngredientStockMovement).filter(
             IngredientStockMovement.store_id == store_id
+        ).delete(synchronize_session=False)
+
+    if transfer_ids:
+        db.query(InventoryTransfer).filter(
+            InventoryTransfer.id.in_(transfer_ids)
         ).delete(synchronize_session=False)
 
     db.query(OrderInventoryLine).filter(
@@ -333,11 +358,19 @@ def cleanup_ingredient(db: Session, ingredient_id: int) -> None:
     Respects FK order: movements → inventory lines → order chain → stock → ingredient.
     """
     # Movements first: they FK to orders, order_items, order_inventory_lines,
-    # users and ingredients, so nothing else can go until they are gone.
+    # users, ingredients and inventory_transfers, so nothing else can go until
+    # they are gone. Both legs of a transfer share its ingredient, so filtering
+    # by ingredient removes the pair whichever stores it spanned.
     with _inventory_maintenance(db):
         db.query(IngredientStockMovement).filter(
             IngredientStockMovement.ingredient_id == ingredient_id
         ).delete(synchronize_session=False)
+
+    # Transfers next: their legs are gone, and they FK to ingredient_stock (about
+    # to be deleted below) and to users.
+    db.query(InventoryTransfer).filter(
+        InventoryTransfer.ingredient_id == ingredient_id
+    ).delete(synchronize_session=False)
 
     db.query(OrderInventoryLine).filter(
         OrderInventoryLine.ingredient_id == ingredient_id

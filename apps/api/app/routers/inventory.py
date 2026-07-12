@@ -39,12 +39,17 @@ from app.models.ingredient_stock import (
     IngredientStock,
     IngredientStockMovement,
 )
+from app.models.inventory_transfer import InventoryTransfer
 from app.schemas.inventory import (
     ManualAdjustmentRequest,
     MovementListResponse,
     MovementReceipt,
     PurchaseReceiptRequest,
     StockListResponse,
+    TransferItem,
+    TransferListResponse,
+    TransferReceipt,
+    TransferRequest,
     WasteRequest,
 )
 from app.services import inventory_service
@@ -281,3 +286,191 @@ def create_waste(
         ip_address=_client_ip(request),
     )
     return _receipt(db, result.movement, replay=result.replayed)
+
+
+# ── Store-to-store transfers ─────────────────────────────────────────────────
+#
+# A transfer is ONE business event with TWO linked ledger movements, never two
+# unrelated manual adjustments. See docs/INVENTORY_TRANSFER_WORKFLOW.md.
+#
+# The SOURCE store is always the session's store. There is no source_store_id
+# field to send (TransferRequest forbids unknown fields outright), so shipping
+# another branch's stock is not a permission check that could be got wrong — it
+# is a request that cannot be expressed.
+
+
+def _transfer_item(
+    transfer: InventoryTransfer, ingredient: Ingredient, viewer_store_id: int
+) -> dict:
+    """One transfer, labelled from the point of view of the store reading it."""
+    return {
+        "transfer_id": transfer.id,
+        "source_store_id": transfer.source_store_id,
+        "destination_store_id": transfer.destination_store_id,
+        "ingredient_id": transfer.ingredient_id,
+        "ingredient_name": ingredient.name if ingredient else None,
+        "quantity": transfer.quantity,
+        "unit": transfer.unit,
+        "status": transfer.status,
+        "reason": transfer.reason,
+        "note": transfer.note,
+        "initiated_by_user_id": transfer.initiated_by_user_id,
+        "direction": (
+            "OUTBOUND" if transfer.source_store_id == viewer_store_id else "INBOUND"
+        ),
+        "created_at": transfer.created_at,
+    }
+
+
+def _transfer_receipt(
+    db: Session, result: inventory_service.TransferResult
+) -> TransferReceipt:
+    t = result.transfer
+    source_stock = (
+        db.query(IngredientStock)
+        .filter(
+            IngredientStock.store_id == t.source_store_id,
+            IngredientStock.ingredient_id == t.ingredient_id,
+        )
+        .first()
+    )
+    ingredient = db.get(Ingredient, t.ingredient_id)
+    return TransferReceipt(
+        transfer_id=t.id,
+        source_store_id=t.source_store_id,
+        destination_store_id=t.destination_store_id,
+        ingredient_id=t.ingredient_id,
+        ingredient_name=ingredient.name if ingredient else None,
+        quantity=t.quantity,
+        unit=t.unit,
+        status=t.status,
+        reason=t.reason,
+        note=t.note,
+        initiated_by_user_id=t.initiated_by_user_id,
+        source_movement_id=result.source_movement.id,
+        destination_movement_id=result.destination_movement.id,
+        source_on_hand_quantity=source_stock.on_hand_quantity if source_stock else 0,
+        source_reserved_quantity=source_stock.reserved_quantity if source_stock else 0,
+        source_available_quantity=source_stock.available_quantity if source_stock else 0,
+        created_at=t.created_at,
+        idempotent_replay=result.replayed,
+    )
+
+
+@router.post("/transfers", response_model=TransferReceipt)
+def create_transfer(
+    body: TransferRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_ADJUST)),
+):
+    """
+    Ship stock from the caller's store to another store, atomically.
+
+    Source on-hand falls and destination on-hand rises in one transaction, as one
+    TRANSFER_OUT / TRANSFER_IN pair that shares a transfer id. Reserved stock is
+    never transferable: the gate is AVAILABLE (on_hand - reserved), because batter
+    already promised to an accepted order is not batter this branch may put on a
+    van.
+
+    Requires ``inventory:adjust`` — the same physical-stock authority as waste and
+    manual adjustment, and for the same reason: this permanently changes what is
+    on a branch's shelves. Plus a trusted Origin, a CSRF token, and an
+    ``Idempotency-Key``, so a retried van manifest ships the chocolate once.
+    """
+    _no_store(response)
+
+    result = inventory_service.transfer_stock(
+        db,
+        # The session's store. Never the body's.
+        source_store_id=_store_id(staff),
+        destination_store_id=body.destination_store_id,
+        ingredient_id=body.ingredient_id,
+        quantity=body.quantity,
+        reason=body.reason,
+        note=body.note,
+        actor_user_id=staff.user_id,
+        idempotency_key=_idem_key(request),
+        ip_address=_client_ip(request),
+    )
+    return _transfer_receipt(db, result)
+
+
+@router.get("/transfers", response_model=TransferListResponse)
+def list_transfers(
+    response: Response,
+    direction: str | None = Query(default=None, pattern="^(OUTBOUND|INBOUND)$"),
+    ingredient_id: int | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
+):
+    """
+    Transfers this store was involved in — both the ones it SENT and the ones it
+    RECEIVED, newest first.
+
+    Both sides are shown deliberately. A branch that only saw its outbound
+    shipments could not answer "where did this crate of chocolate come from?",
+    which is half of what traceability is for. A transfer between two OTHER stores
+    is not visible here at all.
+    """
+    _no_store(response)
+    store_id = _store_id(staff)
+
+    q = (
+        db.query(InventoryTransfer, Ingredient)
+        .join(Ingredient, Ingredient.id == InventoryTransfer.ingredient_id)
+        .filter(
+            (InventoryTransfer.source_store_id == store_id)
+            | (InventoryTransfer.destination_store_id == store_id)
+        )
+    )
+    if direction == "OUTBOUND":
+        q = q.filter(InventoryTransfer.source_store_id == store_id)
+    elif direction == "INBOUND":
+        q = q.filter(InventoryTransfer.destination_store_id == store_id)
+    if ingredient_id is not None:
+        q = q.filter(InventoryTransfer.ingredient_id == ingredient_id)
+
+    rows = q.order_by(InventoryTransfer.id.desc()).limit(limit).all()
+    items = [_transfer_item(t, ing, store_id) for t, ing in rows]
+    return {"total": len(items), "items": items}
+
+
+@router.get("/transfers/{transfer_id}", response_model=TransferItem)
+def get_transfer(
+    transfer_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
+):
+    """
+    One transfer, if the caller's store is one of its two sides.
+
+    A transfer between two other branches 404s rather than 403s: the caller has no
+    business knowing it exists, and a 403 would confirm that it does.
+    """
+    _no_store(response)
+    store_id = _store_id(staff)
+
+    row = (
+        db.query(InventoryTransfer, Ingredient)
+        .join(Ingredient, Ingredient.id == InventoryTransfer.ingredient_id)
+        .filter(
+            InventoryTransfer.id == transfer_id,
+            (InventoryTransfer.source_store_id == store_id)
+            | (InventoryTransfer.destination_store_id == store_id),
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "transfer_not_found",
+                "message": messages.INVENTORY_TRANSFER_NOT_FOUND,
+            },
+        )
+    transfer, ingredient = row
+    return _transfer_item(transfer, ingredient, store_id)

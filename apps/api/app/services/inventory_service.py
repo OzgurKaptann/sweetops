@@ -41,6 +41,7 @@ from typing import Iterable, Optional, Sequence
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
@@ -53,12 +54,16 @@ from app.models.ingredient_stock import (
     MOVEMENT_PURCHASE_RECEIPT,
     MOVEMENT_RESERVATION_CREATED,
     MOVEMENT_RESERVATION_RELEASED,
+    MOVEMENT_TRANSFER_IN,
+    MOVEMENT_TRANSFER_OUT,
     MOVEMENT_WASTE,
     IngredientStock,
     IngredientStockMovement,
     OrderInventoryLine,
 )
+from app.models.inventory_transfer import TRANSFER_COMPLETED, InventoryTransfer
 from app.models.order import Order
+from app.models.store import Store
 from app.services.audit_service import audit
 
 logger = logging.getLogger(__name__)
@@ -73,6 +78,7 @@ AUDIT_CONSUMED = "INVENTORY_CONSUMED"
 AUDIT_WASTE_RECORDED = "INVENTORY_WASTE_RECORDED"
 AUDIT_ADJUSTED = "INVENTORY_ADJUSTED"
 AUDIT_RECEIVED = "INVENTORY_RECEIVED"
+AUDIT_TRANSFERRED = "INVENTORY_TRANSFERRED"
 
 
 # ── Quantity maths ───────────────────────────────────────────────────────────
@@ -214,6 +220,7 @@ def _movement(
     actor_user_id: int | None = None,
     idempotency_key_hash: str | None = None,
     request_hash: str | None = None,
+    transfer_id: int | None = None,
 ) -> IngredientStockMovement:
     row = IngredientStockMovement(
         store_id=store_id,
@@ -230,6 +237,7 @@ def _movement(
         actor_user_id=actor_user_id,
         idempotency_key_hash=idempotency_key_hash,
         request_hash=request_hash,
+        transfer_id=transfer_id,
     )
     db.add(row)
     return row
@@ -905,3 +913,388 @@ def record_waste(
         request_hash=request_hash,
         ip_address=ip_address,
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Store-to-store transfer
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# A transfer is ONE business event with TWO ledger movements, not two unrelated
+# manual adjustments. See app/models/inventory_transfer.py for why that
+# distinction is the whole point, and docs/INVENTORY_TRANSFER_WORKFLOW.md for the
+# operational consequences.
+
+
+@dataclass(frozen=True)
+class TransferResult:
+    """A transfer's outcome, its two ledger legs, and whether it was a replay."""
+
+    transfer: InventoryTransfer
+    source_movement: IngredientStockMovement
+    destination_movement: IngredientStockMovement
+    replayed: bool
+
+
+def _find_transfer_by_key(
+    db: Session, source_store_id: int, key_hash: str
+) -> Optional[InventoryTransfer]:
+    """
+    Look up a previous transfer by idempotency key WITHIN THIS SOURCE STORE.
+
+    Scoped to the source store for the same reason the movement ledger's lookup
+    is scoped to the store: two branch managers working from the same printed
+    run-book will legitimately send the same Idempotency-Key, and that collision
+    is a coincidence, not a replay. Without the store in the lookup, Beşiktaş's
+    transfer would return Kadıköy's result and quietly ship nothing.
+    """
+    return (
+        db.query(InventoryTransfer)
+        .filter(
+            InventoryTransfer.source_store_id == source_store_id,
+            InventoryTransfer.idempotency_key_hash == key_hash,
+        )
+        .first()
+    )
+
+
+def _transfer_legs(
+    db: Session, transfer: InventoryTransfer
+) -> tuple[IngredientStockMovement, IngredientStockMovement]:
+    """The OUT and IN movements of a transfer. Both always exist — the deferred
+    pairing trigger refuses to commit a transfer that has anything else."""
+    rows = (
+        db.query(IngredientStockMovement)
+        .filter(IngredientStockMovement.transfer_id == transfer.id)
+        .all()
+    )
+    by_type = {m.movement_type: m for m in rows}
+    return by_type[MOVEMENT_TRANSFER_OUT], by_type[MOVEMENT_TRANSFER_IN]
+
+
+def _replay_transfer(
+    db: Session, existing: InventoryTransfer, request_hash: str
+) -> TransferResult:
+    """
+    Same key + same payload replays the original transfer, moving no further
+    stock. Same key + a DIFFERENT payload is a client bug or an attack: replaying
+    the original's result would silently discard the new intent — a manager who
+    meant to ship 5 kg would be told the 2 kg they shipped an hour ago succeeded.
+    """
+    if existing.request_hash != request_hash:
+        raise _conflict(
+            messages.INVENTORY_IDEMPOTENCY_MISMATCH, error="idempotency_mismatch"
+        )
+    out_leg, in_leg = _transfer_legs(db, existing)
+    return TransferResult(
+        transfer=existing,
+        source_movement=out_leg,
+        destination_movement=in_leg,
+        replayed=True,
+    )
+
+
+def _lock_transfer_stock(
+    db: Session, ingredient_id: int, store_ids: Sequence[int]
+) -> dict[int, IngredientStock]:
+    """
+    Lock BOTH stores' stock rows for one ingredient, FOR UPDATE, in ascending
+    store_id order.
+
+    The ordering is what prevents deadlock, and it is deliberately by store_id —
+    NOT by "source first". Two managers shipping chocolate to each other at the
+    same moment (Kadıköy → Beşiktaş and Beşiktaş → Kadıköy) would otherwise each
+    hold the lock the other needs, and the pair would deadlock head-to-head.
+    Ordering by store_id means both transactions reach for the lower-numbered
+    store first, so one simply waits for the other. Together with the existing
+    single-store rule (ascending ingredient_id), every stock lock in the system
+    is now taken in ascending (store_id, ingredient_id) order.
+
+    Returns {store_id: stock_row}. A store with no row for this ingredient is
+    absent from the result rather than raising, so the caller can distinguish
+    "source cannot ship what it does not stock" (an error) from "destination has
+    never held this" (fine — the row is materialised at zero first).
+    """
+    rows = db.execute(
+        select(IngredientStock)
+        .where(
+            IngredientStock.ingredient_id == ingredient_id,
+            IngredientStock.store_id.in_(sorted(set(store_ids))),
+        )
+        .order_by(IngredientStock.store_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalars().all()
+    return {row.store_id: row for row in rows}
+
+
+def _ensure_destination_stock_row(
+    db: Session, *, store_id: int, ingredient: Ingredient
+) -> None:
+    """
+    Materialise the destination branch's stock row at ZERO if it has never held
+    this ingredient.
+
+    Policy, stated plainly: a transfer to a store that does not yet stock the
+    ingredient CREATES the row rather than 404ing. This does not contradict
+    "a new branch never inherits another branch's stock" — nothing is inherited
+    and nothing is fabricated. The row starts at zero, and the only thing that
+    puts stock in it is the TRANSFER_IN movement, which is exactly matched by a
+    TRANSFER_OUT somewhere else. Chain-wide totals are unchanged to the gram.
+
+    The alternative — refusing until someone books a purchase receipt — would
+    force a manager stocking a newly opened branch from the warehouse branch to
+    invent a supplier delivery that never happened, which is precisely the kind
+    of lie about physical stock this whole module exists to prevent.
+
+    ON CONFLICT DO NOTHING, so two concurrent first-ever transfers into the same
+    branch cannot race to create duplicate rows (uq_stock_store_ingredient would
+    reject the loser anyway; this makes it a no-op instead of an error).
+    """
+    db.execute(
+        pg_insert(IngredientStock.__table__)
+        .values(
+            store_id=store_id,
+            ingredient_id=ingredient.id,
+            on_hand_quantity=ZERO,
+            reserved_quantity=ZERO,
+            unit=ingredient.unit,
+        )
+        .on_conflict_do_nothing(index_elements=["store_id", "ingredient_id"])
+    )
+
+
+def transfer_stock(
+    db: Session,
+    *,
+    source_store_id: int,
+    destination_store_id: int,
+    ingredient_id: int,
+    quantity,
+    reason: str,
+    note: str | None = None,
+    actor_user_id: int,
+    idempotency_key: str | None = None,
+    ip_address: str | None = None,
+) -> TransferResult:
+    """
+    Move stock from the caller's store to another store, atomically.
+
+        source.on_hand      -= quantity      (TRANSFER_OUT, in the source store)
+        destination.on_hand += quantity      (TRANSFER_IN,  in the destination store)
+
+    Neither store's ``reserved`` changes: a transfer moves physical stock, it does
+    not move anybody's promise to a customer.
+
+    ``source_store_id`` is the authenticated staff member's store, passed by the
+    router from the session. It is NEVER read from the request body — a Store A
+    manager cannot ship Store B's chocolate by naming Store B as the source, and
+    the database would refuse the row even if this function were wrong
+    (fk_transfer_actor_source_store binds the initiator to the source store).
+
+    What may NOT be transferred: stock that is already reserved for accepted
+    orders. The gate is AVAILABLE (on_hand - reserved), not on-hand, because the
+    batter promised to the table waiting in the corner is not batter this branch
+    still has to give away. Refuses with 409 rather than silently breaking that
+    promise.
+
+    All-or-nothing: both legs, both summary updates, the transfer row and the
+    audit record are one database transaction. There is no window in which the
+    source has lost stock the destination has not gained — and if there somehow
+    were, the deferred pairing trigger would refuse the COMMIT.
+    """
+    key = _require_key(idempotency_key)
+    qty = _require_positive(quantity)
+    why = _require_reason(reason)
+    memo = (note or "").strip() or None
+
+    key_hash = _sha256(key)
+    # The payload hash covers the request BODY only. The source store is not in
+    # the body — it comes from the session — and it is already part of the
+    # idempotency lookup, so a match here is always a match within one source
+    # store.
+    request_hash = _sha256(_canonical({
+        "cmd": "transfer",
+        "destination_store_id": destination_store_id,
+        "ingredient_id": ingredient_id,
+        "quantity": str(qty),
+        "reason": why,
+        "note": memo or "",
+    }))
+
+    if destination_store_id == source_store_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "same_store_transfer",
+                "message": messages.INVENTORY_TRANSFER_SAME_STORE,
+            },
+        )
+
+    existing = _find_transfer_by_key(db, source_store_id, key_hash)
+    if existing is not None:
+        return _replay_transfer(db, existing, request_hash)
+
+    try:
+        destination = db.get(Store, destination_store_id)
+        if destination is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "destination_store_not_found",
+                    "message": messages.INVENTORY_TRANSFER_DESTINATION_NOT_FOUND,
+                },
+            )
+
+        ingredient = db.get(Ingredient, ingredient_id)
+        if ingredient is None or not ingredient.is_active:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "ingredient_not_found",
+                    "message": messages.INVENTORY_INGREDIENT_NOT_FOUND,
+                },
+            )
+
+        # The destination may never have held this ingredient. Give it a zeroed
+        # row BEFORE the locks are taken, so the row exists to be locked and the
+        # transfer's composite FK to it can be satisfied.
+        _ensure_destination_stock_row(
+            db, store_id=destination_store_id, ingredient=ingredient
+        )
+
+        stock = _lock_transfer_stock(
+            db, ingredient_id, (source_store_id, destination_store_id)
+        )
+        source_stock = stock.get(source_store_id)
+        destination_stock = stock.get(destination_store_id)
+        if source_stock is None:
+            # This branch has never stocked the ingredient, so it has nothing to
+            # ship. It is emphatically NOT satisfied from a third store's shelf.
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "stock_not_configured",
+                    "message": messages.INVENTORY_STOCK_NOT_CONFIGURED,
+                },
+            )
+
+        # Definitive idempotency re-check now that we hold the row locks: an
+        # identical concurrent transfer may have committed while we waited.
+        existing = _find_transfer_by_key(db, source_store_id, key_hash)
+        if existing is not None:
+            db.rollback()
+            return _replay_transfer(db, existing, request_hash)
+
+        if available(source_stock) < qty:
+            raise _conflict(
+                messages.INVENTORY_TRANSFER_INSUFFICIENT_AVAILABLE,
+                error="insufficient_available",
+            )
+
+        transfer = InventoryTransfer(
+            source_store_id=source_store_id,
+            destination_store_id=destination_store_id,
+            ingredient_id=ingredient_id,
+            quantity=qty,
+            unit=ingredient.unit,
+            status=TRANSFER_COMPLETED,
+            reason=why,
+            note=memo,
+            initiated_by_user_id=actor_user_id,
+            idempotency_key_hash=key_hash,
+            request_hash=request_hash,
+        )
+        db.add(transfer)
+        db.flush()  # transfer.id, which both legs must carry
+
+        out_leg = _movement(
+            db,
+            store_id=source_store_id,
+            ingredient_id=ingredient_id,
+            movement_type=MOVEMENT_TRANSFER_OUT,
+            quantity=qty,
+            delta_on_hand=-qty,
+            delta_reserved=ZERO,
+            unit=ingredient.unit,
+            reason=why,
+            actor_user_id=actor_user_id,
+            transfer_id=transfer.id,
+        )
+        in_leg = _movement(
+            db,
+            store_id=destination_store_id,
+            ingredient_id=ingredient_id,
+            movement_type=MOVEMENT_TRANSFER_IN,
+            quantity=qty,
+            delta_on_hand=qty,
+            delta_reserved=ZERO,
+            unit=ingredient.unit,
+            reason=why,
+            # No actor: the initiator belongs to the SOURCE store, and staff only
+            # move stock in their own store. Accountability is the transfer row's
+            # initiated_by_user_id. See ck_movement_transfer_in_no_actor.
+            actor_user_id=None,
+            transfer_id=transfer.id,
+        )
+
+        source_stock.on_hand_quantity = q3(source_stock.on_hand_quantity) - qty
+        destination_stock.on_hand_quantity = (
+            q3(destination_stock.on_hand_quantity) + qty
+        )
+        # reserved_quantity is deliberately untouched on BOTH sides. Stock moved;
+        # nobody's promise did.
+
+        audit(
+            db,
+            entity_type="inventory_transfer",
+            entity_id=transfer.id,
+            action=AUDIT_TRANSFERRED,
+            actor_type="STAFF",
+            actor_id=str(actor_user_id),
+            ip_address=ip_address,
+            # No session token, no CSRF token, no idempotency key and no request
+            # hash: an audit trail that leaks a replayable credential is a
+            # liability, not a control.
+            payload_after={
+                "transfer_id": transfer.id,
+                "source_store_id": source_store_id,
+                "destination_store_id": destination_store_id,
+                "ingredient_id": ingredient_id,
+                "quantity": str(qty),
+                "unit": ingredient.unit,
+                "actor_user_id": actor_user_id,
+                "reason": why,
+                "status": TRANSFER_COMPLETED,
+            },
+        )
+
+        # The deferred pairing trigger fires HERE. If either leg were missing or
+        # mismatched, this COMMIT raises and no stock has moved on either side.
+        db.commit()
+        db.refresh(transfer)
+        db.refresh(out_leg)
+        db.refresh(in_leg)
+        logger.info(
+            "inventory_transferred transfer=%s src=%s dst=%s ingredient=%s qty=%s actor=%s",
+            transfer.id, source_store_id, destination_store_id,
+            ingredient_id, qty, actor_user_id,
+        )
+        return TransferResult(
+            transfer=transfer,
+            source_movement=out_leg,
+            destination_movement=in_leg,
+            replayed=False,
+        )
+
+    except IntegrityError:
+        # A concurrent transfer with the same key committed between our re-check
+        # and the insert — uq_transfer_source_idem caught it. Nothing of ours was
+        # written; return the winner's result rather than double-shipping.
+        db.rollback()
+        existing = _find_transfer_by_key(db, source_store_id, key_hash)
+        if existing is not None:
+            return _replay_transfer(db, existing, request_hash)
+        raise
+    except HTTPException:
+        db.rollback()
+        raise

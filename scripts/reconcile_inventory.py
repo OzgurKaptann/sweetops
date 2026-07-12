@@ -14,6 +14,24 @@ The summary is a fast-query mirror; the ledger and the order lines are the
 sources of truth it is derived from. If they disagree, something wrote stock
 outside the inventory service and the summary can no longer be trusted.
 
+...and, since the transfer workflow, a fourth check that is about PAIRS of rows
+rather than totals:
+
+    4. TRANSFER PAIRING every completed transfer has exactly one TRANSFER_OUT in
+                        its source store and exactly one TRANSFER_IN in its
+                        destination store, for its ingredient and its quantity
+
+A transfer's two legs are ordinary ledger deltas, so check 1 already accounts for
+them store by store: the outbound leg lowers the source's on-hand, the inbound
+leg raises the destination's, and each store reconciles on its own. What check 1
+cannot see is a HALF transfer. Stock that left Kadıköy and arrived nowhere leaves
+Kadıköy's ledger and summary in perfect agreement with each other — both are
+simply 2 kg short of physical reality, and nothing in a per-store total is wrong.
+Only comparing the transfer against its legs finds it. The database refuses to
+create one (a deferred constraint trigger checks the pairing at COMMIT), so this
+check is here to catch what got in some OTHER way: a manual SQL edit, a restore
+from an inconsistent backup, a future migration bug.
+
 Why the store is part of the grain
 ----------------------------------
 Reconciling across stores would be worse than not reconciling at all. Suppose
@@ -151,6 +169,120 @@ def reconcile(
     return results
 
 
+def reconcile_transfers(
+    store_id: int | None = None,
+    ingredient_id: int | None = None,
+) -> list[dict]:
+    """
+    Return one row per BROKEN transfer — a transfer whose two legs do not match it.
+
+    A healthy transfer produces exactly two ledger rows:
+
+        TRANSFER_OUT  in source_store_id       on_hand -quantity, reserved 0
+        TRANSFER_IN   in destination_store_id  on_hand +quantity, reserved 0
+
+    both for the transfer's ingredient and its quantity. Anything else is a
+    transfer that cannot be trusted, and this counts each side independently so
+    the report can say WHICH half is wrong rather than merely that something is:
+
+        out_count = 0  the stock left nowhere — the source never gave it up
+        in_count  = 0  the stock arrived nowhere — it left the source and vanished
+        out/in > 1     the same shipment was posted twice on one side
+
+    A transfer is included when EITHER of its stores matches ``--store-id``. A
+    one-sided transfer is exactly as much of a problem for the branch that did not
+    get its crate as for the branch that shipped it, so filtering to one store must
+    not hide it from the other.
+    """
+    db = SessionLocal()
+    try:
+        filters = []
+        params: dict = {}
+        if store_id is not None:
+            filters.append("(t.source_store_id = :sid OR t.destination_store_id = :sid)")
+            params["sid"] = store_id
+        if ingredient_id is not None:
+            filters.append("t.ingredient_id = :iid")
+            params["iid"] = ingredient_id
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+        rows = db.execute(
+            text(
+                f"""
+                SELECT
+                    t.id                   AS transfer_id,
+                    t.source_store_id      AS source_store_id,
+                    t.destination_store_id AS destination_store_id,
+                    t.ingredient_id        AS ingredient_id,
+                    i.name                 AS ingredient_name,
+                    t.quantity             AS quantity,
+                    t.unit                 AS unit,
+                    t.status               AS status,
+                    COALESCE((
+                        SELECT COUNT(*)
+                        FROM ingredient_stock_movements m
+                        WHERE m.transfer_id             = t.id
+                          AND m.movement_type           = 'TRANSFER_OUT'
+                          AND m.store_id                = t.source_store_id
+                          AND m.ingredient_id           = t.ingredient_id
+                          AND m.quantity                = t.quantity
+                          AND m.quantity_delta_on_hand  = -t.quantity
+                          AND m.quantity_delta_reserved = 0
+                    ), 0)                  AS out_count,
+                    COALESCE((
+                        SELECT COUNT(*)
+                        FROM ingredient_stock_movements m
+                        WHERE m.transfer_id             = t.id
+                          AND m.movement_type           = 'TRANSFER_IN'
+                          AND m.store_id                = t.destination_store_id
+                          AND m.ingredient_id           = t.ingredient_id
+                          AND m.quantity                = t.quantity
+                          AND m.quantity_delta_on_hand  = t.quantity
+                          AND m.quantity_delta_reserved = 0
+                    ), 0)                  AS in_count
+                FROM inventory_transfers t
+                JOIN ingredients i ON i.id = t.ingredient_id
+                {where}
+                ORDER BY t.id
+                """
+            ),
+            params,
+        ).fetchall()
+    finally:
+        db.close()
+
+    results: list[dict] = []
+    for r in rows:
+        out_count = int(r.out_count)
+        in_count = int(r.in_count)
+        if out_count == 1 and in_count == 1:
+            continue  # healthy — every leg present, matching and correctly signed
+        results.append({
+            "transfer_id": r.transfer_id,
+            "source_store_id": r.source_store_id,
+            "destination_store_id": r.destination_store_id,
+            "ingredient_id": r.ingredient_id,
+            "ingredient_name": r.ingredient_name,
+            "quantity": str(_q3(r.quantity)),
+            "unit": r.unit,
+            "status": r.status,
+            "transfer_out_movements": out_count,
+            "transfer_in_movements": in_count,
+            "issue": _transfer_issue(out_count, in_count),
+        })
+    return results
+
+
+def _transfer_issue(out_count: int, in_count: int) -> str:
+    if out_count == 0 and in_count == 0:
+        return "no ledger movements at all"
+    if out_count == 0:
+        return "missing TRANSFER_OUT — destination gained stock the source never gave up"
+    if in_count == 0:
+        return "missing TRANSFER_IN — stock left the source and arrived nowhere"
+    return f"duplicated legs (out={out_count}, in={in_count})"
+
+
 def _group_by_store(rows: list[dict]) -> dict[int, list[dict]]:
     grouped: dict[int, list[dict]] = {}
     for row in rows:
@@ -176,6 +308,12 @@ def main() -> int:
     mismatches = [r for r in rows if r["mismatch"]]
     by_store = _group_by_store(rows)
 
+    # Transfer pairing is a separate axis: a half-posted transfer leaves every
+    # per-store total internally consistent and is invisible above.
+    broken_transfers = reconcile_transfers(
+        store_id=args.store_id, ingredient_id=args.ingredient
+    )
+
     if args.json:
         # Per-store counts as well as the overall count: a caller must be able to
         # see that store 1 is clean and store 2 is not, without those two facts
@@ -183,6 +321,7 @@ def main() -> int:
         print(json.dumps({
             "checked_count": len(rows),
             "mismatch_count": len(mismatches),
+            "broken_transfer_count": len(broken_transfers),
             "stores": [
                 {
                     "store_id": sid,
@@ -195,14 +334,15 @@ def main() -> int:
                 }
                 for sid, store_rows in by_store.items()
             ],
+            "broken_transfers": broken_transfers,
         }, indent=2))
-        return 1 if mismatches else 0
+        return 1 if (mismatches or broken_transfers) else 0
 
     scope = "all stores" if args.store_id is None else f"store {args.store_id}"
     if args.ingredient is not None:
         scope += f", ingredient {args.ingredient}"
 
-    if not rows:
+    if not rows and not broken_transfers:
         print(f"Inventory reconciliation: no stock rows found ({scope}).")
         return 0
 
@@ -250,7 +390,28 @@ def main() -> int:
                     f"drift={r['reserved_mismatch_amount']} {r['unit']}"
                 )
 
-    return 1 if mismatches else 0
+    # ── Transfer pairing ──────────────────────────────────────────────────
+    if not broken_transfers:
+        print(
+            f"\n  transfers: every completed transfer has exactly one TRANSFER_OUT "
+            f"and one TRANSFER_IN matching it ({scope})."
+        )
+    else:
+        print(f"\n  BROKEN TRANSFERS ({len(broken_transfers)}):")
+        for t in broken_transfers:
+            print(
+                f"    transfer {t['transfer_id']}: "
+                f"store {t['source_store_id']} → {t['destination_store_id']}, "
+                f"ingredient {t['ingredient_id']} ({t['ingredient_name']}), "
+                f"{t['quantity']} {t['unit']}"
+            )
+            print(
+                f"      {t['issue']} "
+                f"(TRANSFER_OUT rows={t['transfer_out_movements']}, "
+                f"TRANSFER_IN rows={t['transfer_in_movements']})"
+            )
+
+    return 1 if (mismatches or broken_transfers) else 0
 
 
 if __name__ == "__main__":

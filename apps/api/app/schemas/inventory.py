@@ -89,6 +89,90 @@ class WasteRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class TransferRequest(BaseModel):
+    """
+    Ship stock from the caller's own store to another store.
+
+    ``extra="forbid"``, so this schema does not merely IGNORE a smuggled
+    ``source_store_id`` / ``actor_user_id`` / ``movement_type`` /
+    ``quantity_delta_on_hand`` / ``idempotency_key_hash`` — it REJECTS the whole
+    request with a 422. Silently ignoring them would leave a client believing it
+    had shipped Store B's chocolate and cheerfully told so. The source store comes
+    from the authenticated session and nowhere else; there is deliberately no
+    field here to set it.
+
+    ``destination_store_id`` IS client-supplied, because only the manager knows
+    which branch the van is going to — and it is validated server-side: the store
+    must exist and must not be the source.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    destination_store_id: int
+    ingredient_id: int
+    quantity: Decimal = Field(gt=0)
+    reason: str = Field(min_length=1, max_length=500)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class TransferReceipt(BaseModel):
+    """
+    Result of a transfer: the business event, and the id of each of its two legs.
+
+    Neither the raw Idempotency-Key nor the request hash is ever exposed — they
+    are stored only as SHA-256 digests, and echoing either back would hand a
+    client a replay token.
+    """
+    transfer_id: int
+    source_store_id: int
+    destination_store_id: int
+    ingredient_id: int
+    ingredient_name: Optional[str] = None
+    quantity: Decimal
+    unit: str
+    status: str
+    reason: str
+    note: Optional[str] = None
+    initiated_by_user_id: int
+    source_movement_id: int
+    destination_movement_id: int
+    # Post-transfer stock in the SOURCE store — the branch the caller is
+    # accountable for. The destination's shelf is not the caller's business.
+    source_on_hand_quantity: Decimal
+    source_reserved_quantity: Decimal
+    source_available_quantity: Decimal
+    created_at: datetime
+    idempotent_replay: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TransferItem(BaseModel):
+    """One transfer as it appears in a list — inbound or outbound."""
+    transfer_id: int
+    source_store_id: int
+    destination_store_id: int
+    ingredient_id: int
+    ingredient_name: Optional[str] = None
+    quantity: Decimal
+    unit: str
+    status: str
+    reason: str
+    note: Optional[str] = None
+    initiated_by_user_id: int
+    # Which side of this transfer the CALLER's store is on. A manager reading the
+    # list needs to know whether the crate left or arrived, and the raw store ids
+    # alone make that a mental subtraction.
+    direction: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TransferListResponse(BaseModel):
+    total: int
+    items: list[TransferItem]
+
+
 class MovementReceipt(BaseModel):
     """Result of a manual stock command, including the resulting stock state.
 
