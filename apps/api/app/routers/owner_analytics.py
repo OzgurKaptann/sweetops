@@ -11,13 +11,32 @@ from app.schemas.owner_analytics import (
 )
 from app.services import owner_analytics_service as service
 from app.services.auth_service import CurrentStaff
+from app.core import messages
 from app.services.decision_engine import apply_decision_action, get_owner_decisions
-from app.services.inventory_guard import assert_single_operational_store
 from app.services.operational_context_service import compute_operational_context, context_to_dict
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock
 
 router = APIRouter(prefix="/owner", tags=["Owner Analytics"])
+
+
+def _require_store(staff: CurrentStaff) -> int:
+    """
+    The owner's own store, for the inventory-derived views.
+
+    Physical stock belongs to a branch, so an owner account with no branch has
+    no stock to be shown. Refusing is the honest answer — the alternative would
+    be to invent a chain-wide total that no single manager can act on.
+    """
+    if staff.store_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "no_store_assigned",
+                "message": messages.INVENTORY_NO_STORE_ASSIGNED,
+            },
+        )
+    return staff.store_id
 
 
 @router.get("/kpis", response_model=KPIsResponse)
@@ -135,10 +154,13 @@ def get_stock_status(
     existing owner-web contract does not break; new clients should read the
     explicit fields.
 
-    Inventory is global in the current schema, so this fails closed with a
-    Turkish error when more than one operational store exists.
+    Scope is the authenticated owner/manager's OWN store. A Store A owner sees
+    Store A's shelves and nothing else; there is no chain-wide roll-up and no
+    store_id parameter to widen it with. This no longer fails closed just
+    because a second branch exists — that was a symptom of global stock, and the
+    stock is not global any more.
     """
-    assert_single_operational_store(db)
+    store_id = _require_store(staff)
 
     stocks = db.query(
         Ingredient.id,
@@ -150,7 +172,9 @@ def get_stock_status(
         IngredientStock.available_quantity,
         IngredientStock.reorder_level,
     ).join(
-        IngredientStock, IngredientStock.ingredient_id == Ingredient.id
+        IngredientStock,
+        (IngredientStock.ingredient_id == Ingredient.id)
+        & (IngredientStock.store_id == store_id),
     ).filter(
         Ingredient.is_active == True
     ).all()

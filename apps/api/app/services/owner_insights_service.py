@@ -20,8 +20,11 @@ def fetch_critical_alerts(db: Session, store_id: int):
     Low stock alerts with estimated lost revenue.
     If an ingredient runs out, how much ₺/day does the owner lose?
 
-    Demand is derived from this store's orders; stock levels come from the
-    global inventory tables (see inventory_guard fail-closed rule).
+    Demand and stock are both this store's. That pairing is the whole point: the
+    alert is "at your current burn rate, YOUR shelf runs dry in N days", and it
+    is meaningless — quietly, plausibly meaningless — if the numerator and the
+    denominator come from different branches. The stock join is therefore ON
+    (ingredient, store), not on ingredient alone.
     """
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
@@ -47,7 +50,9 @@ def fetch_critical_alerts(db: Session, store_id: int):
         JOIN order_items it ON oi.order_item_id = it.id
         JOIN orders o ON it.order_id = o.id
         JOIN ingredients i ON oi.ingredient_id = i.id
-        LEFT JOIN ingredient_stock s ON s.ingredient_id = i.id
+        LEFT JOIN ingredient_stock s
+               ON s.ingredient_id = i.id
+              AND s.store_id      = :store_id
         WHERE o.created_at >= :since
           AND o.store_id = :store_id
           AND o.status IN ('DELIVERED', 'READY', 'IN_PREP', 'NEW')

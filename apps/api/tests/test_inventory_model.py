@@ -32,7 +32,12 @@ from app.models.ingredient_stock import (
     IngredientStockMovement,
     OrderInventoryLine,
 )
-from tests.conftest import _inventory_maintenance, cleanup_ingredient, make_ingredient
+from tests.conftest import (
+    DEFAULT_STORE_ID,
+    _inventory_maintenance,
+    cleanup_ingredient,
+    make_ingredient,
+)
 
 _DB_REJECTS = (IntegrityError, DataError, ProgrammingError)
 
@@ -136,8 +141,17 @@ class TestStockSummaryConstraints:
 # ---------------------------------------------------------------------------
 
 def _insert_movement(db, ing_id: int, **overrides) -> None:
-    """Insert a raw movement row, bypassing the service layer."""
+    """
+    Insert a raw movement row, bypassing the service layer.
+
+    ``store`` defaults to the suite's store, so the constraint tests below read
+    unchanged. Passing a different store is how the cross-store tests prove the
+    composite foreign keys reject a ledger row that tries to straddle branches —
+    and they do it in raw SQL precisely because the point is that the DATABASE
+    refuses, not that the service politely declines.
+    """
     params = {
+        "store_id": DEFAULT_STORE_ID,
         "ingredient_id": ing_id,
         "movement_type": "PURCHASE_RECEIPT",
         "quantity": Decimal("5.000"),
@@ -153,11 +167,11 @@ def _insert_movement(db, ing_id: int, **overrides) -> None:
         text(
             """
             INSERT INTO ingredient_stock_movements (
-                ingredient_id, movement_type, quantity,
+                store_id, ingredient_id, movement_type, quantity,
                 quantity_delta_on_hand, quantity_delta_reserved,
                 unit, reason, actor_user_id, legacy_backfill
             ) VALUES (
-                :ingredient_id, :movement_type, :quantity,
+                :store_id, :ingredient_id, :movement_type, :quantity,
                 :delta_on_hand, :delta_reserved,
                 :unit, :reason, :actor, :legacy
             )

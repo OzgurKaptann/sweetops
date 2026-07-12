@@ -6,6 +6,7 @@ from sqlalchemy import (
     DateTime,
     Numeric,
     CheckConstraint,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -58,6 +59,11 @@ class Order(Base):
             "refund_status IN ('NONE','PARTIALLY_REFUNDED','REFUNDED')",
             name="ck_order_refund_status_domain",
         ),
+        # Redundant given the primary key, but PostgreSQL requires a unique
+        # constraint on exactly the referenced pair. It is what lets inventory
+        # rows carry a composite FK to (store_id, order_id) and so be structurally
+        # unable to attach an order to another store's stock.
+        UniqueConstraint("store_id", "id", name="uq_orders_store_id"),
     )
 
     store = relationship("Store", back_populates="orders")

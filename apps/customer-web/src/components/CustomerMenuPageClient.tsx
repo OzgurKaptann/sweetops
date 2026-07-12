@@ -403,19 +403,21 @@ export default function CustomerMenuPageClient() {
     };
   }, [qrToken, tokenAcquired]);
 
-  // Debounced upsell fetch when selection changes
+  // Debounced upsell fetch when selection changes. The token goes with it:
+  // suggestions are filtered by in-stock, and stock belongs to this table's
+  // store, so there is nothing to suggest until we know which branch we are in.
   useEffect(() => {
-    if (selected.size < 2) {
+    if (selected.size < 2 || !qrToken) {
       setUpsell([]);
       return;
     }
     if (upsellTimer.current) clearTimeout(upsellTimer.current);
     upsellTimer.current = setTimeout(() => {
-      fetchUpsell(Array.from(selected))
+      fetchUpsell(qrToken, Array.from(selected))
         .then((r) => setUpsell(r.suggestions))
         .catch(() => {});
     }, 400);
-  }, [selected]);
+  }, [selected, qrToken]);
 
   const applyCombo = useCallback(
     (ids: number[], label: string) => {

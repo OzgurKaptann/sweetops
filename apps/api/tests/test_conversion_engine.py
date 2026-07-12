@@ -36,7 +36,12 @@ from app.services.conversion_engine import (
     enrich_menu,
     validate_ingredient_selection,
 )
-from tests.conftest import cleanup_ingredient, make_ingredient, order_payload
+from tests.conftest import (
+    DEFAULT_STORE_ID,
+    cleanup_ingredient,
+    make_ingredient,
+    order_payload,
+)
 
 client = TestClient(app)
 
@@ -71,6 +76,9 @@ def _make_full_ingredient(
     db.add(ing)
     db.flush()
     stock = IngredientStock(
+        # Stock is physical, so it belongs to a store. These conversion tests are
+        # single-store: catalog + stock both live in the suite's default store.
+        store_id=DEFAULT_STORE_ID,
         ingredient_id=ing.id,
         on_hand_quantity=Decimal(str(on_hand)),
         unit="g",
@@ -482,7 +490,7 @@ class TestMenuRanking:
 
 class TestUpsell:
     def test_no_selection_returns_empty(self, db):
-        result = compute_upsell(db, [])
+        result = compute_upsell(db, DEFAULT_STORE_ID, [])
         assert result["suggestions"] == []
         assert result["based_on_ingredient_ids"] == []
 
@@ -496,7 +504,7 @@ class TestUpsell:
         order_ids = [_make_order_with_ingredients(db, [sel.id, sug.id]).id for _ in range(4)]
         order_ids += [_make_order_with_ingredients(db, [sel.id, other.id]).id for _ in range(2)]
 
-        result = compute_upsell(db, [sel.id])
+        result = compute_upsell(db, DEFAULT_STORE_ID, [sel.id])
         suggested_ids = [s["ingredient_id"] for s in result["suggestions"]]
 
         assert sug.id in suggested_ids, "Frequent in-stock combo should be suggested"
@@ -519,7 +527,7 @@ class TestUpsell:
             for _ in range(2):
                 order_ids.append(_make_order_with_ingredients(db, [base.id, other.id]).id)
 
-        result = compute_upsell(db, [base.id])
+        result = compute_upsell(db, DEFAULT_STORE_ID, [base.id])
         assert len(result["suggestions"]) <= MAX_UPSELL_SUGGESTIONS
 
         for oid in order_ids:
@@ -534,7 +542,7 @@ class TestUpsell:
         sug, _ = _make_full_ingredient(db, name="UpsellStruct_sug", category="Test_ustruct")
         oid = _make_order_with_ingredients(db, [sel.id, sug.id]).id
 
-        result = compute_upsell(db, [sel.id])
+        result = compute_upsell(db, DEFAULT_STORE_ID, [sel.id])
         for s in result["suggestions"]:
             for field in ("ingredient_id", "ingredient_name", "category", "price",
                           "reason", "combo_count", "stock_status"):
@@ -547,7 +555,7 @@ class TestUpsell:
     def test_no_combos_returns_empty(self, db):
         """With no order history, suggestions should be empty."""
         ing, _ = _make_full_ingredient(db, name="UpsellNoCombos", category="Test_nocombo")
-        result = compute_upsell(db, [ing.id])
+        result = compute_upsell(db, DEFAULT_STORE_ID, [ing.id])
         assert result["suggestions"] == []
         _cleanup_ing_direct(db, ing.id)
 
@@ -561,7 +569,7 @@ class TestValidateSelection:
         ing_a, _ = _make_full_ingredient(db, name="ValA", on_hand=50.0)
         ing_b, _ = _make_full_ingredient(db, name="ValB", on_hand=50.0)
 
-        result = validate_ingredient_selection(db, [ing_a.id, ing_b.id])
+        result = validate_ingredient_selection(db, DEFAULT_STORE_ID, [ing_a.id, ing_b.id])
         assert set(result["valid_ids"]) == {ing_a.id, ing_b.id}
         assert result["removed"] == []
         assert result["price_delta"] == 0.0
@@ -573,7 +581,7 @@ class TestValidateSelection:
         good, _ = _make_full_ingredient(db, name="ValGood", on_hand=50.0, price=10.0)
         oos, _  = _make_full_ingredient(db, name="ValOOS", on_hand=0.0, price=8.0)
 
-        result = validate_ingredient_selection(db, [good.id, oos.id])
+        result = validate_ingredient_selection(db, DEFAULT_STORE_ID, [good.id, oos.id])
         assert good.id in result["valid_ids"]
         assert oos.id not in result["valid_ids"]
         assert len(result["removed"]) == 1
@@ -585,7 +593,7 @@ class TestValidateSelection:
         _cleanup_ing_direct(db, oos.id)
 
     def test_unknown_id_removed_with_not_found_reason(self, db):
-        result = validate_ingredient_selection(db, [999999])
+        result = validate_ingredient_selection(db, DEFAULT_STORE_ID, [999999])
         assert 999999 not in result["valid_ids"]
         assert result["removed"][0]["reason"] == "not_found"
         assert result["removed"][0]["ingredient_name"] is None
@@ -597,7 +605,7 @@ class TestValidateSelection:
         alt, _  = _make_full_ingredient(db, name="ValAlt", category="Cat_val",
                                          price=11.0, on_hand=50.0)
 
-        result = validate_ingredient_selection(db, [oos.id])
+        result = validate_ingredient_selection(db, DEFAULT_STORE_ID, [oos.id])
         removed = result["removed"][0]
         assert removed["alternative"] is not None
         assert removed["alternative"]["ingredient_id"] == alt.id
@@ -609,7 +617,7 @@ class TestValidateSelection:
         ing_a, _ = _make_full_ingredient(db, name="PBrkA", price=8.0, on_hand=50.0)
         ing_b, _ = _make_full_ingredient(db, name="PBrkB", price=12.0, on_hand=50.0)
 
-        result = validate_ingredient_selection(db, [ing_a.id, ing_b.id])
+        result = validate_ingredient_selection(db, DEFAULT_STORE_ID, [ing_a.id, ing_b.id])
         assert str(ing_a.id) in result["price_breakdown"]
         assert str(ing_b.id) in result["price_breakdown"]
         assert result["price_breakdown"][str(ing_a.id)] == 8.0
@@ -619,7 +627,7 @@ class TestValidateSelection:
         _cleanup_ing_direct(db, ing_b.id)
 
     def test_empty_selection(self, db):
-        result = validate_ingredient_selection(db, [])
+        result = validate_ingredient_selection(db, DEFAULT_STORE_ID, [])
         assert result["valid_ids"] == []
         assert result["removed"] == []
         assert result["price_delta"] == 0.0
@@ -630,7 +638,7 @@ class TestValidateSelection:
         oos_a, _ = _make_full_ingredient(db, name="OOS_Multi_A", price=10.0, on_hand=0.0)
         oos_b, _ = _make_full_ingredient(db, name="OOS_Multi_B", price=5.0, on_hand=0.0)
 
-        result = validate_ingredient_selection(db, [oos_a.id, oos_b.id])
+        result = validate_ingredient_selection(db, DEFAULT_STORE_ID, [oos_a.id, oos_b.id])
         assert result["price_delta"] == -15.0
 
         _cleanup_ing_direct(db, oos_a.id)

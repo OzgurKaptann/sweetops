@@ -157,11 +157,18 @@ def create_order(
             required[ing.id] = required.get(ing.id, Decimal("0")) + consumed
 
     # ── 4. Availability validation — SELECT … FOR UPDATE (row-level lock) ─
-    # Every ingredient_stock row is locked in ascending ingredient_id order, so
-    # concurrent orders queue deterministically instead of deadlocking. The gate
-    # is AVAILABLE (on_hand - reserved), never on_hand: stock already promised
-    # to another table's accepted order is not stock this order may claim.
-    stock_rows = inventory_service.lock_stock_rows(db, required.keys())
+    # Locks THIS STORE's ingredient_stock rows, in ascending ingredient_id order,
+    # so concurrent orders queue deterministically instead of deadlocking. The
+    # gate is AVAILABLE (on_hand - reserved), never on_hand: stock already
+    # promised to another table's accepted order is not stock this order may
+    # claim.
+    #
+    # `store_id` is the one derived from the QR token above — never from the
+    # request body. That single argument is what stops a Kadıköy QR order from
+    # reserving, or even reading, Beşiktaş's chocolate: the two branches hold
+    # separate stock rows and separate locks, and the same ingredient can be
+    # plentiful in one and sold out in the other.
+    stock_rows = inventory_service.lock_stock_rows(db, store_id, required.keys())
     try:
         inventory_service.check_availability(stock_rows, required, ingredients_by_id)
     except InsufficientStock as short:

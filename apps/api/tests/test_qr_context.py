@@ -290,7 +290,7 @@ def test_missing_qr_does_not_default_to_store_menu(client):
 
 def test_valid_qr_creates_order_with_server_derived_context(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"), store_id=store.id)
     try:
         payload, headers = qr_order_payload(ing.id, raw, idem_key=uuid.uuid4().hex)
         r = client.post("/public/orders/", json=payload, headers=headers)
@@ -305,7 +305,7 @@ def test_valid_qr_creates_order_with_server_derived_context(client, db):
 
 def test_client_supplied_conflicting_ids_are_ignored(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"), store_id=store.id)
     try:
         payload, headers = qr_order_payload(ing.id, raw, idem_key=uuid.uuid4().hex)
         # Attacker injects conflicting numeric ids alongside a valid token.
@@ -323,7 +323,7 @@ def test_client_supplied_conflicting_ids_are_ignored(client, db):
 
 def test_revoked_qr_cannot_create_order(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"), store_id=store.id)
     try:
         svc.revoke_by_id(db, record.id)
         before = db.query(Order).count()
@@ -359,9 +359,11 @@ def test_invalid_qr_creates_no_order_and_no_stock_movement(client, db):
 
 def test_valid_qr_preserves_quantity_accounting(client, db):
     store, table, record, raw = make_store_table_token(db)
-    # standard_quantity 10 × selected 1 × item 1 = 10 consumed.
+    # standard_quantity 10 × selected 1 × item 1 = 10 consumed — reserved from
+    # the QR table's OWN store, which is the store that must be stocked.
     ing, stock = make_ingredient(
-        db, on_hand=Decimal("50.00"), standard_quantity=Decimal("10.00")
+        db, on_hand=Decimal("50.00"), standard_quantity=Decimal("10.00"),
+        store_id=store.id,
     )
     try:
         before = db.get(IngredientStock, stock.id).available_quantity
@@ -403,7 +405,7 @@ def test_valid_qr_preserves_stock_atomicity(client, db):
 
 def test_valid_qr_preserves_idempotent_retry(client, db):
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"), store_id=store.id)
     try:
         idem = uuid.uuid4().hex
         payload, headers = qr_order_payload(ing.id, raw, idem_key=idem)
@@ -422,7 +424,7 @@ def test_order_requires_qr_when_legacy_disabled(client, db):
     # Production default: legacy off → a tokenless order is rejected (no
     # trusting client store_id). scenario supporting acceptance #1/#11.
     store, table, record, raw = make_store_table_token(db)
-    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
+    ing, _ = make_ingredient(db, on_hand=Decimal("50.00"), store_id=store.id)
     original = settings.ALLOW_LEGACY_ORDER_CONTEXT
     settings.ALLOW_LEGACY_ORDER_CONTEXT = False
     try:

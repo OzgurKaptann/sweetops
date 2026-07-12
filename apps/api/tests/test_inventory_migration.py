@@ -109,7 +109,17 @@ def restore_head(db):
 # ---------------------------------------------------------------------------
 
 def test_alembic_has_a_single_head():
-    assert _REVISION in _single_head()
+    # _single_head() already asserts that exactly one head exists — that is the
+    # invariant. This migration is no longer the head itself (store-scoped
+    # inventory, e2c9a4b16d38, now sits on top of it), so assert it is an
+    # ancestor of head rather than head.
+    _single_head()
+    engine.dispose()
+    history = subprocess.run(
+        ["alembic", "history"], cwd=str(_API_DIR), capture_output=True, text=True
+    )
+    assert history.returncode == 0, history.stderr
+    assert _REVISION in history.stdout
 
 
 def test_schema_objects_exist_at_head():
@@ -210,7 +220,11 @@ def test_downgrade_preserves_orders_and_payments(restore_head, db, client, make_
         settlements_before = _scalar("SELECT count(*) FROM payment_settlements")
 
         # ── Downgrade ────────────────────────────────────────────────────────
-        _alembic_after_releasing(db, "downgrade", "-1")
+        # Target _PREVIOUS explicitly rather than "-1": store-scoped inventory
+        # (e2c9a4b16d38) now sits on top of this migration, so "-1" would only
+        # peel that off. What this test is about is rolling the whole inventory
+        # lifecycle back, which means unwinding both.
+        _alembic_after_releasing(db, "downgrade", _PREVIOUS)
 
         assert _scalar("SELECT version_num FROM alembic_version") == _PREVIOUS
         # Inventory schema is gone...
@@ -255,7 +269,9 @@ def test_downgrade_preserves_orders_and_payments(restore_head, db, client, make_
         assert _scalar(
             "SELECT paid_amount FROM orders WHERE id = :i", i=oid
         ) == order_total
-        assert _single_head().startswith(_REVISION)
+        # Still exactly one head after the round trip (the head is now the
+        # store-scoped revision that sits on top of this one).
+        _single_head()
     finally:
         # The re-upgrade rebuilt the schema, but the order's inventory lines were
         # dropped with the table, so clean up through the order graph.
@@ -272,14 +288,18 @@ def test_backfill_leaves_ledger_reconciled(restore_head, db):
     its ledger deltas — otherwise reconciliation would report a false drift on
     every ingredient that existed before the lifecycle, on day one.
     """
+    # Keyed on (store, ingredient) now that stock is store-scoped: summing a
+    # store's summary against every store's movements would be exactly the
+    # cross-store pooling this whole refactor exists to prevent.
     drifted = _scalar(
         """
         SELECT count(*) FROM ingredient_stock s
         WHERE s.on_hand_quantity <> COALESCE((
             SELECT SUM(m.quantity_delta_on_hand)
             FROM ingredient_stock_movements m
-            WHERE m.ingredient_id = s.ingredient_id
+            WHERE m.store_id      = s.store_id
+              AND m.ingredient_id = s.ingredient_id
         ), 0)
         """
     )
-    assert drifted == 0, f"{drifted} ingredient(s) do not reconcile after backfill"
+    assert drifted == 0, f"{drifted} (store, ingredient) row(s) do not reconcile after backfill"

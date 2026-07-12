@@ -37,6 +37,7 @@ from app.services.decision_engine import (
     get_owner_decisions,
 )
 from tests.conftest import (
+    DEFAULT_STORE_ID,
     _inventory_maintenance,
     cleanup_ingredient,
     make_ingredient,
@@ -90,6 +91,7 @@ def _add_movement(
         raise AssertionError(f"unsupported movement_type for this helper: {movement_type}")
 
     mv = IngredientStockMovement(
+        store_id=DEFAULT_STORE_ID,
         ingredient_id=ingredient_id,
         movement_type=movement_type,
         quantity=qty,
@@ -430,7 +432,7 @@ class TestDecisionOrdering:
 class TestStockRiskSignals:
     def test_zero_stock_is_high_severity(self, db):
         ing, _ = make_ingredient(db, on_hand=Decimal("0.00"))
-        signals = _stock_risk_signals(db)
+        signals = _stock_risk_signals(db, DEFAULT_STORE_ID)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
         assert match is not None
         assert match["severity"] == "high"
@@ -441,7 +443,7 @@ class TestStockRiskSignals:
     def test_high_velocity_high_severity(self, db):
         ing, _ = make_ingredient(db, on_hand=Decimal("5.00"))
         _add_movement(db, ing.id, -24.0, hours_ago=12)  # 1g/h → stockout 5h < 6h
-        signals = _stock_risk_signals(db)
+        signals = _stock_risk_signals(db, DEFAULT_STORE_ID)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
         assert match is not None
         assert match["severity"] == "high"
@@ -451,7 +453,7 @@ class TestStockRiskSignals:
 
     def test_healthy_stock_not_flagged(self, db):
         ing, _ = make_ingredient(db, on_hand=Decimal("100.00"))
-        signals = _stock_risk_signals(db)
+        signals = _stock_risk_signals(db, DEFAULT_STORE_ID)
         flagged = {s["data"]["ingredient_id"] for s in signals}
         assert ing.id not in flagged
         cleanup_ingredient(db, ing.id)
@@ -459,7 +461,7 @@ class TestStockRiskSignals:
     def test_old_movements_not_counted(self, db):
         ing, _ = make_ingredient(db, on_hand=Decimal("5.00"))
         _add_movement(db, ing.id, -48.0, hours_ago=25)  # outside 24h window
-        signals = _stock_risk_signals(db)
+        signals = _stock_risk_signals(db, DEFAULT_STORE_ID)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
         assert match is not None
         assert match["data"]["velocity_per_hour"] == 0.0
@@ -471,7 +473,7 @@ class TestSlowMovingSignals:
     def test_no_demand_flags_ingredient(self, db):
         ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         _cleanup_movements(db, ing.id)
-        signals = _slow_moving_signals(db)
+        signals = _slow_moving_signals(db, DEFAULT_STORE_ID)
         match = next((s for s in signals if s["data"]["ingredient_id"] == ing.id), None)
         assert match is not None
         assert match["type"] == "slow_moving"
@@ -481,7 +483,7 @@ class TestSlowMovingSignals:
     def test_recent_demand_clears_flag(self, db):
         ing, _ = make_ingredient(db, on_hand=Decimal("50.00"))
         _add_movement(db, ing.id, -5.0, hours_ago=2)
-        signals = _slow_moving_signals(db)
+        signals = _slow_moving_signals(db, DEFAULT_STORE_ID)
         flagged = {s["data"]["ingredient_id"] for s in signals}
         assert ing.id not in flagged
         _cleanup_movements(db, ing.id)
@@ -621,9 +623,10 @@ class TestSignalsEvaluatedContract:
 
         baseline = get_owner_decisions(db, 1)["signals_evaluated"]
 
-        # Force the highest-volume realtime evaluators to emit nothing.
-        monkeypatch.setattr(de, "_stock_risk_signals", lambda db: [])
-        monkeypatch.setattr(de, "_slow_moving_signals", lambda db: [])
+        # Force the highest-volume realtime evaluators to emit nothing. Every
+        # evaluator now takes (db, store_id) — including the inventory ones.
+        monkeypatch.setattr(de, "_stock_risk_signals", lambda db, store_id: [])
+        monkeypatch.setattr(de, "_slow_moving_signals", lambda db, store_id: [])
         monkeypatch.setattr(de, "_sla_risk_signals", lambda db, store_id: [])
 
         result = get_owner_decisions(db, 1)
@@ -631,37 +634,32 @@ class TestSignalsEvaluatedContract:
         # Independence is meaningful only if emissions really could have changed.
         assert isinstance(result["decisions"], list)
 
-    def test_multi_store_excludes_skipped_inventory_evaluators(self, db, make_store, make_staff):
+    def test_multi_store_still_runs_inventory_evaluators(self, db, make_store, make_staff):
         """
-        With a second operational store, the two global-inventory evaluators are
-        skipped (fail-closed) and must not be counted: only the four
-        store-scoped evaluators run.
-        """
-        from app.services.inventory_guard import is_single_operational_store
+        A second operational store must no longer cost an owner their stock
+        signals.
 
+        This is the exact inversion of the old fail-closed behaviour: inventory
+        was global, so stock_risk and slow_moving had to be SKIPPED whenever a
+        second store existed, dropping signals_evaluated from 6 to 4. Stock is
+        store-scoped now, so both evaluators run for every store and the count
+        stays 6 no matter how many branches are open.
+        """
         other = make_store()
-        # Two operational stores: staff anchored to store 1 and to the new store.
-        # (operational_store_count = distinct non-null User.store_id.)
         make_staff("OWNER", store_id=1)
         make_staff("KITCHEN", store_id=other.id)
-        assert is_single_operational_store(db) is False
 
-        result = get_owner_decisions(db, 1)
-        assert result["signals_evaluated"] == 4
-        # No decision in store 1's feed may originate from an inventory evaluator
-        # (stock_risk / slow_moving) while multi-store scoping is active.
-        types = {d["type"] for d in result["decisions"]}
-        assert "stock_risk" not in types
-        assert "slow_moving" not in types
+        assert get_owner_decisions(db, 1)["signals_evaluated"] == 6
+        assert get_owner_decisions(db, other.id)["signals_evaluated"] == 6
 
     def test_store_scoping_signals_evaluated_is_per_store(self, db, make_store, make_staff):
         """A request for another store returns the same evaluator-count contract."""
         other = make_store()
         make_staff("OWNER", store_id=1)
         make_staff("OWNER", store_id=other.id)
-        # Now multi-store: both store 1 and the other store see 4 evaluators.
-        assert get_owner_decisions(db, 1)["signals_evaluated"] == 4
-        assert get_owner_decisions(db, other.id)["signals_evaluated"] == 4
+        # All six evaluators are store-scoped, so every store sees all six.
+        assert get_owner_decisions(db, 1)["signals_evaluated"] == 6
+        assert get_owner_decisions(db, other.id)["signals_evaluated"] == 6
 
 
 # ---------------------------------------------------------------------------

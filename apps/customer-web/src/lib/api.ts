@@ -146,9 +146,26 @@ export async function fetchMenu(qrToken: string): Promise<EnrichedMenuResponse> 
   return res.json();
 }
 
-export async function fetchUpsell(ingredientIds: number[]): Promise<UpsellResponse> {
-  const params = ingredientIds.map((id) => `ingredient_ids=${id}`).join('&');
-  const res = await fetch(`${API_BASE}/public/menu/upsell?${params}`, { cache: 'no-store' });
+/**
+ * Upsell suggestions for the table's OWN store.
+ *
+ * Suggestions are filtered by what is actually in stock, and stock is physical:
+ * it belongs to one branch. So this posts the QR token (in the body, never the
+ * URL — same rule as `fetchMenu`) and the backend resolves the store from it.
+ * The ungated `GET /public/menu/upsell` has no store context and refuses once a
+ * second branch is open, which would silently kill upsell in exactly the
+ * multi-branch shops it matters most for.
+ */
+export async function fetchUpsell(
+  qrToken: string,
+  ingredientIds: number[],
+): Promise<UpsellResponse> {
+  const res = await fetch(`${API_BASE}/public/menu/upsell`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qr_token: qrToken, ingredient_ids: ingredientIds }),
+    cache: 'no-store',
+  });
   if (!res.ok) return { suggestions: [], based_on_ingredient_ids: ingredientIds };
   return res.json();
 }

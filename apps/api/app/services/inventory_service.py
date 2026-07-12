@@ -3,6 +3,13 @@ Inventory Service — the ONE place where physical stock moves.
 
 Guarantees
 ----------
+0. Every stock read and every stock write is scoped to exactly ONE store.
+   ``store_id`` is a required argument of every function here, and it is never
+   taken from a client: an order's store comes from its QR-derived
+   ``order.store_id``, and a manual command's store comes from the authenticated
+   staff session. Store A can neither see nor move Store B's stock, and the
+   composite foreign keys in app/models/ingredient_stock.py mean the database
+   refuses a cross-store row even if this module were wrong.
 1. Reservation ≠ consumption. Placing an order reserves ingredients; only the
    kitchen physically starting preparation consumes them. On-hand stock tracks
    the real shop, not the order book.
@@ -16,10 +23,12 @@ Guarantees
    ``consumed + released <= reserved``. Replays are therefore no-ops, not
    double mutations.
 4. Deterministic locking: stock rows are always locked FOR UPDATE in ascending
-   ingredient_id order, so multi-ingredient orders cannot deadlock each other.
+   ingredient_id order within a store, so multi-ingredient orders cannot
+   deadlock each other.
 5. Decimal end-to-end. Never binary floating point.
 6. Manual mutations require an authenticated actor, an idempotency key, and (for
-   waste and adjustments) a reason. Only hashes of the key/payload are stored.
+   waste and adjustments) a reason. Only hashes of the key/payload are stored,
+   and the key's uniqueness is per store.
 """
 from __future__ import annotations
 
@@ -125,15 +134,19 @@ def _conflict(message: str, error: str = "conflict") -> HTTPException:
 # ── Deterministic row locking ────────────────────────────────────────────────
 
 def lock_stock_rows(
-    db: Session, ingredient_ids: Iterable[int]
+    db: Session, store_id: int, ingredient_ids: Iterable[int]
 ) -> dict[int, IngredientStock]:
     """
-    Lock the stock rows for these ingredients FOR UPDATE, in ascending
+    Lock THIS STORE's stock rows for these ingredients FOR UPDATE, in ascending
     ingredient_id order.
 
-    The ordering is the whole point: two concurrent orders that both need
-    chocolate (id 3) and banana (id 7) always take id 3 first, so one waits on
-    the other instead of the two deadlocking head-to-head.
+    The store filter is not an optimisation — it is the isolation boundary. It
+    is the reason a Kadıköy order waits only on other Kadıköy orders, and the
+    reason it can never lock, read, or spend a gram of Beşiktaş's chocolate.
+
+    The ordering is the other half: two concurrent orders in the SAME store that
+    both need chocolate (id 3) and banana (id 7) always take id 3 first, so one
+    waits on the other instead of the two deadlocking head-to-head.
 
     populate_existing() overwrites any stale identity-map copy with the freshly
     locked row — without it a caller could validate availability against a value
@@ -145,7 +158,10 @@ def lock_stock_rows(
 
     rows = db.execute(
         select(IngredientStock)
-        .where(IngredientStock.ingredient_id.in_(ids))
+        .where(
+            IngredientStock.store_id == store_id,
+            IngredientStock.ingredient_id.in_(ids),
+        )
         .order_by(IngredientStock.ingredient_id)
         .with_for_update()
         .execution_options(populate_existing=True)
@@ -154,12 +170,24 @@ def lock_stock_rows(
     return {row.ingredient_id: row for row in rows}
 
 
-def _lock_order_lines(db: Session, order_id: int) -> list[OrderInventoryLine]:
-    """Lock an order's inventory lines FOR UPDATE, ordered by ingredient_id."""
+def _lock_order_lines(
+    db: Session, store_id: int, order_id: int
+) -> list[OrderInventoryLine]:
+    """
+    Lock an order's inventory lines FOR UPDATE, ordered by ingredient_id.
+
+    Filtered by store as well as order. An order belongs to exactly one store,
+    so this is belt-and-braces — but it means that even if a caller ever passed
+    a mismatched (store, order) pair, it would settle nothing rather than
+    settling another store's reservation.
+    """
     return list(
         db.execute(
             select(OrderInventoryLine)
-            .where(OrderInventoryLine.order_id == order_id)
+            .where(
+                OrderInventoryLine.store_id == store_id,
+                OrderInventoryLine.order_id == order_id,
+            )
             .order_by(OrderInventoryLine.ingredient_id, OrderInventoryLine.id)
             .with_for_update()
             .execution_options(populate_existing=True)
@@ -172,6 +200,7 @@ def _lock_order_lines(db: Session, order_id: int) -> list[OrderInventoryLine]:
 def _movement(
     db: Session,
     *,
+    store_id: int,
     ingredient_id: int,
     movement_type: str,
     quantity: Decimal,
@@ -187,6 +216,7 @@ def _movement(
     request_hash: str | None = None,
 ) -> IngredientStockMovement:
     row = IngredientStockMovement(
+        store_id=store_id,
         ingredient_id=ingredient_id,
         movement_type=movement_type,
         quantity=q3(quantity),
@@ -223,10 +253,17 @@ def check_availability(
     ingredients_by_id: dict[int, Ingredient],
 ) -> None:
     """
-    Reject the order unless every ingredient has enough AVAILABLE stock.
+    Reject the order unless every ingredient has enough AVAILABLE stock IN THIS
+    STORE.
 
-    Availability — not on-hand — is the gate. Batter already promised to the
-    order two tables over is not batter this order may have.
+    ``stock_rows`` must come from ``lock_stock_rows(db, store_id, …)``, so it
+    contains only this store's rows. Availability — not on-hand — is the gate:
+    batter already promised to the order two tables over is not batter this
+    order may have.
+
+    A missing row means this branch does not stock the ingredient at all, and
+    that is a shortage for this branch. It is never satisfied from another
+    store's shelf.
     """
     short: list[str] = []
     for ing_id, needed in required.items():
@@ -256,7 +293,13 @@ def reserve_for_order(
     Reserves only: reserved_quantity rises, on_hand_quantity is untouched. The
     caller must already hold the stock row locks (see lock_stock_rows) and must
     have validated availability.
+
+    The store is ``order.store_id`` — derived server-side from the QR token the
+    customer scanned, never from anything the client sent. It is stamped on the
+    inventory line and on every ledger row, so a Store A order can only ever
+    reserve Store A stock.
     """
+    store_id = order.store_id
     reserved_by_ingredient: dict[int, Decimal] = {}
 
     for order_item_id, ingredient_id, quantity in line_requirements:
@@ -266,6 +309,7 @@ def reserve_for_order(
         ing = ingredients_by_id[ingredient_id]
 
         line = OrderInventoryLine(
+            store_id=store_id,
             order_id=order.id,
             order_item_id=order_item_id,
             ingredient_id=ingredient_id,
@@ -277,6 +321,7 @@ def reserve_for_order(
 
         _movement(
             db,
+            store_id=store_id,
             ingredient_id=ingredient_id,
             movement_type=MOVEMENT_RESERVATION_CREATED,
             quantity=qty,
@@ -306,6 +351,7 @@ def reserve_for_order(
             actor_type="CUSTOMER",
             ip_address=ip_address,
             payload_after={
+                "store_id": store_id,
                 "order_id": order.id,
                 "reserved": {
                     str(k): str(v) for k, v in sorted(reserved_by_ingredient.items())
@@ -331,21 +377,28 @@ def consume_order(
     Exactly-once by construction: it consumes ``outstanding = reserved -
     consumed - released``, which is zero on any replay, so a second call is a
     no-op rather than a second deduction. Returns {ingredient_id: consumed}.
+
+    Store scope comes from ``order.store_id``, so the kitchen that starts an
+    order can only ever draw down the stock of the branch that order was placed
+    in — even though the kitchen staff's own session store is what authorised
+    the transition.
     """
-    lines = _lock_order_lines(db, order.id)
+    store_id = order.store_id
+    lines = _lock_order_lines(db, store_id, order.id)
     pending = [(ln, outstanding_reservation(ln)) for ln in lines]
     pending = [(ln, qty) for ln, qty in pending if qty > ZERO]
     if not pending:
         return {}
 
-    stock_rows = lock_stock_rows(db, [ln.ingredient_id for ln, _ in pending])
+    stock_rows = lock_stock_rows(db, store_id, [ln.ingredient_id for ln, _ in pending])
 
     consumed_by_ingredient: dict[int, Decimal] = {}
     for line, qty in pending:
         stock = stock_rows.get(line.ingredient_id)
         if stock is None:
-            # A stock row cannot vanish while an order reserves against it (FK +
-            # lock). Refuse rather than silently cook untracked stock.
+            # A stock row cannot vanish while an order reserves against it in
+            # this store (composite FK + lock). Refuse rather than silently cook
+            # untracked stock — and never fall back to another store's row.
             raise _conflict(
                 messages.INVENTORY_INGREDIENT_NOT_FOUND, error="stock_row_missing"
             )
@@ -356,6 +409,7 @@ def consume_order(
 
         _movement(
             db,
+            store_id=store_id,
             ingredient_id=line.ingredient_id,
             movement_type=MOVEMENT_CONSUMPTION,
             quantity=qty,
@@ -381,6 +435,7 @@ def consume_order(
         actor_id=str(actor_user_id) if actor_user_id is not None else None,
         ip_address=ip_address,
         payload_after={
+            "store_id": store_id,
             "order_id": order.id,
             "consumed": {
                 str(k): str(v) for k, v in sorted(consumed_by_ingredient.items())
@@ -388,8 +443,8 @@ def consume_order(
         },
     )
     logger.info(
-        "inventory_consumed order=%s ingredients=%s",
-        order.id, sorted(consumed_by_ingredient),
+        "inventory_consumed store=%s order=%s ingredients=%s",
+        store_id, order.id, sorted(consumed_by_ingredient),
     )
     return consumed_by_ingredient
 
@@ -412,14 +467,18 @@ def release_order_reservation(
     batter, and a cancellation cannot un-pour it. Returning usable stock is a
     deliberate, separate, actor-attributed RETURNED movement — never an implicit
     side effect of pressing cancel. Returns {ingredient_id: released}.
+
+    Store scope comes from ``order.store_id``: cancelling a Store A order gives
+    Store A its promised stock back, and touches nothing in Store B.
     """
-    lines = _lock_order_lines(db, order.id)
+    store_id = order.store_id
+    lines = _lock_order_lines(db, store_id, order.id)
     pending = [(ln, outstanding_reservation(ln)) for ln in lines]
     pending = [(ln, qty) for ln, qty in pending if qty > ZERO]
     if not pending:
         return {}
 
-    stock_rows = lock_stock_rows(db, [ln.ingredient_id for ln, _ in pending])
+    stock_rows = lock_stock_rows(db, store_id, [ln.ingredient_id for ln, _ in pending])
 
     released_by_ingredient: dict[int, Decimal] = {}
     for line, qty in pending:
@@ -434,6 +493,7 @@ def release_order_reservation(
 
         _movement(
             db,
+            store_id=store_id,
             ingredient_id=line.ingredient_id,
             movement_type=MOVEMENT_RESERVATION_RELEASED,
             quantity=qty,
@@ -459,6 +519,7 @@ def release_order_reservation(
         actor_id=str(actor_user_id) if actor_user_id is not None else None,
         ip_address=ip_address,
         payload_after={
+            "store_id": store_id,
             "order_id": order.id,
             "released": {
                 str(k): str(v) for k, v in sorted(released_by_ingredient.items())
@@ -466,8 +527,8 @@ def release_order_reservation(
         },
     )
     logger.info(
-        "inventory_reservation_released order=%s ingredients=%s",
-        order.id, sorted(released_by_ingredient),
+        "inventory_reservation_released store=%s order=%s ingredients=%s",
+        store_id, order.id, sorted(released_by_ingredient),
     )
     return released_by_ingredient
 
@@ -476,7 +537,18 @@ def release_order_reservation(
 # Manual operations (staff-driven, idempotent, audited)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _load_stock_for_update(db: Session, ingredient_id: int) -> tuple[Ingredient, IngredientStock]:
+def _load_stock_for_update(
+    db: Session, store_id: int, ingredient_id: int
+) -> tuple[Ingredient, IngredientStock]:
+    """
+    Load the catalog ingredient and lock THIS STORE's stock row for it.
+
+    The ingredient is catalog (global); the stock row is physical (store-scoped).
+    A store that has never stocked an ingredient has no row, and that is a 404
+    for that store — it is emphatically NOT a reason to reach for another
+    store's row. Stock is initialised for a store explicitly, through a purchase
+    receipt, an adjustment, or seed data.
+    """
     ingredient = db.get(Ingredient, ingredient_id)
     if ingredient is None or not ingredient.is_active:
         raise HTTPException(
@@ -486,14 +558,14 @@ def _load_stock_for_update(db: Session, ingredient_id: int) -> tuple[Ingredient,
                 "message": messages.INVENTORY_INGREDIENT_NOT_FOUND,
             },
         )
-    stock_rows = lock_stock_rows(db, [ingredient_id])
+    stock_rows = lock_stock_rows(db, store_id, [ingredient_id])
     stock = stock_rows.get(ingredient_id)
     if stock is None:
         raise HTTPException(
             status_code=404,
             detail={
-                "error": "ingredient_not_found",
-                "message": messages.INVENTORY_INGREDIENT_NOT_FOUND,
+                "error": "stock_not_configured",
+                "message": messages.INVENTORY_STOCK_NOT_CONFIGURED,
             },
         )
     return ingredient, stock
@@ -507,10 +579,23 @@ class MovementResult:
     replayed: bool
 
 
-def _find_movement_by_key(db: Session, key_hash: str) -> Optional[IngredientStockMovement]:
+def _find_movement_by_key(
+    db: Session, store_id: int, key_hash: str
+) -> Optional[IngredientStockMovement]:
+    """
+    Look up a previous manual movement by idempotency key WITHIN THIS STORE.
+
+    The store filter is load-bearing. Two branch managers working from the same
+    printed run-book will legitimately send the same Idempotency-Key; that is a
+    coincidence, not a replay. Without the store in the lookup, Beşiktaş's 5 kg
+    purchase receipt would return Kadıköy's receipt and quietly record no stock.
+    """
     return (
         db.query(IngredientStockMovement)
-        .filter(IngredientStockMovement.idempotency_key_hash == key_hash)
+        .filter(
+            IngredientStockMovement.store_id == store_id,
+            IngredientStockMovement.idempotency_key_hash == key_hash,
+        )
         .first()
     )
 
@@ -559,6 +644,7 @@ def _require_positive(quantity) -> Decimal:
 def _apply_manual_movement(
     db: Session,
     *,
+    store_id: int,
     ingredient_id: int,
     movement_type: str,
     quantity: Decimal,
@@ -571,16 +657,20 @@ def _apply_manual_movement(
     ip_address: str | None,
 ) -> MovementResult:
     """
-    Shared body of every manual stock command: lock, re-check idempotency under
-    the lock, validate the resulting physical state, write the ledger row, move
-    the summary, audit, commit.
+    Shared body of every manual stock command: lock this store's row, re-check
+    idempotency under the lock, validate the resulting physical state, write the
+    ledger row, move the summary, audit, commit.
+
+    ``store_id`` is the authenticated staff member's store. It is never read
+    from the request body or the query string, so a Store A manager cannot write
+    off Store B's chocolate by naming Store B in a payload.
     """
     try:
-        ingredient, stock = _load_stock_for_update(db, ingredient_id)
+        ingredient, stock = _load_stock_for_update(db, store_id, ingredient_id)
 
         # Definitive idempotency re-check now that we hold the row lock: an
         # identical concurrent command may have committed while we waited.
-        existing = _find_movement_by_key(db, key_hash)
+        existing = _find_movement_by_key(db, store_id, key_hash)
         if existing is not None:
             db.rollback()
             return _resolve_replay(db, existing, request_hash)
@@ -596,6 +686,7 @@ def _apply_manual_movement(
 
         movement = _movement(
             db,
+            store_id=store_id,
             ingredient_id=ingredient_id,
             movement_type=movement_type,
             quantity=q3(quantity),
@@ -620,6 +711,7 @@ def _apply_manual_movement(
             actor_id=str(actor_user_id),
             ip_address=ip_address,
             payload_after={
+                "store_id": store_id,
                 "ingredient_id": ingredient_id,
                 "movement_type": movement_type,
                 "quantity": str(q3(quantity)),
@@ -632,16 +724,16 @@ def _apply_manual_movement(
         db.commit()
         db.refresh(movement)
         logger.info(
-            "inventory_manual_movement type=%s ingredient=%s actor=%s delta=%s",
-            movement_type, ingredient_id, actor_user_id, q3(delta_on_hand),
+            "inventory_manual_movement store=%s type=%s ingredient=%s actor=%s delta=%s",
+            store_id, movement_type, ingredient_id, actor_user_id, q3(delta_on_hand),
         )
         return MovementResult(movement=movement, replayed=False)
 
     except IntegrityError:
         # A concurrent command with the same key committed between our re-check
-        # and the insert — the partial unique index caught it.
+        # and the insert — the store-scoped partial unique index caught it.
         db.rollback()
-        existing = _find_movement_by_key(db, key_hash)
+        existing = _find_movement_by_key(db, store_id, key_hash)
         if existing is not None:
             return _resolve_replay(db, existing, request_hash)
         raise
@@ -655,6 +747,7 @@ def _apply_manual_movement(
 def record_purchase_receipt(
     db: Session,
     *,
+    store_id: int,
     ingredient_id: int,
     quantity,
     actor_user_id: int,
@@ -662,12 +755,21 @@ def record_purchase_receipt(
     idempotency_key: str | None = None,
     ip_address: str | None = None,
 ) -> MovementResult:
-    """Goods arrived from a supplier — physical stock goes up."""
+    """
+    Goods arrived from a supplier at THIS store — that store's physical stock
+    goes up, and no other store's changes by a gram.
+
+    This is also how a newly opened branch gets its first stock: a store never
+    inherits another store's inventory.
+    """
     key = _require_key(idempotency_key)
     qty = _require_positive(quantity)
     note = (reason or "").strip() or None
 
     key_hash = _sha256(key)
+    # The payload hash covers the request BODY only. The store is not in the
+    # body — it comes from the session — and it is already part of the
+    # idempotency lookup, so a match here is always a match within one store.
     request_hash = _sha256(_canonical({
         "cmd": "purchase_receipt",
         "ingredient_id": ingredient_id,
@@ -675,12 +777,13 @@ def record_purchase_receipt(
         "reason": note or "",
     }))
 
-    existing = _find_movement_by_key(db, key_hash)
+    existing = _find_movement_by_key(db, store_id, key_hash)
     if existing is not None:
         return _resolve_replay(db, existing, request_hash)
 
     return _apply_manual_movement(
         db,
+        store_id=store_id,
         ingredient_id=ingredient_id,
         movement_type=MOVEMENT_PURCHASE_RECEIPT,
         quantity=qty,
@@ -697,6 +800,7 @@ def record_purchase_receipt(
 def record_manual_adjustment(
     db: Session,
     *,
+    store_id: int,
     ingredient_id: int,
     delta,
     reason: str,
@@ -705,9 +809,12 @@ def record_manual_adjustment(
     ip_address: str | None = None,
 ) -> MovementResult:
     """
-    Correct on-hand stock to match a real physical count. ``delta`` may be
-    positive or negative but never zero, and always needs a reason — an
+    Correct THIS store's on-hand stock to match a real physical count. ``delta``
+    may be positive or negative but never zero, and always needs a reason — an
     unexplained stock correction is indistinguishable from theft.
+
+    A physical count is taken in one branch, of one branch's shelves. Applying
+    it anywhere else would be meaningless, so the store is fixed by the session.
     """
     key = _require_key(idempotency_key)
     note = _require_reason(reason)
@@ -731,12 +838,13 @@ def record_manual_adjustment(
         "reason": note,
     }))
 
-    existing = _find_movement_by_key(db, key_hash)
+    existing = _find_movement_by_key(db, store_id, key_hash)
     if existing is not None:
         return _resolve_replay(db, existing, request_hash)
 
     return _apply_manual_movement(
         db,
+        store_id=store_id,
         ingredient_id=ingredient_id,
         movement_type=MOVEMENT_MANUAL_ADJUSTMENT,
         quantity=magnitude,
@@ -753,6 +861,7 @@ def record_manual_adjustment(
 def record_waste(
     db: Session,
     *,
+    store_id: int,
     ingredient_id: int,
     quantity,
     reason: str,
@@ -761,9 +870,10 @@ def record_waste(
     ip_address: str | None = None,
 ) -> MovementResult:
     """
-    Stock physically thrown away (burnt, dropped, spoiled). On-hand falls and the
-    loss stays visible in the ledger as WASTE — never quietly folded into
-    consumption, because waste is a cost the owner must be able to see.
+    Stock physically thrown away at THIS store (burnt, dropped, spoiled).
+    On-hand falls and the loss stays visible in the ledger as WASTE — never
+    quietly folded into consumption, because waste is a cost the owner must be
+    able to see, and must be able to attribute to the branch that incurred it.
     """
     key = _require_key(idempotency_key)
     qty = _require_positive(quantity)
@@ -777,12 +887,13 @@ def record_waste(
         "reason": note,
     }))
 
-    existing = _find_movement_by_key(db, key_hash)
+    existing = _find_movement_by_key(db, store_id, key_hash)
     if existing is not None:
         return _resolve_replay(db, existing, request_hash)
 
     return _apply_manual_movement(
         db,
+        store_id=store_id,
         ingredient_id=ingredient_id,
         movement_type=MOVEMENT_WASTE,
         quantity=qty,

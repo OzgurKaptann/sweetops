@@ -2,8 +2,9 @@
 Two-store data isolation tests.
 
 Store A staff must never read or mutate Store B data. Client-supplied store
-values must never override the session store. Global inventory endpoints must
-fail closed once more than one operational store exists.
+values must never override the session store. Inventory is store-scoped, so
+owner inventory views serve each store its own figures rather than failing
+closed once a second branch opens.
 """
 import uuid
 from decimal import Decimal
@@ -23,8 +24,15 @@ client = TestClient(app)
 
 
 def _order_in_store(db, store_id: int, backdate_minutes: float | None = None):
-    """Create an order (legacy path) in a specific store; optionally backdate it."""
-    ing, _ = make_ingredient(db, on_hand=Decimal("200.00"))
+    """
+    Create an order (legacy path) in a specific store; optionally backdate it.
+
+    The ingredient is stocked IN THAT STORE. Stock is store-scoped, so a store
+    with no stock row of its own cannot fulfil an order — there is deliberately
+    no fallback to another branch's shelves, and an order placed in a store that
+    was never stocked is correctly rejected as out of stock.
+    """
+    ing, _ = make_ingredient(db, on_hand=Decimal("200.00"), store_id=store_id)
     payload = {
         "store_id": store_id,
         "items": [{
@@ -206,16 +214,47 @@ def test_store_a_cannot_mutate_store_b_decision(db, make_staff, make_store):
 
 
 # ---------------------------------------------------------------------------
-# Global-inventory fail-closed
+# Owner inventory views: store-scoped, and no longer fail-closed
 # ---------------------------------------------------------------------------
 
-def test_global_inventory_fails_closed_with_multiple_stores(db, make_staff, make_store):
-    store_b = make_store()
-    # Two operational stores now exist (users in store 1 and store B).
-    ca = make_authed_client(db, make_staff("OWNER", store_id=DEFAULT_STORE_ID))
-    make_staff("OWNER", store_id=store_b.id)  # second operational store
+def test_owner_inventory_views_work_with_multiple_stores(db, make_staff, make_store):
+    """
+    The inversion of the old global-inventory guard.
 
-    for path in ("/owner/stock-status", "/owner/insights/critical-alerts", "/owner/insights/value-summary"):
+    These three endpoints used to return 409 "inventory_not_store_scoped" the
+    moment a second branch was staffed — a real multi-branch owner simply could
+    not see their stock. Physical stock now carries a store_id, so each owner
+    gets their OWN branch's figures and a second store costs nobody anything.
+    """
+    store_b = make_store()
+    ca = make_authed_client(db, make_staff("OWNER", store_id=DEFAULT_STORE_ID))
+    make_staff("OWNER", store_id=store_b.id)  # a genuinely second operational store
+
+    for path in ("/owner/stock-status",
+                 "/owner/insights/critical-alerts",
+                 "/owner/insights/value-summary"):
         r = ca.get(path)
-        assert r.status_code == 409, f"{path} should fail closed, got {r.status_code}"
-        assert r.json()["detail"]["error"] == "inventory_not_store_scoped"
+        assert r.status_code == 200, f"{path} must not fail closed, got {r.status_code}"
+
+
+def test_owner_stock_status_shows_only_own_store(db, make_staff, make_store):
+    """Store A's owner sees Store A's quantity for an ingredient, not Store B's."""
+    from tests.conftest import stock_for
+
+    store_b = make_store()
+    ing, _ = make_ingredient(db, on_hand=Decimal("111"), store_id=DEFAULT_STORE_ID)
+    stock_for(db, ing, store_b.id, on_hand=Decimal("999"))
+
+    ca = make_authed_client(db, make_staff("OWNER", store_id=DEFAULT_STORE_ID))
+    cb = make_authed_client(db, make_staff("OWNER", store_id=store_b.id))
+
+    def _on_hand(client) -> float | None:
+        rows = client.get("/owner/stock-status").json()["items"]
+        row = next((x for x in rows if x["ingredient_id"] == ing.id), None)
+        return float(row["on_hand_quantity"]) if row else None
+
+    # Same catalog ingredient, two branches, two independent physical truths.
+    assert _on_hand(ca) == 111.0
+    assert _on_hand(cb) == 999.0
+
+    cleanup_ingredient(db, ing.id)

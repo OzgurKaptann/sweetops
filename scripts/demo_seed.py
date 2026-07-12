@@ -87,40 +87,101 @@ def clear_transactional_data(db: Session):
     logger.info("Cleared.")
 
 
-def reset_stock_to_initial(db: Session):
-    """Reset stock to values that will show warnings after 14 days of orders."""
-    stocks = db.query(IngredientStock).all()
-    for s in stocks:
-        ing = db.query(Ingredient).filter(Ingredient.id == s.ingredient_id).first()
-        if not ing:
-            continue
-        # Heavy-use ingredients get less starting stock → will show warnings
-        if ing.name in HEAVY_USE:
-            if ing.unit == "g":
-                s.on_hand_quantity = Decimal('800')  # Will drop to ~200 after 14 days
-            elif ing.unit == "ml":
-                s.on_hand_quantity = Decimal('400')
-            else:
-                s.on_hand_quantity = Decimal('30')
-        else:
-            if ing.unit == "g":
-                s.on_hand_quantity = Decimal('2000')
-            elif ing.unit == "ml":
-                s.on_hand_quantity = Decimal('1000')
-            else:
-                s.on_hand_quantity = Decimal('100')
+# Reorder thresholds for stores this script creates rows for (seed.py sets its
+# own for store 1). The heavy-use ending targets below sit under these, so the
+# demo dashboard always has genuine CRITICAL rows to show.
+_REORDER_LEVEL = {"g": Decimal('300'), "ml": Decimal('150'), "piece": Decimal('15')}
+
+
+def ensure_stock_rows_for_all_stores(db: Session):
+    """
+    Give EVERY store its own explicit stock row for every active ingredient.
+
+    Stock is physical and per-branch: a store with no rows has no stock, and
+    nothing in the system will quietly lend it another branch's. So a demo with
+    two branches needs two sets of rows, created deliberately.
+
+    This is synthetic data, and cloning quantities across stores is fine HERE
+    precisely because it is fake. The production migration does the opposite —
+    it refuses to duplicate real stock into a second store, because that would
+    fabricate inventory that does not exist on any shelf.
+    """
+    stores = db.query(Store).all()
+    ingredients = db.query(Ingredient).filter(Ingredient.is_active == True).all()
+
+    existing = {
+        (s.store_id, s.ingredient_id) for s in db.query(IngredientStock).all()
+    }
+    created = 0
+    for store in stores:
+        for ing in ingredients:
+            if (store.id, ing.id) in existing:
+                continue
+            db.add(IngredientStock(
+                store_id=store.id,
+                ingredient_id=ing.id,
+                on_hand_quantity=Decimal('0'),
+                reserved_quantity=Decimal('0'),
+                unit=ing.unit,
+                reorder_level=_REORDER_LEVEL.get(ing.unit, Decimal('300')),
+            ))
+            created += 1
+    db.commit()
+    logger.info(
+        f"Stock rows: {len(stores)} store(s) × {len(ingredients)} ingredient(s); "
+        f"{created} row(s) created."
+    )
+
+
+# Where each (store, ingredient) should END UP after 14 days of demo orders.
+# Heavy-use ingredients land below their reorder level so the owner dashboard has
+# real CRITICAL rows to show; everything else lands comfortably above it.
+_ENDING_TARGET = {
+    True:  {"g": Decimal('150'), "ml": Decimal('80'),  "piece": Decimal('8')},   # heavy use
+    False: {"g": Decimal('1500'), "ml": Decimal('750'), "piece": Decimal('60')},
+}
+
+
+def _ending_target(ing: Ingredient) -> Decimal:
+    heavy = ing.name in HEAVY_USE
+    return _ENDING_TARGET[heavy].get(ing.unit, _ENDING_TARGET[heavy]["g"])
+
+
+def reset_stock_to_zero(db: Session):
+    """
+    Zero every store's stock so the demo can rebuild it from an honest ledger.
+
+    The opening balance is NOT written here, because it cannot be known yet: it
+    is derived, in ``_apply_demo_stock_deductions``, from what the demo orders
+    actually consume (opening = consumed + ending target). Writing a fixed
+    opening up front is what used to leave the demo database permanently
+    unreconciled — on-hand was set directly, with no ledger row to justify it,
+    and heavy-use ingredients then consumed more than they ever had, clamping
+    on-hand at zero while the ledger sailed off into negative numbers.
+    """
+    ensure_stock_rows_for_all_stores(db)
+    for s in db.query(IngredientStock).all():
+        s.on_hand_quantity = Decimal('0')
         s.reserved_quantity = Decimal('0')
     db.commit()
-    logger.info("Stock levels reset.")
+    logger.info("Stock levels zeroed; opening balances will be written from the ledger.")
 
 
 def generate_demo_orders(db: Session):
-    store = db.query(Store).first()
-    if not store:
+    """
+    Generate 14 days of demo orders for EVERY store.
+
+    Each store's orders draw down only that store's stock: the deduction map is
+    keyed by (store_id, ingredient_id), and every inventory line and ledger row
+    is stamped with the order's own store. A demo database therefore exhibits
+    the property the whole branch is about — two branches, two independent sets
+    of shelves — rather than quietly reproducing the old global behaviour.
+    """
+    stores = db.query(Store).all()
+    if not stores:
         logger.error("No store found. Run seed.py first.")
         return
 
-    tables = db.query(Table).filter(Table.store_id == store.id).all()
     product = db.query(Product).first()
     if not product:
         logger.error("No product found. Run seed.py first.")
@@ -133,7 +194,38 @@ def generate_demo_orders(db: Session):
     start_date = now - timedelta(days=14)
 
     total_orders = 0
-    total_stock_deductions = {}
+    # (store_id, ingredient_id) → quantity. The store in the key is what keeps
+    # one branch's consumption out of another branch's summary.
+    total_stock_deductions: dict[tuple[int, int], float] = {}
+
+    for store in stores:
+        tables = db.query(Table).filter(Table.store_id == store.id).all()
+        if not tables:
+            logger.warning("Store %s has no tables — skipping.", store.id)
+            continue
+        total_orders += _generate_orders_for_store(
+            db, store, tables, product, all_ingredients, ing_by_name,
+            start_date, total_stock_deductions,
+        )
+
+    db.commit()
+    _apply_demo_stock_deductions(db, total_stock_deductions, total_orders)
+
+    logger.info(f"Generated {total_orders} orders across 14 days, {len(stores)} store(s).")
+    _log_stock_status(db)
+
+
+def _generate_orders_for_store(
+    db: Session,
+    store,
+    tables,
+    product,
+    all_ingredients,
+    ing_by_name,
+    start_date,
+    total_stock_deductions: dict[tuple[int, int], float],
+) -> int:
+    total_orders = 0
 
     for day_offset in range(15):
         current_date = start_date + timedelta(days=day_offset)
@@ -255,6 +347,7 @@ def generate_demo_orders(db: Session):
 
                 if consumed_qty > 0:
                     db.add(OrderInventoryLine(
+                        store_id=order.store_id,
                         order_id=order.id,
                         order_item_id=item.id,
                         ingredient_id=ing.id,
@@ -263,62 +356,114 @@ def generate_demo_orders(db: Session):
                         unit=ing.unit,
                     ))
 
-                # Track stock consumed
-                key = ing.id
+                # Track stock consumed — per STORE and ingredient.
+                key = (order.store_id, ing.id)
                 total_stock_deductions[key] = total_stock_deductions.get(key, 0) + consumed_qty
 
             total_orders += 1
 
+    return total_orders
+
+
+def _apply_demo_stock_deductions(
+    db: Session,
+    total_stock_deductions: dict[tuple[int, int], float],
+    total_orders: int,
+):
+    """
+    Write each store's opening balance and demo consumption as a real ledger.
+
+    The opening balance is DERIVED, not assumed:
+
+        opening = what the demo orders consumed + where we want the shelf to end
+
+    which is what makes the demo database reconcile. Every (store, ingredient)
+    then gets the PURCHASE_RECEIPT → RESERVATION_CREATED → CONSUMPTION sequence
+    the real lifecycle would have produced, so reserved nets back to zero and the
+    ledger's on-hand deltas sum EXACTLY to that store's summary — no clamping, no
+    negative ledger, no permanent phantom drift for the reconciler to report.
+
+    Each store's opening balance is its own. Nothing is shared or borrowed.
+    """
+    ingredients = {i.id: i for i in db.query(Ingredient).all()}
+
+    for stock in db.query(IngredientStock).all():
+        ing = ingredients.get(stock.ingredient_id)
+        if ing is None:
+            continue
+
+        consumed = Decimal(str(
+            total_stock_deductions.get((stock.store_id, stock.ingredient_id), 0)
+        ))
+        ending = _ending_target(ing)
+        opening = consumed + ending
+
+        # 1. Opening balance — the goods this branch started the fortnight with.
+        db.add(IngredientStockMovement(
+            store_id=stock.store_id,
+            ingredient_id=stock.ingredient_id,
+            movement_type="PURCHASE_RECEIPT",
+            quantity=opening,
+            quantity_delta_on_hand=opening,
+            quantity_delta_reserved=Decimal('0'),
+            unit=stock.unit,
+            reason="Demo seed: opening balance",
+            legacy_backfill=True,      # synthetic: no real actor to attribute it to
+        ))
+
+        # 2. The fortnight's trade: reserved, then physically consumed.
+        if consumed > 0:
+            db.add(IngredientStockMovement(
+                store_id=stock.store_id,
+                ingredient_id=stock.ingredient_id,
+                movement_type="RESERVATION_CREATED",
+                quantity=consumed,
+                quantity_delta_on_hand=Decimal('0'),
+                quantity_delta_reserved=consumed,
+                unit=stock.unit,
+                reason=f"Demo seed: reserved across {total_orders} orders",
+            ))
+            db.add(IngredientStockMovement(
+                store_id=stock.store_id,
+                ingredient_id=stock.ingredient_id,
+                movement_type="CONSUMPTION",
+                quantity=consumed,
+                quantity_delta_on_hand=-consumed,
+                quantity_delta_reserved=-consumed,
+                unit=stock.unit,
+                reason=f"Demo seed: {consumed:.0f} {stock.unit} consumed across "
+                       f"{total_orders} orders",
+            ))
+
+        # 3. The summary the ledger above adds up to, by construction.
+        stock.on_hand_quantity = ending
+        stock.reserved_quantity = Decimal('0')
+
     db.commit()
 
-    # Apply stock deductions. Each ingredient gets the RESERVATION_CREATED /
-    # CONSUMPTION pair the real lifecycle would have produced, so reserved nets
-    # back to zero and the ledger's on-hand deltas still sum to the summary.
-    for ing_id, total_consumed in total_stock_deductions.items():
-        if total_consumed <= 0:
-            continue
-        stock = db.query(IngredientStock).filter(IngredientStock.ingredient_id == ing_id).first()
-        if not stock:
-            continue
 
-        qty = Decimal(str(total_consumed))
-        stock.on_hand_quantity = max(
-            Decimal('0'), Decimal(str(stock.on_hand_quantity)) - qty
-        )
-
-        db.add(IngredientStockMovement(
-            ingredient_id=ing_id,
-            movement_type="RESERVATION_CREATED",
-            quantity=qty,
-            quantity_delta_on_hand=Decimal('0'),
-            quantity_delta_reserved=qty,
-            unit=stock.unit,
-            reason=f"Demo seed: reserved across {total_orders} orders",
-        ))
-        db.add(IngredientStockMovement(
-            ingredient_id=ing_id,
-            movement_type="CONSUMPTION",
-            quantity=qty,
-            quantity_delta_on_hand=-qty,
-            quantity_delta_reserved=-qty,
-            unit=stock.unit,
-            reason=f"Demo seed: {total_consumed:.0f} {stock.unit} consumed across {total_orders} orders",
-        ))
-
-    db.commit()
-    logger.info(f"Generated {total_orders} orders across 14 days.")
-
-    # NOTE: reset_stock_levels() above writes on-hand directly, without a ledger
+def _log_stock_status(db: Session):
+    # NOTE: reset_stock_to_initial() writes on-hand directly, without a ledger
     # movement, so a demo database is intentionally NOT ledger-reconciled — the
     # opening balance was overwritten. scripts/reconcile_inventory.py will report
-    # that drift, correctly. This seeder is a dev/demo tool only.
-    logger.info("--- Stock status after demo seed ---")
-    stocks = db.query(IngredientStock).join(Ingredient).all()
-    for s in stocks:
-        ing = db.query(Ingredient).filter(Ingredient.id == s.ingredient_id).first()
-        level = "🔴 CRITICAL" if float(s.available_quantity) <= float(s.reorder_level or 0) else "✅ OK"
+    # that drift, per store, correctly. This seeder is a dev/demo tool only.
+    logger.info("--- Stock status after demo seed (per store) ---")
+    rows = (
+        db.query(IngredientStock, Ingredient, Store)
+        .join(Ingredient, Ingredient.id == IngredientStock.ingredient_id)
+        .join(Store, Store.id == IngredientStock.store_id)
+        .order_by(IngredientStock.store_id, Ingredient.name)
+        .all()
+    )
+    for s, ing, store in rows:
+        level = (
+            "🔴 CRITICAL"
+            if float(s.available_quantity) <= float(s.reorder_level or 0)
+            else "✅ OK"
+        )
         logger.info(
-            f"  {level} {ing.name}: on-hand {float(s.on_hand_quantity):.0f} "
+            f"  [store {store.id} {store.name}] {level} {ing.name}: "
+            f"on-hand {float(s.on_hand_quantity):.0f} "
             f"/ available {float(s.available_quantity):.0f} {s.unit}"
         )
 
@@ -330,7 +475,7 @@ def main():
     try:
         db = SessionLocal()
         clear_transactional_data(db)
-        reset_stock_to_initial(db)
+        reset_stock_to_zero(db)
         generate_demo_orders(db)
         logger.info("Demo seed complete! Dashboard should now show full data.")
     finally:
