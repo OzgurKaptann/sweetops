@@ -12,6 +12,7 @@ from .ingredient_stock import (
     IngredientStockMovement,
     OrderInventoryLine,
 )
+from .inventory_transfer import InventoryTransfer
 from .order import Order
 from .order_item import OrderItem
 from .order_item_ingredient import OrderItemIngredient
@@ -36,6 +37,7 @@ __all__ = [
     "IngredientStock",
     "IngredientStockMovement",
     "OrderInventoryLine",
+    "InventoryTransfer",
     "Order",
     "OrderItem",
     "OrderItemIngredient",

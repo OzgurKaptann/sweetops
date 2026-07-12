@@ -150,7 +150,23 @@ def restore_head(db):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_alembic_has_a_single_head():
-    assert _single_head().startswith(_REVISION)
+    """
+    Exactly one head — two would make `alembic upgrade head` ambiguous and turn
+    deployment into a coin toss.
+
+    This asserts that THIS revision is in the applied history, not that it IS the
+    head: later branches stack on top of it, and a test that pins it to head would
+    fail every time the schema legitimately moves forward. The single-head
+    invariant is the thing worth guarding; being the newest is not.
+    """
+    _single_head()   # asserts there is exactly one
+
+    proc = _alembic_raw("history")
+    assert proc.returncode == 0, proc.stderr
+    assert _REVISION in proc.stdout, "the store-scoped inventory revision is not in history"
+
+    current = _scalar("SELECT version_num FROM alembic_version")
+    assert current is not None
 
 
 def test_store_id_columns_exist():
@@ -259,8 +275,11 @@ def test_downgrade_and_reupgrade_preserve_orders_and_payments(
         movements_before = _scalar("SELECT count(*) FROM ingredient_stock_movements")
 
         # ── Downgrade ──────────────────────────────────────────────────────
+        # By REVISION, not by "-1". This file is about the store-scoped migration,
+        # and later branches now sit on top of it, so a relative step would undo
+        # whatever happens to be head instead of the thing under test.
         _release(db)
-        _alembic("downgrade", "-1")
+        _alembic("downgrade", _PREVIOUS)
 
         assert _scalar("SELECT version_num FROM alembic_version") == _PREVIOUS
         # This branch's schema is gone...
@@ -326,8 +345,8 @@ def test_backfill_assigns_existing_stock_to_the_only_operational_store(
         )
 
         _release(db)
-        _alembic("downgrade", "-1")     # back to global stock
-        _alembic("upgrade", "head")     # ...and forward again: this is the backfill
+        _alembic("downgrade", _PREVIOUS)  # back to global stock
+        _alembic("upgrade", "head")       # ...and forward again: this is the backfill
 
         # Nothing anywhere is store-less.
         for table in _SCOPED_TABLES:
@@ -382,7 +401,7 @@ def test_multi_store_global_stock_fails_closed(restore_head, db):
     store_b_id = None
     try:
         _release(db)
-        _alembic("downgrade", "-1")     # inventory is global again
+        _alembic("downgrade", _PREVIOUS)  # inventory is global again
 
         # Global stock exists (the ingredient above), and no row of it names a
         # store — that is exactly the ambiguity being reproduced.

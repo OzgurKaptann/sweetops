@@ -102,6 +102,27 @@ INVENTORY_INSUFFICIENT_ON_HAND = (
 )
 
 
+# ── Store-to-store inventory transfer ────────────────────────────────────────
+# The named destination store does not exist.
+INVENTORY_TRANSFER_DESTINATION_NOT_FOUND = "Hedef mağaza bulunamadı."
+
+# Source and destination are the same branch. Shipping stock to yourself is not a
+# transfer; it is a no-op that would leave a cancelling pair of movements behind.
+INVENTORY_TRANSFER_SAME_STORE = "Stok transferi için hedef mağaza kaynak mağazadan farklı olmalı."
+
+# The source branch does not physically have enough UNRESERVED stock. Stock that
+# accepted orders are already counting on cannot be put on a van to another
+# branch — the waiting customer's waffle is a promise this shop has already made.
+INVENTORY_TRANSFER_INSUFFICIENT_AVAILABLE = (
+    "Kaynak mağazada yeterli kullanılabilir stok yok. "
+    "Bekleyen siparişler için ayrılmış stok transfer edilemez."
+)
+
+# No such transfer, or it is a transfer between two OTHER branches. Deliberately
+# a 404 and not a 403: a 403 would confirm the transfer exists.
+INVENTORY_TRANSFER_NOT_FOUND = "Stok transferi bulunamadı."
+
+
 # ── Payment settlement / cashier (Turkish, shown in cashier-web) ─────────────
 # Order/table/settlement not found or belongs to another store — non-disclosing.
 PAY_NOT_FOUND = "Kayıt bulunamadı."

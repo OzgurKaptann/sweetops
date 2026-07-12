@@ -227,9 +227,15 @@ missing row.
 
 A new branch starts with **no stock** and never inherits another branch's.
 Inheriting would fabricate inventory that does not physically exist. Stock is
-initialised explicitly, via **purchase receipt**, **manual adjustment**, or
-**seed/demo data**. (Inventory *transfer* between stores is deliberately not
-implemented — see § Deferred.)
+initialised explicitly, via **purchase receipt**, **manual adjustment**,
+**seed/demo data**, or — since the transfer workflow — an **inventory transfer**
+from a branch that has the stock to spare.
+
+A transfer does not weaken the rule above. Nothing is inherited: the new branch's
+stock row is created at **zero**, and the only thing that fills it is a
+`TRANSFER_IN` exactly matched by a `TRANSFER_OUT` in the branch that shipped it.
+Chain-wide totals are unchanged to the gram. See
+[`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md).
 
 ### Downgrade
 
@@ -575,12 +581,14 @@ Full API suite: **644 passed, 0 failed.**
 
 ## 14. Deferred — explicitly not in this branch
 
-* **Inventory transfer between stores** — moving stock from Kadıköy to Beşiktaş
-  needs its own movement types (`TRANSFER_OUT` / `TRANSFER_IN`), a two-sided
-  atomic write and an approval flow. It is *the* obvious next feature, and it is
-  deliberately absent: the whole point of this branch is that stock does not move
-  between branches by accident, so making it move on purpose deserves its own
-  design.
+* ~~**Inventory transfer between stores**~~ — **DONE**, in its own branch. It got
+  the design it deserved: its own movement types (`TRANSFER_OUT` / `TRANSFER_IN`),
+  an `inventory_transfers` table so the two legs are one business event, a
+  two-sided atomic write, source-store-scoped idempotency, and a deferred
+  constraint trigger that makes a one-sided transfer impossible to commit. It
+  reserves nothing, transfers no reserved stock, and is excluded from waste,
+  purchase-receipt and consumption analytics. **No approval flow** — see the
+  limitations there. → [`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md)
 * **Supplier management**
 * **Purchase-order management** (purchase *receipts* exist; purchase *orders* do not)
 * **Recipe versioning**
