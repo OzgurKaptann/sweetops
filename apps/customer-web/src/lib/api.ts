@@ -142,7 +142,7 @@ export async function fetchMenu(qrToken: string): Promise<EnrichedMenuResponse> 
     body: JSON.stringify({ qr_token: qrToken }),
     cache: 'no-store',
   });
-  if (!res.ok) throw new Error('Menü yüklenemedi');
+  if (!res.ok) throw new Error('Menü yüklenemedi. Lütfen tekrar deneyin.');
   return res.json();
 }
 

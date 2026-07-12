@@ -7,17 +7,19 @@ interface Props {
   onDismiss?: () => void;
 }
 
+// Keyed by the API's decision `type` enum — the keys stay English, the verbs
+// the owner reads do not.
 const TYPE_VERB: Record<string, string> = {
-  stock_risk: "Reorder stock",
-  demand_spike: "Increase kitchen capacity",
-  sla_risk: "Clear kitchen queue",
-  revenue_anomaly: "Investigate revenue drop",
-  slow_moving: "Reduce tied capital",
+  stock_risk: "Stok siparişi verin",
+  demand_spike: "Mutfak kapasitesini artırın",
+  sla_risk: "Mutfak sırasını eritin",
+  revenue_anomaly: "Ciro düşüşünü inceleyin",
+  slow_moving: "Stokta bağlı sermayeyi azaltın",
   // Metric-driven decisions
-  metric_combo_health: "Boost combo visibility",
-  metric_upsell_visibility: "Fix upsell placement",
-  metric_owner_engagement: "Complete pending decisions",
-  metric_kitchen_performance: "Investigate kitchen throughput",
+  metric_combo_health: "Kombinasyon görünürlüğünü artırın",
+  metric_upsell_visibility: "Öneri yerleşimini düzeltin",
+  metric_owner_engagement: "Bekleyen uyarıları kapatın",
+  metric_kitchen_performance: "Mutfak temposunu inceleyin",
 };
 
 /**
@@ -29,7 +31,7 @@ const TYPE_VERB: Record<string, string> = {
 export function FocusBanner({ decision, onDismiss }: Props) {
   if (!decision) return null;
 
-  const verb = TYPE_VERB[decision.type] ?? "Take action";
+  const verb = TYPE_VERB[decision.type] ?? "Harekete geçin";
   const isBlocking = decision.blocking_vs_non_blocking;
 
   return (
@@ -42,7 +44,7 @@ export function FocusBanner({ decision, onDismiss }: Props) {
     >
       <div className="flex items-center gap-3 min-w-0">
         <span className="text-sm font-bold shrink-0 uppercase tracking-wide">
-          🔥 Focus now
+          🔥 Öncelik
         </span>
         <span className="text-white/80 hidden sm:block">→</span>
         <span className="text-sm font-medium truncate">
@@ -50,20 +52,20 @@ export function FocusBanner({ decision, onDismiss }: Props) {
         </span>
         {decision.data && "revenue_at_risk" in decision.data && (decision.data as any).revenue_at_risk > 0 && (
           <span className="shrink-0 text-xs font-semibold bg-white/20 px-2 py-0.5 rounded hidden md:block">
-            ₺{(decision.data as any).revenue_at_risk.toFixed(0)} at risk
+            ₺{(decision.data as any).revenue_at_risk.toFixed(0)} risk altında
           </span>
         )}
       </div>
 
       <div className="flex items-center gap-3 shrink-0">
         <span className="text-xs text-white/70 hidden lg:block">
-          Score: {decision.decision_score.toFixed(0)}
+          Öncelik puanı: {decision.decision_score.toFixed(0)}
         </span>
         {onDismiss && (
           <button
             onClick={onDismiss}
             className="text-xs text-white/60 hover:text-white transition-colors"
-            title="Snooze (scroll down to act)"
+            title="Ertele (işlem için aşağı kaydırın)"
           >
             ✕
           </button>

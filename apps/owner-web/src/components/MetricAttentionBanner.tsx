@@ -33,35 +33,36 @@ interface ModeConfig {
   adaptationNote: string;
 }
 
+// Keyed by the API's operational `mode` enum — keys English, copy Turkish.
 const MODE_CONFIG: Record<string, ModeConfig> = {
   sla_critical: {
-    label: "Kitchen Critical",
+    label: "Mutfak kritik",
     bg: "bg-red-600",
     border: "border-red-700",
     icon: "🚨",
-    metricLabel: "SLA breach rate",
-    actionLabel: "Open Kitchen Display →",
+    metricLabel: "Süre aşımı oranı",
+    actionLabel: "Mutfak ekranını aç →",
     actionHref: "/kitchen",
-    adaptationNote: "Upsell suggestions reduced to 1 to protect kitchen capacity.",
+    adaptationNote: "Mutfak kapasitesini korumak için ek malzeme önerisi 1'e düşürüldü.",
   },
   high_kitchen_load: {
-    label: "High Kitchen Load",
+    label: "Mutfak yoğun",
     bg: "bg-orange-500",
     border: "border-orange-600",
     icon: "⏱",
-    metricLabel: "SLA breach / avg prep",
-    actionLabel: "Open Kitchen Display →",
+    metricLabel: "Süre aşımı / ort. hazırlık",
+    actionLabel: "Mutfak ekranını aç →",
     actionHref: "/kitchen",
-    adaptationNote: "Upsell suggestions reduced to 1 to decrease order complexity.",
+    adaptationNote: "Sipariş karmaşıklığını azaltmak için ek malzeme önerisi 1'e düşürüldü.",
   },
   boost_combos: {
-    label: "Combo Visibility Low",
+    label: "Kombinasyon görünürlüğü düşük",
     bg: "bg-amber-500",
     border: "border-amber-600",
     icon: "🔄",
-    metricLabel: "Combo usage rate",
-    actionLabel: "Review Popular Combos ↓",
-    adaptationNote: "Menu ranking is automatically boosting combo ingredients (1.6× weight).",
+    metricLabel: "Kombinasyon kullanımı",
+    actionLabel: "Popüler kombinasyonlara bak ↓",
+    adaptationNote: "Menü sıralaması kombinasyon malzemelerini otomatik öne çıkarıyor (1,6 kat ağırlık).",
   },
 };
 
@@ -71,17 +72,17 @@ function formatMetricValue(mode: string, mv: OperationalContextData["metric_valu
   if (mode === "sla_critical" || mode === "high_kitchen_load") {
     const parts: string[] = [];
     if (mv.sla_breach_rate !== null)
-      parts.push(`${(mv.sla_breach_rate * 100).toFixed(0)}% breach rate`);
+      parts.push(`%${(mv.sla_breach_rate * 100).toFixed(0)} süre aşımı`);
     if (mv.avg_prep_time_minutes !== null)
-      parts.push(`${mv.avg_prep_time_minutes.toFixed(1)} min avg prep`);
+      parts.push(`ort. ${mv.avg_prep_time_minutes.toFixed(1)} dk hazırlık`);
     return parts.join(" · ") || "—";
   }
   if (mode === "boost_combos") {
     const parts: string[] = [];
     if (mv.combo_usage_rate !== null)
-      parts.push(`${(mv.combo_usage_rate * 100).toFixed(0)}% combos`);
+      parts.push(`%${(mv.combo_usage_rate * 100).toFixed(0)} kombinasyon`);
     if (mv.upsell_acceptance_rate !== null)
-      parts.push(`${(mv.upsell_acceptance_rate * 100).toFixed(0)}% upsell`);
+      parts.push(`%${(mv.upsell_acceptance_rate * 100).toFixed(0)} ek malzeme`);
     return parts.join(" · ") || "—";
   }
   return "—";
@@ -89,11 +90,11 @@ function formatMetricValue(mode: string, mv: OperationalContextData["metric_valu
 
 function formatThreshold(mode: string, thresholds: OperationalContextData["thresholds"]): string {
   if (mode === "sla_critical")
-    return `>${(thresholds.sla_breach_critical * 100).toFixed(0)}% breach`;
+    return `%${(thresholds.sla_breach_critical * 100).toFixed(0)} üzeri süre aşımı`;
   if (mode === "high_kitchen_load")
-    return `>${(thresholds.sla_breach_high_load * 100).toFixed(0)}% breach or >${thresholds.avg_prep_high_load_min}min prep`;
+    return `%${(thresholds.sla_breach_high_load * 100).toFixed(0)} üzeri süre aşımı veya ${thresholds.avg_prep_high_load_min} dk üzeri hazırlık`;
   if (mode === "boost_combos")
-    return `<${(thresholds.combo_rate_boost * 100).toFixed(0)}% combo rate`;
+    return `%${(thresholds.combo_rate_boost * 100).toFixed(0)} altı kombinasyon kullanımı`;
   return "";
 }
 
@@ -132,7 +133,7 @@ export function MetricAttentionBanner({ refreshTick }: { refreshTick: number }) 
               {cfg.metricLabel}: <span className="font-bold">{metricValue}</span>
             </span>
             <span className="text-[10px] text-white/70 hidden sm:block">
-              (threshold: {threshold})
+              (eşik: {threshold})
             </span>
           </div>
         </div>

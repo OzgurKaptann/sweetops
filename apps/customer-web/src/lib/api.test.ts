@@ -122,7 +122,9 @@ test("resolveQrContext classifies a 404 as invalid", async () => {
     ({
       ok: false,
       status: 404,
-      json: async () => ({ detail: "Bu QR kod geçerli değil." }),
+      json: async () => ({
+        detail: "Bu masa bağlantısı geçersiz veya süresi dolmuş.",
+      }),
     }) as Response) as typeof fetch;
 
   await assert.rejects(resolveQrContext("tok"), (err: unknown) => {

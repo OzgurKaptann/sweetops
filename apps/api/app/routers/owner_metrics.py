@@ -57,6 +57,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.core import messages
 from app.core.db import get_db
 from app.core.deps import require_permission
 from app.core.permissions import PERM_OWNER_READ
@@ -124,8 +125,7 @@ def get_metrics(
             status_code=503,
             detail={
                 "error": "database_unavailable",
-                "message": "Metrics database is temporarily unavailable. "
-                           "Please retry in a few seconds.",
+                "message": messages.METRICS_UNAVAILABLE,
             },
         )
     except Exception as exc:
@@ -135,8 +135,7 @@ def get_metrics(
             status_code=503,
             detail={
                 "error": "computation_failed",
-                "message": "Metrics computation failed unexpectedly. "
-                           "This has been logged for investigation.",
+                "message": messages.METRICS_FAILED,
             },
         )
 

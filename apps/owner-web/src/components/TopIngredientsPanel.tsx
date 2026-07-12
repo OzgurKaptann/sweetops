@@ -19,7 +19,7 @@ export function TopIngredientsPanel({ refreshTick }: Props) {
   if (error) {
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-5 text-sm text-red-500">
-        Ingredient data unavailable.
+        Malzeme verisi yüklenemedi.
       </div>
     );
   }
@@ -42,7 +42,7 @@ export function TopIngredientsPanel({ refreshTick }: Props) {
   if (data.items.length === 0) {
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-5 text-sm text-gray-400 text-center py-8">
-        No ingredient usage data yet.
+        Henüz malzeme kullanım verisi yok.
       </div>
     );
   }
@@ -52,7 +52,7 @@ export function TopIngredientsPanel({ refreshTick }: Props) {
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-5">
       <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">
-        Top Ingredients
+        En Çok Kullanılan Malzemeler
       </h3>
 
       <div className="space-y-1">

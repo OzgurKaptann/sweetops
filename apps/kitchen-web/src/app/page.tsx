@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchKitchenOrders, updateOrderStatus } from "@/lib/api";
 import { UnauthorizedError } from "@/lib/auth";
 import AuthGate, { useAuth } from "@/components/AuthGate";
+import { connectionStateLabel, orderStatusLabel } from "@/lib/labels";
 import { KitchenOrder } from "@sweetops/types";
 
 // Connection States
@@ -128,20 +129,35 @@ function KitchenDashboard() {
           reportUnauthorized();
           return;
         }
-        alert("Güncelleme sırasında hata oluştu.");
+        alert("Sipariş durumu güncellenemedi. Lütfen tekrar deneyin.");
     }
   };
 
-  const getConnectionBadge = () => {
-    switch (connectionState) {
-        case 'connected': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800">● Canlı</span>;
-        case 'connecting': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-yellow-100 text-yellow-800 animate-pulse">● Bağlanıyor..</span>;
-        case 'error': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800">! Bağlantı Hatası</span>;
-        case 'disconnected': return <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">● Bağlantı Kesildi</span>;
-    }
+  const CONNECTION_BADGE_STYLE: Record<ConnectionState, string> = {
+    connected:    "bg-green-100 text-green-800",
+    connecting:   "bg-yellow-100 text-yellow-800 animate-pulse",
+    error:        "bg-red-100 text-red-800",
+    disconnected: "bg-gray-100 text-gray-800",
   };
 
-  if (loading) return <div className="p-8"><div className="animate-pulse flex space-x-4"><div className="h-32 bg-gray-200 rounded w-full"></div></div></div>;
+  const getConnectionBadge = () => (
+    <span
+      className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${CONNECTION_BADGE_STYLE[connectionState]}`}
+    >
+      ● {connectionStateLabel(connectionState)}
+    </span>
+  );
+
+  if (loading) {
+    return (
+      <div className="p-8">
+        <p className="text-sm text-gray-500 mb-4">Siparişler yükleniyor…</p>
+        <div className="animate-pulse flex space-x-4">
+          <div className="h-32 bg-gray-200 rounded w-full"></div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-gray-100 p-8">
@@ -175,6 +191,12 @@ function KitchenDashboard() {
         </div>
       </header>
 
+      {error && (
+        <div className="mb-6 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+          Siparişler yüklenemedi. Bağlantı yeniden kuruluyor…
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         {orders.map((order) => (
           <div key={order.id} className="bg-white rounded-lg shadow border border-gray-200 overflow-hidden flex flex-col">
@@ -187,11 +209,11 @@ function KitchenDashboard() {
                 <span className={`px-3 py-1 rounded-full text-xs font-bold ${
                   order.status === 'NEW' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'
                 }`}>
-                  {order.status}
+                  {orderStatusLabel(order.status)}
                 </span>
               </div>
               <div className="text-xs text-gray-400 mt-2">
-                Sipariş: {new Date(order.created_at).toLocaleTimeString('tr-TR')}
+                Sipariş saati: {new Date(order.created_at).toLocaleTimeString('tr-TR')}
               </div>
             </div>
 
@@ -223,7 +245,7 @@ function KitchenDashboard() {
                     : 'bg-green-500 hover:bg-green-600 text-white focus:ring-green-500'
                 }`}
               >
-                {order.status === 'NEW' ? 'HAZIRLANIYOR' : 'HAZIR ✓'}
+                {order.status === 'NEW' ? 'Hazırlamaya başla' : 'Hazır ✓'}
               </button>
             </div>
           </div>
@@ -232,8 +254,8 @@ function KitchenDashboard() {
         {orders.length === 0 && !loading && (
           <div className="col-span-full py-16 text-center border-2 border-dashed border-gray-300 rounded-lg bg-white">
             <div className="text-4xl mb-4">🧇</div>
-            <h3 className="text-lg font-medium text-gray-900 mb-1">Mutfak boş</h3>
-            <p className="text-gray-500">Şu anda bekleyen sipariş yok.</p>
+            <h3 className="text-lg font-medium text-gray-900 mb-1">Yeni sipariş yok</h3>
+            <p className="text-gray-500">Şu anda hazırlanacak sipariş bulunmuyor.</p>
           </div>
         )}
       </div>

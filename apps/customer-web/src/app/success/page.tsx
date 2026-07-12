@@ -12,12 +12,12 @@ function SuccessContent() {
   return (
     <main className="success-page">
       <div className="success-icon">✓</div>
-      <h1>Siparişiniz Alındı!</h1>
-      <p className="sub">Waffle'ınız hazırlanıyor 🧇</p>
+      <h1>Siparişiniz alındı!</h1>
+      <p className="sub">Mutfak siparişinizi hazırlamaya başladı 🧇</p>
 
       <div className="success-card">
         <div className="success-row">
-          <span className="label">Sipariş No</span>
+          <span className="label">Sipariş no</span>
           <span className="value">#{orderId}</span>
         </div>
         <div className="success-row">
@@ -27,7 +27,7 @@ function SuccessContent() {
       </div>
 
       <Link href="/" className="new-order-link">
-        Yeni Sipariş Ver
+        Yeni sipariş ver
       </Link>
     </main>
   );

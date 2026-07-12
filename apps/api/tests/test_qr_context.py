@@ -226,7 +226,7 @@ def test_resolve_endpoint_hides_internal_details_for_invalid_token(client):
     r = client.post("/public/qr-context/resolve", json={"qr_token": "@@bad@@"})
     assert r.status_code == 404
     detail = r.json()["detail"]
-    assert "geçerli değil" in detail
+    assert "geçersiz" in detail
     # No stack trace / token internals leaked.
     assert "token_hash" not in detail.lower()
 

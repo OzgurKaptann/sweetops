@@ -116,8 +116,8 @@ export function KitchenSLAPanel({ refreshTick }: Props) {
       ) : (
         <div className="rounded-lg px-4 py-3 mb-4 bg-emerald-50 border border-emerald-100">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">SLA OK</span>
-            <span className="text-xs text-emerald-600">All orders on time</span>
+            <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">Süre uygun</span>
+            <span className="text-xs text-emerald-600">Tüm siparişler zamanında</span>
           </div>
         </div>
       )}
@@ -127,7 +127,7 @@ export function KitchenSLAPanel({ refreshTick }: Props) {
         <div className="space-y-3">
           <div>
             <div className="flex justify-between items-baseline mb-1">
-              <span className="text-xs text-gray-500">Avg prep time</span>
+              <span className="text-xs text-gray-500">Ort. hazırlık süresi</span>
               <span className="text-sm font-bold text-gray-900">{prep.avg_prep_display}</span>
             </div>
             <LoadBar
@@ -139,20 +139,20 @@ export function KitchenSLAPanel({ refreshTick }: Props) {
 
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-gray-50 rounded-lg p-3">
-              <div className="text-xs text-gray-400 mb-0.5">Fastest</div>
+              <div className="text-xs text-gray-400 mb-0.5">En hızlı</div>
               <div className="text-sm font-semibold text-emerald-700">
                 {prep.fastest_display}
               </div>
             </div>
             <div className="bg-gray-50 rounded-lg p-3">
-              <div className="text-xs text-gray-400 mb-0.5">Slowest</div>
+              <div className="text-xs text-gray-400 mb-0.5">En yavaş</div>
               <div className="text-sm font-semibold text-orange-600">
                 {prep.slowest_display}
               </div>
             </div>
           </div>
 
-          <p className="text-xs text-gray-400 text-center">{prep.total_tracked} orders tracked</p>
+          <p className="text-xs text-gray-400 text-center">{prep.total_tracked} sipariş izlendi</p>
         </div>
       ) : (
         <p className="text-xs text-gray-400 text-center py-2">

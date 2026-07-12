@@ -7,7 +7,6 @@ import {
   fetchUpsell,
   createOrder,
   resolveQrContext,
-  OrderRequestError,
   QrResolveError,
   EnrichedIngredient,
   EnrichedMenuResponse,
@@ -15,6 +14,7 @@ import {
 } from "@/lib/api";
 import type { OrderCreateRequest, QrContextResponse } from "@sweetops/types";
 import { fingerprintOrder, orderIdempotency } from "@/lib/order-idempotency";
+import { orderErrorMessage, qrPhaseMessage } from "@/lib/order-messages";
 import { acquireQrToken, clearQrToken } from "@/lib/qr-session";
 
 const MAX_TOPPINGS = 6;
@@ -71,17 +71,17 @@ function buildCombos(allIngredients: EnrichedIngredient[]): Combo[] {
 
   if (popular.length >= 3) {
     const ids = popular.map((i) => i.id);
-    combos.push({ label: "Most ordered today", sublabel: popular.slice(0, 3).map((i) => i.name).join(", "), ids, totalPrice: priceOf(ids) });
+    combos.push({ label: "Bugün en çok seçilen", sublabel: popular.slice(0, 3).map((i) => i.name).join(", "), ids, totalPrice: priceOf(ids) });
   }
 
   const marginIds = Array.from(new Set([...margin.map((i) => i.id)])).slice(0, 4);
   if (marginIds.length >= 2 && JSON.stringify(marginIds) !== JSON.stringify(popular.map((i) => i.id).slice(0, 4))) {
-    combos.push({ label: "Chef's pick", sublabel: margin.slice(0, 3).map((i) => i.name).join(", "), ids: marginIds, totalPrice: priceOf(marginIds) });
+    combos.push({ label: "Şefin önerisi", sublabel: margin.slice(0, 3).map((i) => i.name).join(", "), ids: marginIds, totalPrice: priceOf(marginIds) });
   }
 
   const lightIds = light.map((i) => i.id).slice(0, 3);
   if (lightIds.length >= 2) {
-    combos.push({ label: "Quick & light", sublabel: light.slice(0, 3).map((i) => i.name).join(", "), ids: lightIds, totalPrice: priceOf(lightIds) });
+    combos.push({ label: "Hafif ve hızlı", sublabel: light.slice(0, 3).map((i) => i.name).join(", "), ids: lightIds, totalPrice: priceOf(lightIds) });
   }
 
   return combos.slice(0, 3);
@@ -104,7 +104,7 @@ function QuickStartSection({
   return (
     <section className="px-4 py-3 border-b border-gray-100 bg-amber-50">
       <p className="text-xs font-semibold text-amber-800 mb-2 uppercase tracking-wide">
-        Quick start — one tap
+        Hazır seçimler — tek dokunuş
       </p>
       <div className="space-y-2">
         {combos.map((combo) => (
@@ -151,12 +151,12 @@ function IngredientChip({ ingredient, selected, onToggle, isMostOrdered }: ChipP
           <div className="flex items-center justify-between">
             <span className="text-sm text-gray-400 line-through">{ingredient.name}</span>
             <span className="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded font-medium">
-              Tükendi
+              Stokta yok
             </span>
           </div>
           {ingredient.out_of_stock_alternative && (
             <p className="text-[10px] text-gray-400 mt-0.5">
-              → {ingredient.out_of_stock_alternative.ingredient_name} mevcut
+              Bunun yerine {ingredient.out_of_stock_alternative.ingredient_name} var
             </p>
           )}
         </button>
@@ -240,7 +240,7 @@ function UpsellPanel({
   return (
     <div className="mx-4 mb-4 p-3 bg-blue-50 rounded-xl border border-blue-100">
       <p className="text-xs font-semibold text-blue-700 mb-2">
-        Seçtiklerinle harika gider:
+        Seçtiklerinizle iyi gider:
       </p>
       <div className="flex flex-wrap gap-2">
         {available.map((s) => (
@@ -283,7 +283,7 @@ function PopularSection({
       <div className="flex items-center gap-1.5 mb-2">
         <span className="text-sm">🔥</span>
         <span className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-          En Popüler
+          En popüler
         </span>
       </div>
       <div className="grid grid-cols-2 gap-2">
@@ -422,7 +422,7 @@ export default function CustomerMenuPageClient() {
   const applyCombo = useCallback(
     (ids: number[], label: string) => {
       setSelected(new Set(ids));
-      showToast(`${label} seçildi ✓`);
+      showToast(`${label} sepetinize eklendi ✓`);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -464,7 +464,7 @@ export default function CustomerMenuPageClient() {
         const currentCount = countByType(Array.from(next), isSauce);
         const limit = isSauce ? MAX_SAUCES : MAX_TOPPINGS;
         if (currentCount >= limit) {
-          showToast(`En fazla ${limit} ${isSauce ? "sos" : "malzeme"} seçebilirsiniz`);
+          showToast(`En fazla ${limit} ${isSauce ? "sos" : "malzeme"} seçebilirsiniz.`);
           return prev;
         }
 
@@ -502,7 +502,7 @@ export default function CustomerMenuPageClient() {
     // Ordering requires a resolved QR context — never a default store.
     if (!qrToken || phase !== "ready") return;
     if (selected.size === 0) {
-      showToast("En az 1 malzeme seçmelisiniz");
+      showToast("En az bir malzeme seçmelisiniz.");
       return;
     }
     if (!product) return;
@@ -538,17 +538,10 @@ export default function CustomerMenuPageClient() {
       // Keep the button disabled through navigation — do not reset the guard.
       router.push(`/success?order_id=${res.order_id}&amount=${res.total_amount}`);
     } catch (err) {
-      if (err instanceof OrderRequestError && err.isUncertain) {
-        // Network/server uncertainty: the order may already exist. Preserve the
-        // key and cart so a retry is safe and never duplicates.
-        showToast(
-          "Sipariş sonucu doğrulanamadı. Tekrar deneyebilirsin; siparişin iki kez oluşturulmayacak.",
-        );
-      } else {
-        // Deterministic rejection (e.g. out of stock): keep the cart so the
-        // customer can adjust; changing the selection generates a new key.
-        showToast("Sipariş oluşturulamadı. Lütfen seçimlerini kontrol et.");
-      }
+      // Uncertain outcomes keep the key and cart so a retry is safe and never
+      // duplicates; a deterministic rejection keeps the cart so the customer can
+      // adjust it, which mints a new key by itself.
+      showToast(orderErrorMessage(err));
       submittingRef.current = false;
       setSubmitting(false);
     }
@@ -560,7 +553,7 @@ export default function CustomerMenuPageClient() {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3">
         <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-gray-400">QR kod doğrulanıyor…</p>
+        <p className="text-sm text-gray-400">{qrPhaseMessage("loading")}</p>
       </div>
     );
   }
@@ -570,7 +563,7 @@ export default function CustomerMenuPageClient() {
       <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
         <span className="text-3xl">📷</span>
         <p className="text-gray-700 text-sm font-medium">
-          QR kod bilgisi bulunamadı. Lütfen masadaki QR kodu yeniden okut.
+          {qrPhaseMessage("missing")}
         </p>
       </div>
     );
@@ -581,8 +574,7 @@ export default function CustomerMenuPageClient() {
       <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
         <span className="text-3xl">⚠️</span>
         <p className="text-gray-700 text-sm font-medium">
-          {qrErrorMessage ??
-            "Bu QR kod geçerli değil. Lütfen masadaki güncel QR kodu kullan."}
+          {qrPhaseMessage("invalid", qrErrorMessage)}
         </p>
       </div>
     );
@@ -593,8 +585,7 @@ export default function CustomerMenuPageClient() {
       <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
         <span className="text-3xl">🔒</span>
         <p className="text-gray-700 text-sm font-medium">
-          {qrErrorMessage ??
-            "Bu masa şu anda siparişe açık değil. Lütfen işletme personelinden yardım iste."}
+          {qrPhaseMessage("unavailable", qrErrorMessage)}
         </p>
       </div>
     );
@@ -604,13 +595,13 @@ export default function CustomerMenuPageClient() {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
         <p className="text-gray-500 text-sm">
-          Bağlantı kurulamadı. Lütfen tekrar dene.
+          {qrPhaseMessage("network")}
         </p>
         <button
           onClick={() => window.location.reload()}
           className="text-sm font-semibold text-amber-600 hover:underline"
         >
-          Tekrar Dene
+          Tekrar dene
         </button>
       </div>
     );
@@ -627,7 +618,7 @@ export default function CustomerMenuPageClient() {
     <div className="min-h-screen bg-white flex flex-col max-w-md mx-auto">
       {/* Header */}
       <header className="px-4 pt-6 pb-4 border-b border-gray-100">
-        <h1 className="text-xl font-bold text-gray-900">Waffle'ını Oluştur</h1>
+        <h1 className="text-xl font-bold text-gray-900">Waffle'ınızı oluşturun</h1>
         {context && (
           <p className="text-xs text-gray-400 mt-0.5">
             {context.store.name} · {context.table.name}
@@ -674,7 +665,7 @@ export default function CustomerMenuPageClient() {
                   {cat.name}
                 </span>
                 {isSauceCategory(cat.name) && (
-                  <span className="text-[10px] text-gray-400">Max {MAX_SAUCES}</span>
+                  <span className="text-[10px] text-gray-400">En fazla {MAX_SAUCES}</span>
                 )}
               </div>
               <div className="grid grid-cols-1 gap-2">
@@ -701,8 +692,8 @@ export default function CustomerMenuPageClient() {
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-gray-500">
             {selected.size > 0
-              ? `${selected.size} malzeme seçildi`
-              : "Malzeme seçin"}
+              ? `${selected.size} malzeme seçtiniz`
+              : "Sepetiniz boş"}
           </span>
           <span className="text-lg font-bold text-gray-900">
             ₺{totalPrice.toFixed(0)}
@@ -718,10 +709,10 @@ export default function CustomerMenuPageClient() {
           } disabled:opacity-70`}
         >
           {submitting
-            ? "Gönderiliyor…"
+            ? "Siparişiniz gönderiliyor…"
             : selected.size === 0
-            ? "Malzeme Seçin"
-            : `Sipariş Ver — ₺${totalPrice.toFixed(0)}`}
+            ? "Malzeme seçin"
+            : `Sipariş ver — ₺${totalPrice.toFixed(0)}`}
         </button>
       </div>
 

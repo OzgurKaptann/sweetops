@@ -164,6 +164,10 @@ def _decision_signals(
     """
     Determine whether an order needs immediate action and articulate why.
 
+    The reason string is read by kitchen staff on the order card, so it is
+    Turkish. The status/severity values it branches on stay English — they are
+    the wire contract, not copy.
+
     NEW orders — should_be_started = True when:
         • SLA critical (≥10 min): breach already occurred
         • SLA warning (7–10 min): approaching breach
@@ -175,21 +179,21 @@ def _decision_signals(
     """
     if status == "NEW":
         if severity == "critical":
-            return True, f"SLA breached — {age_minutes:.1f} min in queue"
+            return True, f"Süre aşıldı — {age_minutes:.1f} dk sırada bekliyor"
         if severity == "warning":
-            return True, f"Approaching SLA — {age_minutes:.1f} min in queue"
+            return True, f"Süre doluyor — {age_minutes:.1f} dk sırada bekliyor"
         if age_minutes >= START_IMMEDIATELY_MINUTES:
-            return True, f"Waiting {age_minutes:.1f} min — start now"
-        return False, f"Just placed — {age_minutes:.1f} min in queue"
+            return True, f"{age_minutes:.1f} dk bekledi — şimdi başlayın"
+        return False, f"Yeni geldi — {age_minutes:.1f} dk sırada"
 
     if status == "IN_PREP":
         if severity == "critical":
-            return True, "SLA breached — expedite immediately"
+            return True, "Süre aşıldı — hemen yetiştirin"
         if severity == "warning":
-            return True, f"Running long — {age_minutes:.1f} min elapsed"
-        return False, f"In preparation — {age_minutes:.1f} min elapsed"
+            return True, f"Uzun sürüyor — {age_minutes:.1f} dk geçti"
+        return False, f"Hazırlanıyor — {age_minutes:.1f} dk geçti"
 
-    return False, f"Status: {status}"
+    return False, "Bu sipariş için işlem gerekmiyor."
 
 
 def _action_hint(
@@ -200,39 +204,40 @@ def _action_hint(
     batch_partner_ids: list[int],
 ) -> str:
     """
-    Single actionable instruction for kitchen staff.
+    Single actionable instruction for kitchen staff, in Turkish — this is the
+    line a cook reads mid-service, so it is an imperative, not a description.
 
     Precedence for NEW orders (highest → lowest):
-        1. critical SLA → "Start immediately — SLA breached"
-        2. warning SLA  → "Start soon — approaching SLA"
-        3. has batch partners → "Combine with order #X"
-        4. age ≥ threshold  → "Start now"
-        5. fresh             → "Can wait"
+        1. critical SLA → "Hemen başlayın — süre aşıldı"
+        2. warning SLA  → "Yakında başlayın — süre doluyor"
+        3. has batch partners → "#X ile birlikte hazırlayın"
+        4. age ≥ threshold  → "Şimdi başlayın"
+        5. fresh             → "Bekleyebilir"
 
     Precedence for IN_PREP orders:
-        1. critical → "Expedite — SLA breached"
-        2. warning  → "Finish soon — approaching SLA"
-        3. normal   → "In progress"
+        1. critical → "Yetiştirin — süre aşıldı"
+        2. warning  → "Yakında bitirin — süre doluyor"
+        3. normal   → "Hazırlanıyor"
     """
     if status == "IN_PREP":
         if severity == "critical":
-            return "Expedite — SLA breached"
+            return "Yetiştirin — süre aşıldı"
         if severity == "warning":
-            return "Finish soon — approaching SLA"
-        return "In progress"
+            return "Yakında bitirin — süre doluyor"
+        return "Hazırlanıyor"
 
     if status == "NEW":
         if severity == "critical":
-            return "Start immediately — SLA breached"
+            return "Hemen başlayın — süre aşıldı"
         if severity == "warning":
-            return "Start soon — approaching SLA"
+            return "Yakında başlayın — süre doluyor"
         if batch_partner_ids:
-            return f"Combine with order #{batch_partner_ids[0]}"
+            return f"#{batch_partner_ids[0]} ile birlikte hazırlayın"
         if age_minutes >= START_IMMEDIATELY_MINUTES:
-            return "Start now"
-        return "Can wait"
+            return "Şimdi başlayın"
+        return "Bekleyebilir"
 
-    return "No action needed"
+    return "İşlem gerekmiyor"
 
 
 # ---------------------------------------------------------------------------
@@ -357,31 +362,24 @@ def _kitchen_load(orders: list[dict]) -> dict:
             "active_orders_count": 0,
             "in_prep_count": 0,
             "average_age_minutes": 0.0,
-            "explanation": "No active orders — kitchen is idle.",
+            "explanation": "Bekleyen sipariş yok — mutfak sakin.",
         }
 
     avg_age = round(
         sum(o["computed_age_minutes"] for o in orders) / active_count, 1
     )
 
+    counts = f"{active_count} açık sipariş ({new_count} bekliyor, {in_prep_count} hazırlanıyor)"
+
     if active_count >= LOAD_HIGH_THRESHOLD:
         level = "high"
-        explanation = (
-            f"{active_count} active orders ({new_count} waiting, {in_prep_count} in prep)"
-            f" — heavy load, avg {avg_age} min per order."
-        )
+        explanation = f"{counts} — yoğun, sipariş başına ortalama {avg_age} dk."
     elif active_count >= LOAD_MEDIUM_THRESHOLD:
         level = "medium"
-        explanation = (
-            f"{active_count} active orders ({new_count} waiting, {in_prep_count} in prep)"
-            f" — manageable load, avg {avg_age} min per order."
-        )
+        explanation = f"{counts} — normal tempo, sipariş başına ortalama {avg_age} dk."
     else:
         level = "low"
-        explanation = (
-            f"{active_count} active order(s) ({new_count} waiting, {in_prep_count} in prep)"
-            f" — light load, avg {avg_age} min per order."
-        )
+        explanation = f"{counts} — sakin, sipariş başına ortalama {avg_age} dk."
 
     return {
         "load_level": level,
@@ -565,12 +563,12 @@ def update_order_status(
         .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if not order:
-        raise HTTPException(status_code=404, detail="Order not found.")
+        raise HTTPException(status_code=404, detail=messages.ORDER_NOT_FOUND)
 
     # Non-disclosing cross-store guard: a Store-A user must not be able to
     # distinguish "order belongs to Store B" from "order does not exist".
     if store_id is not None and order.store_id != store_id:
-        raise HTTPException(status_code=404, detail="Order not found.")
+        raise HTTPException(status_code=404, detail=messages.ORDER_NOT_FOUND)
 
     old_status = order.status
 
@@ -581,7 +579,7 @@ def update_order_status(
             detail={
                 "error": "terminal_state",
                 "current_status": old_status,
-                "message": "Bu sipariş tamamlandı veya iptal edildi.",
+                "message": messages.ORDER_ALREADY_CLOSED,
             },
         )
 
@@ -756,7 +754,7 @@ def _validate_undo_window(db: Session, order_id: int, current_status: str) -> No
                 "error": "undo_window_expired",
                 "elapsed_seconds": int(elapsed),
                 "window_seconds": UNDO_WINDOW_SECONDS,
-                "message": "Geri alma süresi doldu.",
+                "message": messages.ORDER_UNDO_EXPIRED,
             },
         )
 

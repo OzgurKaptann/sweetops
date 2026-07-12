@@ -124,7 +124,7 @@ def create_order(
             ingredient_ids.append(ing.ingredient_id)
 
     if not ingredient_ids:
-        raise HTTPException(status_code=422, detail="Order must contain at least one ingredient.")
+        raise HTTPException(status_code=422, detail=messages.ORDER_NO_INGREDIENTS)
 
     # Fetch ingredient metadata once
     ingredients_by_id: dict[int, Ingredient] = {

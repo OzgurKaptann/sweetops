@@ -29,7 +29,7 @@ export function HourlyDemandChart({ refreshTick }: Props) {
   if (error) {
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-5 text-sm text-red-500">
-        Failed to load hourly demand.
+        Saatlik talep verisi yüklenemedi.
       </div>
     );
   }
@@ -44,10 +44,10 @@ export function HourlyDemandChart({ refreshTick }: Props) {
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-5 min-h-[280px] flex flex-col">
         <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
-          Hourly Demand
+          Saatlik Talep
         </h3>
         <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">
-          No hourly data yet.
+          Henüz saatlik veri yok.
         </div>
       </div>
     );
@@ -58,7 +58,7 @@ export function HourlyDemandChart({ refreshTick }: Props) {
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-5 min-h-[280px] flex flex-col">
       <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">
-        Hourly Demand
+        Saatlik Talep
       </h3>
       <div className="flex-1 w-full min-h-[220px]">
         <ResponsiveContainer width="100%" height="100%">
@@ -74,7 +74,7 @@ export function HourlyDemandChart({ refreshTick }: Props) {
             />
             <YAxis fontSize={11} axisLine={false} tickLine={false} />
             <Tooltip
-              formatter={(value: any) => [value, "Orders"]}
+              formatter={(value: any) => [value, "Sipariş"]}
               contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 12 }}
               cursor={{ fill: "#f3f4f6" }}
             />
@@ -91,7 +91,7 @@ export function HourlyDemandChart({ refreshTick }: Props) {
         </ResponsiveContainer>
       </div>
       <p className="text-[10px] text-gray-400 mt-2 text-right">
-        Peak hours highlighted in amber
+        En yoğun saatler turuncu gösterilir
       </p>
     </div>
   );

@@ -23,34 +23,43 @@ import {
   createCommandIdempotency,
   fingerprintCommand,
 } from "@/lib/payment-idempotency";
+import {
+  paymentMethodLabel,
+  paymentStatusLabel,
+  preparationStatusLabel,
+  refundStatusLabel,
+  transactionKindLabel,
+} from "@/lib/labels";
 
 const money = (v: string) => `${v} ₺`;
 
-// Map backend error codes → the exact Turkish submission strings.
+/**
+ * Map a backend error code → the Turkish line the cashier reads.
+ *
+ * The codes are the stable contract; the copy is not. Anything unmapped falls
+ * back to the server's own Turkish message, which the API guarantees is
+ * user-safe — never an exception class or a constraint name.
+ */
 function submitMessageFor(err: unknown): string {
   if (err instanceof ApiError) {
     switch (err.code) {
       case "no_balance":
-        return "Bu siparişin ödenecek bakiyesi bulunmuyor.";
+        return "Bu siparişin ödenecek bakiyesi kalmadı.";
       case "idempotency_mismatch":
-        return "Aynı işlem anahtarı farklı bilgilerle kullanılamaz.";
+        return "Bu ödeme farklı bilgilerle daha önce denenmiş. Lütfen tutarı ve yöntemi kontrol edin.";
       case "refund_over_balance":
-        return "Bu işlem için iade edilebilir bakiye bulunmuyor.";
+        return "Bu tahsilatın iade edilebilir bakiyesi kalmadı.";
       case "forbidden":
-        return "Bu işlem için iade yetkin yok.";
+        return "Bu işlem için yetkiniz yok.";
+      case "not_found":
+        return "Bu sipariş bulunamadı. Sipariş numarasını kontrol edin veya açık masalardan seçin.";
       default:
         return err.message;
     }
   }
   // Network uncertainty: we never learned the result — safe to retry same key.
-  return "İşlem sonucu doğrulanamadı. Aynı işlem güvenle tekrar denenebilir.";
+  return "İşlem sonucu doğrulanamadı. Aynı işlemi güvenle tekrar deneyebilirsiniz.";
 }
-
-const PAYMENT_LABEL: Record<string, string> = {
-  UNPAID: "Ödenmedi",
-  PARTIALLY_PAID: "Kısmi ödendi",
-  PAID: "Ödendi",
-};
 
 export default function CashierPage() {
   const { user } = useAuth();
@@ -116,8 +125,8 @@ export default function CashierPage() {
       if (order.table_id != null) {
         await openTable(order.table_id);
       }
-    } catch {
-      setStatus("Kayıt bulunamadı.");
+    } catch (err) {
+      setStatus(submitMessageFor(err));
     }
   }, [query, openTable]);
 
@@ -140,7 +149,7 @@ export default function CashierPage() {
     if (alreadyInFlight) return; // double-click guard
 
     setBusy(true);
-    setStatus("Ödeme kaydediliyor…");
+    setStatus("Tahsilat kaydediliyor…");
     try {
       const r = await settleTable(
         { table_id: bill.table_id, order_ids: payableOrderIds, payment_method: method },
@@ -148,7 +157,7 @@ export default function CashierPage() {
       );
       idem.current.complete();
       setReceipt(r);
-      setStatus(r.idempotent_replay ? "Bu işlem daha önce tamamlandı." : "Tahsilat Başarılı");
+      setStatus(r.idempotent_replay ? "Bu ödeme daha önce kaydedilmiş." : "Tahsilat tamamlandı.");
       await refreshBill();
     } catch (err) {
       // Preserve the attempt for a safe retry unless the payload was rejected.
@@ -171,12 +180,12 @@ export default function CashierPage() {
       if (alreadyInFlight) return;
 
       setBusy(true);
-      setStatus("Ödeme kaydediliyor…");
+      setStatus("Tahsilat kaydediliyor…");
       try {
         const r = await payOrder(orderId, { payment_method: method }, key);
         idem.current.complete();
         setReceipt(r);
-        setStatus(r.idempotent_replay ? "Bu işlem daha önce tamamlandı." : "Tahsilat Başarılı");
+        setStatus(r.idempotent_replay ? "Bu ödeme daha önce kaydedilmiş." : "Tahsilat tamamlandı.");
         await refreshBill();
       } catch (err) {
         idem.current.release();
@@ -201,7 +210,7 @@ export default function CashierPage() {
 
       {/* Search */}
       <section className="mb-6">
-        <label className="block text-sm font-medium mb-1" htmlFor="q">Sipariş Ara</label>
+        <label className="block text-sm font-medium mb-1" htmlFor="q">Sipariş ara</label>
         <div className="flex gap-2">
           <input
             id="q"
@@ -223,10 +232,10 @@ export default function CashierPage() {
       <div className="grid md:grid-cols-2 gap-6">
         {/* Open tables */}
         <section>
-          <h2 className="text-lg font-semibold mb-2">Açık Masalar</h2>
+          <h2 className="text-lg font-semibold mb-2">Açık masalar</h2>
           <div className="space-y-2">
             {tables.length === 0 && (
-              <p className="text-sm text-slate-500">Açık masa yok.</p>
+              <p className="text-sm text-slate-500">Şu anda açık masa yok.</p>
             )}
             {tables.map((t) => (
               <button
@@ -249,8 +258,8 @@ export default function CashierPage() {
 
         {/* Table bill */}
         <section>
-          <h2 className="text-lg font-semibold mb-2">Masa Hesabı</h2>
-          {!bill && <p className="text-sm text-slate-500">Bir masa seç.</p>}
+          <h2 className="text-lg font-semibold mb-2">Masa hesabı</h2>
+          {!bill && <p className="text-sm text-slate-500">Hesabı görmek için bir masa seçin.</p>}
           {bill && (
             <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4 space-y-3">
               <div className="flex justify-between font-semibold">
@@ -274,8 +283,15 @@ export default function CashierPage() {
                   {bill.orders.map((o) => (
                     <tr key={o.order_id} className="border-t border-slate-100">
                       <td className="py-1 font-mono text-xs">{o.order_code}</td>
-                      <td>{o.preparation_status}</td>
-                      <td>{PAYMENT_LABEL[o.payment_status] ?? o.payment_status}</td>
+                      <td>{preparationStatusLabel(o.preparation_status)}</td>
+                      <td>
+                        {paymentStatusLabel(o.payment_status)}
+                        {o.refund_status && o.refund_status !== "NONE" && (
+                          <span className="ml-1 text-xs text-red-600">
+                            · {refundStatusLabel(o.refund_status)}
+                          </span>
+                        )}
+                      </td>
                       <td className="text-right">{o.order_total}</td>
                       <td className="text-right">{o.net_paid}</td>
                       <td className="text-right">{o.remaining_amount}</td>
@@ -286,7 +302,7 @@ export default function CashierPage() {
                             disabled={busy}
                             className="text-indigo-600 hover:underline text-xs disabled:opacity-50"
                           >
-                            Ödeme Al
+                            Tahsilat Al
                           </button>
                         )}
                       </td>
@@ -303,7 +319,7 @@ export default function CashierPage() {
                   disabled={busy || payableOrderIds.length === 0}
                   className="ml-auto px-4 py-2 rounded bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
                 >
-                  Tüm Hesabı Kapat
+                  Tüm hesabı kapat
                 </button>
               </div>
             </div>
@@ -323,16 +339,16 @@ export default function CashierPage() {
 
       {/* Recent transactions */}
       <section className="mt-8">
-        <h2 className="text-lg font-semibold mb-2">İşlem Geçmişi</h2>
+        <h2 className="text-lg font-semibold mb-2">İşlem geçmişi</h2>
         <div className="bg-white rounded-lg shadow-sm border border-slate-200 divide-y divide-slate-100">
           {recent.length === 0 && (
-            <p className="text-sm text-slate-500 px-4 py-3">Kayıt yok.</p>
+            <p className="text-sm text-slate-500 px-4 py-3">Henüz işlem yok.</p>
           )}
           {recent.map((t, i) => (
             <div key={i} className="px-4 py-2 text-sm flex justify-between">
               <span>
-                {t.kind === "REFUND" ? "İade" : "Tahsilat"}
-                {t.payment_method ? ` · ${t.payment_method === "CASH" ? "Nakit" : t.payment_method === "CARD" ? "Kart" : t.payment_method}` : ""}
+                {transactionKindLabel(t.kind)}
+                {t.payment_method ? ` · ${paymentMethodLabel(t.payment_method)}` : ""}
                 {" · "}
                 {t.actor_display}
               </span>
@@ -397,22 +413,14 @@ function Receipt({
     try {
       await refundAllocation(allocationId, { amount, reason }, key);
       idem.current.complete();
-      setMsg("İade işlemi tamamlandı.");
+      setMsg("İade tamamlandı.");
       setOpenRefund(null);
       setAmount("");
       setReason("");
       await onRefunded();
     } catch (err) {
       idem.current.release();
-      if (err instanceof ApiError && err.code === "refund_over_balance") {
-        setMsg("Bu işlem için iade edilebilir bakiye bulunmuyor.");
-      } else if (err instanceof ApiError && err.code === "forbidden") {
-        setMsg("Bu işlem için iade yetkin yok.");
-      } else if (err instanceof ApiError) {
-        setMsg(err.message);
-      } else {
-        setMsg("İşlem sonucu doğrulanamadı. Aynı işlem güvenle tekrar denenebilir.");
-      }
+      setMsg(submitMessageFor(err));
     } finally {
       setBusy(false);
     }
@@ -421,10 +429,10 @@ function Receipt({
   return (
     <section className="mt-4 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
       <h3 className="font-semibold text-emerald-800">
-        Tahsilat Başarılı · {receipt.gross_amount} {receipt.currency}
+        Tahsilat tamamlandı · {receipt.gross_amount} {receipt.currency}
       </h3>
       <p className="text-sm text-emerald-700">
-        {receipt.payment_method === "CASH" ? "Nakit" : receipt.payment_method === "CARD" ? "Kart" : receipt.payment_method}
+        {paymentMethodLabel(receipt.payment_method)}
         {" · "}Kasiyer: {receipt.cashier_display}
       </p>
       <ul className="mt-2 space-y-1 text-sm">
@@ -437,7 +445,7 @@ function Receipt({
                 onClick={() => setOpenRefund(openRefund === a.id ? null : a.id)}
                 className="text-red-600 text-xs hover:underline"
               >
-                İade Et
+                İade et
               </button>
             )}
             {openRefund === a.id && (
@@ -459,7 +467,7 @@ function Receipt({
                   disabled={busy || !amount || !reason}
                   className="px-3 py-1.5 rounded bg-red-600 text-white text-sm disabled:opacity-50"
                 >
-                  İade Et
+                  İadeyi onayla
                 </button>
               </div>
             )}

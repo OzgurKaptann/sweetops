@@ -314,7 +314,7 @@ class TestWhyNowExpectedImpact:
             "ingredient_name": "Strawberry", "hours_to_stockout": 0,
             "velocity_per_hour": 0.5, "unit": "g",
         })
-        assert "zero stock" in text
+        assert "stokta yok" in text
         assert "Strawberry" in text
 
     def test_why_now_stock_risk_with_velocity(self):
@@ -324,13 +324,13 @@ class TestWhyNowExpectedImpact:
             "velocity_per_hour": 2.0,
             "unit": "ml",
         })
-        assert "3.5h" in text
-        assert "2.00 ml/h" in text
+        assert "3.5 saat" in text
+        assert "2.00 ml" in text
 
     def test_why_now_demand_spike(self):
         text = _why_now("demand_spike", "high", {"spike_ratio": 4.2})
         assert "4.2" in text
-        assert "60 minutes" in text
+        assert "60 dakika" in text
 
     def test_why_now_sla_risk_critical(self):
         text = _why_now("sla_risk", "high", {
@@ -345,7 +345,7 @@ class TestWhyNowExpectedImpact:
             "direction": "drop", "ratio": 0.2,
             "last_1h_revenue": 40.0, "avg_hourly_baseline": 200.0,
         })
-        assert "drop" in text or "below" in text
+        assert "altında" in text
         assert "₺40" in text
 
     def test_expected_impact_stock_risk_with_revenue(self):
@@ -354,7 +354,7 @@ class TestWhyNowExpectedImpact:
 
     def test_expected_impact_demand_spike(self):
         text = _expected_impact("demand_spike", "high", {"spike_ratio": 3.5}, True)
-        assert "3.5×" in text
+        assert "3.5 kat" in text
 
     def test_expected_impact_slow_moving(self):
         text = _expected_impact("slow_moving", "medium", {"tied_capital": 120.0}, False)
