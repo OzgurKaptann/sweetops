@@ -10,6 +10,12 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
+    // The lib/ modules exercised by `npm run test` are imported by Node's test
+    // runner, which resolves ESM specifiers literally and will not guess an
+    // extension. Those modules therefore import each other as "./labels.ts", and
+    // this flag lets tsc accept that. Safe with noEmit: nothing is rewritten, and
+    // the Next bundler resolves the explicit path unchanged.
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,

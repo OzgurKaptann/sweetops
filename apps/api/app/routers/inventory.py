@@ -40,12 +40,14 @@ from app.models.ingredient_stock import (
     IngredientStockMovement,
 )
 from app.models.inventory_transfer import InventoryTransfer
+from app.models.store import Store
 from app.schemas.inventory import (
     ManualAdjustmentRequest,
     MovementListResponse,
     MovementReceipt,
     PurchaseReceiptRequest,
     StockListResponse,
+    TransferDestinationListResponse,
     TransferItem,
     TransferListResponse,
     TransferReceipt,
@@ -355,6 +357,42 @@ def _transfer_receipt(
         created_at=t.created_at,
         idempotent_replay=result.replayed,
     )
+
+
+@router.get("/transfer-destinations", response_model=TransferDestinationListResponse)
+def list_transfer_destinations(
+    response: Response,
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
+):
+    """
+    The branches this store may ship to — every store except the caller's own.
+
+    A manager cannot type a destination store id into a form and cannot be
+    expected to memorise them, so the transfer form needs SOME way to name the
+    other branch. This is the smallest read that answers that question: id and
+    name only, no stock, no staff, no takings. The caller's own store is filtered
+    out here as a usability courtesy — ``transfer_stock`` still rejects a
+    same-store transfer server-side (``same_store_transfer``), and that check,
+    not this list, is the actual guarantee.
+
+    Deliberately NOT a general store-management API: read-only, no create/update,
+    no other branch's operational data, and still behind ``inventory:read`` and a
+    store-assigned session.
+    """
+    _no_store(response)
+    store_id = _store_id(staff)
+
+    rows = (
+        db.query(Store)
+        .filter(Store.id != store_id)
+        .order_by(Store.name)
+        .all()
+    )
+    items = [
+        {"store_id": s.id, "name": s.name, "location": s.location} for s in rows
+    ]
+    return {"total": len(items), "items": items}
 
 
 @router.post("/transfers", response_model=TransferReceipt)
