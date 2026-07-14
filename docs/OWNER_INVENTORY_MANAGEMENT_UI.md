@@ -149,7 +149,7 @@ The one place a raw enum still exists in the UI is the *value* of a filter
 
 ## 5. Supported operations
 
-All four open in one dialog and all four are idempotent (§ 7).
+All five open in one dialog and all five are idempotent (§ 7).
 
 **Mal kabul** — Malzeme, Miktar, Sebep/açıklama (optional, as the API allows).
 → *"Mal kabul başarıyla kaydedildi."*
@@ -173,6 +173,42 @@ look destroyed here and bought there.
 **Şube transferi** — Malzeme, Hedef şube (from the new destinations endpoint),
 Miktar, Sebep, Not (optional).
 → *"Transfer tamamlandı."*
+
+**Fiziksel sayım** (button: **Sayım gir**) — Malzeme, **Sayım sonucu**, Sebep
+(mandatory), Not (optional).
+
+This is the odd one out, deliberately. Every other form asks for a **change** (add
+5 kg, bin 2 kg, ship 1 kg). The count asks what is **actually on the shelf**, and the
+server works out the difference itself — a client-computed delta would be measured
+against whatever this screen last rendered, which an order placed thirty seconds ago
+has already made stale.
+
+*"Bu işlem fiziksel stok miktarını sayım sonucuna göre düzeltir. Ayrılmış stok
+değişmez."* The second sentence is the operational one: a manager who fears that
+counting the freezer might cancel a waiting customer's waffle will not count the
+freezer.
+
+Selecting an ingredient shows the figures being reconciled against — **Sistemdeki
+fiziksel stok**, **Ayrılmış stok**, **Kullanılabilir stok** — and the live
+**Beklenen fark** (`counted − system on-hand`). The expected difference is a preview
+only; the server recomputes it under a row lock.
+
+A count of **0 is valid** (an empty shelf is the count a manager most needs to be able
+to report). A count **below reserved** is blocked in the form
+(*"Sayım sonucu ayrılmış stoktan düşük olamaz."*) and refused by the backend
+(`stock_count_below_reserved`) — that case means the shop has sold stock it does not
+physically have, which is an operational incident about the ORDERS, not a stock
+correction.
+
+→ *"Sayım kaydı uygulandı."*
+→ zero difference: *"Sayım kaydedildi. Stok farkı oluşmadı."* — a count that found the
+shelf correct is a **success**, not a no-op. Proving the shelf was checked is the
+point, so the count is recorded even though no stock moved and no ledger row exists.
+
+The "Sayım gir" button sits **ahead of "Manuel düzeltme"** in the action row on
+purpose: a count that is harder to reach than a manual adjustment is a count that
+gets typed in *as* a manual adjustment. See
+[`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md).
 
 ## 6. Permissions
 
@@ -264,6 +300,12 @@ the movement. So: check the ledger first. The form is left intact and the attemp
 key is preserved, so an unchanged resubmit is de-duplicated. A failed **read**, which
 changed nothing, is stated plainly as a failure.
 
+The **physical count** says the same thing in the vocabulary of a count, because a
+manager holding a count sheet is thinking about a *sayım*, not an *işlem*:
+
+> Sayım sonucunun kaydedilip kaydedilmediği doğrulanamadı. Aynı işlemi tekrar
+> göndermeden önce stok hareketlerini kontrol edin.
+
 ## 9. Data integrity
 
 The backend remains the source of truth for stock.
@@ -304,7 +346,14 @@ Fixed by `docs/TURKISH_USER_FACING_LOCALIZATION.md` and used verbatim here:
 
 Stok · Şube · Malzeme · Fiziksel stok · Ayrılmış stok · Kullanılabilir stok · Stok
 hareketi · Mal kabul · Fire · Manuel düzeltme · Transfer · Şubeden çıkış · Şubeye
-giriş · Stok tükenme riski · Stokta yok · Stok yetersiz · Düşük stok · Stok yeterli
+giriş · Stok tükenme riski · Stokta yok · Stok yetersiz · Düşük stok · Stok yeterli ·
+Fiziksel sayım · Sayım sonucu · Sayım düzeltmesi · Beklenen fark
+
+**Sayım düzeltmesi** and **Manuel düzeltme** are kept apart on purpose.
+`STOCK_COUNT_ADJUSTMENT` renders as *Sayım düzeltmesi* — somebody **counted** the
+shelf. `MANUAL_ADJUSTMENT` renders as *Manuel düzeltme* — somebody **decided** a
+figure was wrong. Showing a counted discrepancy under the second label would hide
+shrinkage inside a word that means "we changed this number".
 
 ## 12. What remains backend-only
 

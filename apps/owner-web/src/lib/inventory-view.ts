@@ -257,7 +257,12 @@ export const INVENTORY_COPY = {
 
 // ── Operation result banners ─────────────────────────────────────────────────
 
-export type OperationKind = "purchase_receipt" | "waste" | "manual_adjustment" | "transfer";
+export type OperationKind =
+  | "purchase_receipt"
+  | "waste"
+  | "manual_adjustment"
+  | "transfer"
+  | "stock_count";
 
 export type BannerTone = "success" | "info" | "error" | "warning";
 
@@ -266,12 +271,58 @@ export interface OperationBanner {
   message: string;
 }
 
+/**
+ * The stock operations offered on the inventory screen, in the order they appear.
+ *
+ * It lives here rather than in the page because these are Turkish COPY, and this
+ * module is the one place copy is written and tested. "Sayım gir" sits directly
+ * beside the other operations on purpose: a manager who has just counted the
+ * freezer is standing at the same screen they use for a purchase receipt, and
+ * hiding the count behind a separate page is exactly how it ends up being typed in
+ * as a manual adjustment instead.
+ */
+export interface InventoryAction {
+  kind: OperationKind;
+  label: string;
+  primary?: boolean;
+}
+
+export const INVENTORY_ACTIONS: readonly InventoryAction[] = [
+  { kind: "purchase_receipt", label: "Mal kabul", primary: true },
+  { kind: "stock_count", label: "Sayım gir" },
+  { kind: "waste", label: "Fire kaydı" },
+  { kind: "manual_adjustment", label: "Manuel düzeltme" },
+  { kind: "transfer", label: "Şube transferi" },
+] as const;
+
+/** The dialog title for each operation. */
+export const OPERATION_TITLE: Record<OperationKind, string> = {
+  purchase_receipt: "Mal kabul",
+  waste: "Fire kaydı",
+  manual_adjustment: "Manuel düzeltme",
+  transfer: "Şube transferi",
+  stock_count: "Fiziksel sayım",
+};
+
 const SUCCESS_MESSAGE: Record<OperationKind, string> = {
   purchase_receipt: "Mal kabul başarıyla kaydedildi.",
   waste: "Fire kaydı başarıyla oluşturuldu.",
   manual_adjustment: "Manuel düzeltme başarıyla kaydedildi.",
   transfer: "Transfer tamamlandı.",
+  stock_count: "Sayım kaydı uygulandı.",
 };
+
+/**
+ * A count that found the shelf CORRECT is a success, not a failure and not a no-op.
+ *
+ * The backend returns `movement_id: null` — nothing physical happened, so nothing
+ * went in the ledger. Reporting that as "Sayım kaydı uygulandı" would leave the
+ * manager hunting a stock movement that does not exist and concluding the system
+ * lost it. So it gets its own sentence, which says the true and useful thing: the
+ * count was recorded, and there was no difference.
+ */
+export const STOCK_COUNT_NO_DELTA_MESSAGE =
+  "Sayım kaydedildi. Stok farkı oluşmadı.";
 
 /**
  * A REPLAY is not a second success and must not be reported as one.
@@ -287,15 +338,24 @@ const REPLAY_MESSAGE: Record<OperationKind, string> = {
   waste: "Bu fire kaydı daha önce oluşturulmuş. Yeni bir kayıt oluşturulmadı.",
   manual_adjustment: "Bu manuel düzeltme daha önce kaydedilmiş. Yeni bir kayıt oluşturulmadı.",
   transfer: "Bu transfer daha önce tamamlanmış. Stok yeniden gönderilmedi.",
+  stock_count: "Bu sayım daha önce kaydedilmiş. Stok yeniden düzeltilmedi.",
 };
 
+/**
+ * `noDelta` reports a count that found the shelf correct. It is deliberately NOT a
+ * replay: a replay means "you already sent this", while no-delta means "this was
+ * applied, and the shelf was right". Conflating them would tell a manager who
+ * counted a correct shelf that they had counted it twice.
+ */
 export function successBanner(
   kind: OperationKind,
-  opts: { replay?: boolean } = {},
+  opts: { replay?: boolean; noDelta?: boolean } = {},
 ): OperationBanner {
-  return opts.replay
-    ? { tone: "info", message: REPLAY_MESSAGE[kind] }
-    : { tone: "success", message: SUCCESS_MESSAGE[kind] };
+  if (opts.replay) return { tone: "info", message: REPLAY_MESSAGE[kind] };
+  if (kind === "stock_count" && opts.noDelta) {
+    return { tone: "info", message: STOCK_COUNT_NO_DELTA_MESSAGE };
+  }
+  return { tone: "success", message: SUCCESS_MESSAGE[kind] };
 }
 
 // ── Client-side form validation (courtesy only — the server re-decides) ──────
@@ -437,6 +497,105 @@ export function validateAdjustmentForm(input: AdjustmentFormInput): string[] {
     const n = Number(text);
     if (!Number.isFinite(n)) errors.push(ADJUSTMENT_VALIDATION.deltaRequired);
     else if (n === 0) errors.push(ADJUSTMENT_VALIDATION.deltaNonZero);
+  }
+
+  if (!input.reason.trim()) errors.push(TRANSFER_VALIDATION.reasonRequired);
+  return errors;
+}
+
+// ── Physical stock count ─────────────────────────────────────────────────────
+
+/**
+ * What a physical count IS — and what it does not touch.
+ *
+ * The second sentence is the one that matters operationally. A manager who thinks
+ * counting the freezer might cancel a waiting customer's waffle will not count the
+ * freezer.
+ */
+export const STOCK_COUNT_HINT =
+  "Bu işlem fiziksel stok miktarını sayım sonucuna göre düzeltir. " +
+  "Ayrılmış stok değişmez.";
+
+export const STOCK_COUNT_VALIDATION = {
+  countedRequired: "Sayım sonucunu girin.",
+  countedNonNegative: "Sayım sonucu negatif olamaz.",
+  belowReserved: "Sayım sonucu ayrılmış stoktan düşük olamaz.",
+} as const;
+
+/** Field labels for the count form — the four figures a manager reconciles against. */
+export const STOCK_COUNT_LABELS = {
+  systemOnHand: "Sistemdeki fiziksel stok",
+  reserved: "Ayrılmış stok",
+  available: "Kullanılabilir stok",
+  expectedDelta: "Beklenen fark",
+} as const;
+
+export interface StockCountFormInput {
+  ingredientId: number | null;
+  /** What was physically found on the shelf. NOT a delta. */
+  counted: string;
+  reason: string;
+  /** The system's current figures for the chosen ingredient, when known. */
+  onHandQuantity?: string | null;
+  reservedQuantity?: string | null;
+}
+
+/**
+ * The difference the count is EXPECTED to apply: counted − system on-hand.
+ *
+ * Display only. The server recomputes it from the stock row it locks, and its
+ * answer is the one that counts — between this render and the request landing, an
+ * order may have been placed. Returns null when either figure is unusable, so the
+ * UI shows "—" rather than a confidently wrong number.
+ */
+export function expectedCountDelta(
+  counted: string,
+  onHandQuantity: string | null | undefined,
+): number | null {
+  if (onHandQuantity === null || onHandQuantity === undefined) return null;
+  const text = counted.trim();
+  if (!text) return null;
+  const c = Number(text);
+  const onHand = Number(onHandQuantity);
+  if (!Number.isFinite(c) || !Number.isFinite(onHand)) return null;
+  // Quantities are stored to 3 places; round the subtraction to the same grain so
+  // float noise (9.25 - 10 = -0.7500000000000004) never reaches the screen.
+  return Math.round((c - onHand) * 1000) / 1000;
+}
+
+/**
+ * Validate the count form. Returns [] when it may be submitted.
+ *
+ * Two rules are worth naming. Zero IS allowed — an empty shelf is a valid count and
+ * the one a manager most needs to be able to report, so this deliberately does NOT
+ * reuse the "must be greater than zero" quantity check that the other forms use.
+ *
+ * And a count below RESERVED is blocked here, with the reason, rather than sending
+ * the manager to the server to be told something the UI already knew. That is a
+ * courtesy, not a security control: the service enforces it
+ * (`stock_count_below_reserved`) and its answer is the one that counts — a client
+ * that skipped this function entirely still could not count below reserved.
+ */
+export function validateStockCountForm(input: StockCountFormInput): string[] {
+  const errors: string[] = [];
+  if (input.ingredientId === null) errors.push(TRANSFER_VALIDATION.ingredientRequired);
+
+  const text = input.counted.trim();
+  const counted = Number(text);
+  if (!text) {
+    errors.push(STOCK_COUNT_VALIDATION.countedRequired);
+  } else if (!Number.isFinite(counted)) {
+    errors.push(STOCK_COUNT_VALIDATION.countedRequired);
+  } else if (counted < 0) {
+    errors.push(STOCK_COUNT_VALIDATION.countedNonNegative);
+  } else {
+    const reserved =
+      input.reservedQuantity === null || input.reservedQuantity === undefined
+        ? null
+        : Number(input.reservedQuantity);
+    if (reserved !== null && Number.isFinite(reserved) && counted < reserved) {
+      errors.push(STOCK_COUNT_VALIDATION.belowReserved);
+    }
   }
 
   if (!input.reason.trim()) errors.push(TRANSFER_VALIDATION.reasonRequired);

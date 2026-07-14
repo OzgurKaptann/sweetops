@@ -5,6 +5,7 @@ import { useMemo, useRef, useState } from "react";
 import {
   createManualAdjustment,
   createPurchaseReceipt,
+  createStockCount,
   createTransfer,
   createWaste,
   type StockItem,
@@ -22,18 +23,24 @@ import {
 import {
   INVENTORY_COPY,
   MANUAL_ADJUSTMENT_HINT,
+  OPERATION_TITLE,
+  STOCK_COUNT_HINT,
+  STOCK_COUNT_LABELS,
   type OperationBanner,
   type OperationKind,
+  expectedCountDelta,
+  formatDelta,
   formatQuantity,
   successBanner,
   validateAdjustmentForm,
   validatePurchaseReceiptForm,
+  validateStockCountForm,
   validateTransferForm,
   validateWasteForm,
 } from "@/lib/inventory-view";
 
 /**
- * The four stock operations, in one dialog.
+ * The five stock operations, in one dialog.
  *
  * Idempotency, in one place: a `CommandIdempotency` lives for the life of this
  * dialog (a ref, so a re-render never resets it). On submit, the form is
@@ -46,20 +53,23 @@ import {
  * as a failure, and the form is left intact rather than cleared, so the manager can
  * check the ledger and — if the operation never landed — resubmit the SAME command
  * under the SAME key.
+ *
+ * The physical count is the odd one out, and deliberately so. Every other form asks
+ * for a CHANGE (add 5 kg, bin 2 kg, ship 1 kg); the count asks what is ACTUALLY
+ * THERE and shows the system's figures beside it so the manager can see the
+ * difference before they commit to it. The difference itself is only ever a preview
+ * — the server recomputes it from the row it locks.
  */
 
-const TITLE: Record<OperationKind, string> = {
-  purchase_receipt: "Mal kabul",
-  waste: "Fire kaydı",
-  manual_adjustment: "Manuel düzeltme",
-  transfer: "Şube transferi",
-};
+// Titles live with the rest of this screen's Turkish copy, in lib/inventory-view.ts.
+const TITLE = OPERATION_TITLE;
 
 const SUBMIT_LABEL: Record<OperationKind, string> = {
   purchase_receipt: "Mal kabul kaydet",
   waste: "Fire kaydet",
   manual_adjustment: "Manuel düzeltme kaydet",
   transfer: "Şube transferi oluştur",
+  stock_count: "Sayımı uygula",
 };
 
 const REASON_LABEL: Record<OperationKind, string> = {
@@ -67,6 +77,7 @@ const REASON_LABEL: Record<OperationKind, string> = {
   waste: "Fire sebebi",
   manual_adjustment: "Sebep",
   transfer: "Sebep",
+  stock_count: "Sebep",
 };
 
 const REASON_PLACEHOLDER: Record<OperationKind, string> = {
@@ -74,6 +85,7 @@ const REASON_PLACEHOLDER: Record<OperationKind, string> = {
   waste: "Örn. Yanan hamur",
   manual_adjustment: "Örn. Sayım farkı",
   transfer: "Örn. Beşiktaş şubesine takviye",
+  stock_count: "Örn. Haftalık dolap sayımı",
 };
 
 export function InventoryActionModal({
@@ -97,6 +109,8 @@ export function InventoryActionModal({
   const [ingredientId, setIngredientId] = useState<number | null>(initialIngredientId);
   const [quantity, setQuantity] = useState("");
   const [delta, setDelta] = useState("");
+  /** What was physically found on the shelf. NOT a delta — see STOCK_COUNT_HINT. */
+  const [counted, setCounted] = useState("");
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
   const [destinationStoreId, setDestinationStoreId] = useState<number | null>(null);
@@ -154,6 +168,14 @@ export function InventoryActionModal({
           reason: reason.trim(),
           note: note.trim() || null,
         };
+      case "stock_count":
+        return {
+          kind: "stock_count",
+          ingredientId,
+          countedQuantity: counted.trim(),
+          reason: reason.trim(),
+          note: note.trim() || null,
+        };
     }
   };
 
@@ -174,8 +196,24 @@ export function InventoryActionModal({
           reason,
           availableQuantity: selected?.available_quantity ?? null,
         });
+      case "stock_count":
+        return validateStockCountForm({
+          ingredientId,
+          counted,
+          reason,
+          onHandQuantity: selected?.on_hand_quantity ?? null,
+          reservedQuantity: selected?.reserved_quantity ?? null,
+        });
     }
   };
+
+  // The difference the count is EXPECTED to apply. Preview only: the server
+  // recomputes it from the row it locks, and between this render and the request
+  // landing an order may have moved the shelf.
+  const previewDelta =
+    kind === "stock_count"
+      ? expectedCountDelta(counted, selected?.on_hand_quantity ?? null)
+      : null;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -194,6 +232,9 @@ export function InventoryActionModal({
     setSubmitting(true);
     try {
       let replay = false;
+      // A count that found the shelf CORRECT writes no ledger row. That is a
+      // success with its own message, not a failure and not a replay.
+      let noDelta = false;
 
       if (command.kind === "purchase_receipt") {
         const receipt = await createPurchaseReceipt(
@@ -225,7 +266,7 @@ export function InventoryActionModal({
           key,
         );
         replay = receipt.idempotent_replay;
-      } else {
+      } else if (command.kind === "transfer") {
         const receipt = await createTransfer(
           {
             destination_store_id: command.destinationStoreId,
@@ -237,11 +278,25 @@ export function InventoryActionModal({
           key,
         );
         replay = receipt.idempotent_replay;
+      } else {
+        const receipt = await createStockCount(
+          {
+            ingredient_id: command.ingredientId,
+            counted_quantity: command.countedQuantity,
+            reason: command.reason,
+            note: command.note,
+          },
+          key,
+        );
+        replay = receipt.idempotent_replay;
+        // `movement_id: null` means the shelf agreed with the system. The count WAS
+        // applied — it is just that nothing physical had to move.
+        noDelta = receipt.movement_id === null;
       }
 
       // A confirmed outcome — the key has done its job and must not be reused.
       idempotency.current.complete();
-      onSuccess(successBanner(kind, { replay }));
+      onSuccess(successBanner(kind, { replay, noDelta }));
       onClose();
     } catch (err) {
       // The attempt survives: an unchanged retry reuses this key, so a request that
@@ -249,14 +304,16 @@ export function InventoryActionModal({
       idempotency.current.release();
       setFailure({
         tone: isOutcomeUncertain(err) ? "warning" : "error",
-        message: inventoryErrorMessage(err),
+        // `kind` only changes the network-uncertain copy, which has to speak the
+        // manager's vocabulary: they are holding a count sheet, not an "işlem".
+        message: inventoryErrorMessage(err, kind),
       });
     } finally {
       setSubmitting(false);
     }
   };
 
-  const showQuantity = kind !== "manual_adjustment";
+  const showQuantity = kind !== "manual_adjustment" && kind !== "stock_count";
   const reasonRequired = kind !== "purchase_receipt";
 
   return (
@@ -285,6 +342,12 @@ export function InventoryActionModal({
         {kind === "manual_adjustment" && (
           <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
             {MANUAL_ADJUSTMENT_HINT}
+          </p>
+        )}
+
+        {kind === "stock_count" && (
+          <p className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+            {STOCK_COUNT_HINT}
           </p>
         )}
 
@@ -364,6 +427,74 @@ export function InventoryActionModal({
           </div>
         )}
 
+        {/* Sayım sonucu (stock count only — an ABSOLUTE quantity, not a delta) */}
+        {kind === "stock_count" && (
+          <div>
+            <label htmlFor="counted" className="block text-sm font-medium text-gray-700 mb-1">
+              Sayım sonucu {selected ? `(${selected.unit})` : ""}
+            </label>
+            <input
+              id="counted"
+              type="number"
+              inputMode="decimal"
+              step="0.001"
+              // min=0, not min>0: an empty shelf is a valid count, and the one a
+              // manager most needs to be able to report.
+              min="0"
+              value={counted}
+              onChange={(e) => setCounted(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Rafta fiziksel olarak saydığınız miktarı girin.
+            </p>
+
+            {/* The three figures the manager is reconciling against, and the
+                difference their count would apply. Read from the API; the expected
+                difference is a preview — the server recomputes it under a lock. */}
+            {selected && (
+              <dl className="mt-3 space-y-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-gray-500">{STOCK_COUNT_LABELS.systemOnHand}</dt>
+                  <dd className="tabular-nums text-gray-900 font-medium">
+                    {formatQuantity(selected.on_hand_quantity)} {selected.unit}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-gray-500">{STOCK_COUNT_LABELS.reserved}</dt>
+                  <dd className="tabular-nums text-gray-700">
+                    {formatQuantity(selected.reserved_quantity)} {selected.unit}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-gray-500">{STOCK_COUNT_LABELS.available}</dt>
+                  <dd className="tabular-nums text-gray-700">
+                    {formatQuantity(selected.available_quantity)} {selected.unit}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3 pt-1.5 border-t border-gray-200">
+                  <dt className="text-gray-600 font-medium">
+                    {STOCK_COUNT_LABELS.expectedDelta}
+                  </dt>
+                  <dd
+                    className={`tabular-nums font-semibold ${
+                      previewDelta === null || previewDelta === 0
+                        ? "text-gray-500"
+                        : previewDelta > 0
+                          ? "text-emerald-700"
+                          : "text-red-700"
+                    }`}
+                  >
+                    {previewDelta === null
+                      ? "—"
+                      : `${formatDelta(previewDelta)} ${selected.unit}`}
+                  </dd>
+                </div>
+              </dl>
+            )}
+          </div>
+        )}
+
         {/* Düzeltme miktarı (manual adjustment only — signed) */}
         {kind === "manual_adjustment" && (
           <div>
@@ -402,8 +533,8 @@ export function InventoryActionModal({
           />
         </div>
 
-        {/* Not (transfer only) */}
-        {kind === "transfer" && (
+        {/* Not (transfer and stock count) */}
+        {(kind === "transfer" || kind === "stock_count") && (
           <div>
             <label htmlFor="note" className="block text-sm font-medium text-gray-700 mb-1">
               Not <span className="text-gray-400 font-normal">(isteğe bağlı)</span>

@@ -54,12 +54,17 @@ from app.models.ingredient_stock import (
     MOVEMENT_PURCHASE_RECEIPT,
     MOVEMENT_RESERVATION_CREATED,
     MOVEMENT_RESERVATION_RELEASED,
+    MOVEMENT_STOCK_COUNT_ADJUSTMENT,
     MOVEMENT_TRANSFER_IN,
     MOVEMENT_TRANSFER_OUT,
     MOVEMENT_WASTE,
     IngredientStock,
     IngredientStockMovement,
     OrderInventoryLine,
+)
+from app.models.inventory_stock_count import (
+    STOCK_COUNT_APPLIED,
+    InventoryStockCount,
 )
 from app.models.inventory_transfer import TRANSFER_COMPLETED, InventoryTransfer
 from app.models.order import Order
@@ -79,6 +84,7 @@ AUDIT_WASTE_RECORDED = "INVENTORY_WASTE_RECORDED"
 AUDIT_ADJUSTED = "INVENTORY_ADJUSTED"
 AUDIT_RECEIVED = "INVENTORY_RECEIVED"
 AUDIT_TRANSFERRED = "INVENTORY_TRANSFERRED"
+AUDIT_STOCK_COUNTED = "INVENTORY_STOCK_COUNTED"
 
 
 # ── Quantity maths ───────────────────────────────────────────────────────────
@@ -221,6 +227,7 @@ def _movement(
     idempotency_key_hash: str | None = None,
     request_hash: str | None = None,
     transfer_id: int | None = None,
+    stock_count_id: int | None = None,
 ) -> IngredientStockMovement:
     row = IngredientStockMovement(
         store_id=store_id,
@@ -238,6 +245,7 @@ def _movement(
         idempotency_key_hash=idempotency_key_hash,
         request_hash=request_hash,
         transfer_id=transfer_id,
+        stock_count_id=stock_count_id,
     )
     db.add(row)
     return row
@@ -1294,6 +1302,312 @@ def transfer_stock(
         existing = _find_transfer_by_key(db, source_store_id, key_hash)
         if existing is not None:
             return _replay_transfer(db, existing, request_hash)
+        raise
+    except HTTPException:
+        db.rollback()
+        raise
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Physical stock count
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# A count is NOT a manual adjustment. An adjustment records a difference; a count
+# records the two numbers the difference came FROM — what was on the shelf, and
+# what the system believed at that instant — and derives the difference from them.
+# That is what makes it checkable afterwards, what lets a shelf that was counted
+# and found CORRECT leave a trace, and what keeps counted shrinkage distinguishable
+# from a deliberate correction in the owner's reports.
+#
+# See app/models/inventory_stock_count.py and
+# docs/PHYSICAL_STOCK_COUNT_WORKFLOW.md.
+
+
+@dataclass(frozen=True)
+class StockCountResult:
+    """
+    A count's outcome.
+
+    ``movement`` is None for a ZERO-delta count — the shelf agreed with the system,
+    nothing physical happened, and nothing was written to the physical ledger. The
+    count row still exists: it is the evidence that the shelf was checked. That is
+    the documented policy, and the deferred trigger enforces it in both directions.
+    """
+
+    stock_count: InventoryStockCount
+    movement: Optional[IngredientStockMovement]
+    replayed: bool
+
+
+def _find_stock_count_by_key(
+    db: Session, store_id: int, key_hash: str
+) -> Optional[InventoryStockCount]:
+    """
+    Look up a previous count by idempotency key WITHIN THIS STORE.
+
+    Store-scoped for the same reason every other idempotency lookup here is: two
+    branch managers working from the same printed count sheet will legitimately
+    send the same Idempotency-Key, and that collision is a coincidence, not a
+    replay. Without the store in the lookup, Beşiktaş's count would return
+    Kadıköy's result and quietly correct nothing.
+    """
+    return (
+        db.query(InventoryStockCount)
+        .filter(
+            InventoryStockCount.store_id == store_id,
+            InventoryStockCount.idempotency_key_hash == key_hash,
+        )
+        .first()
+    )
+
+
+def _stock_count_movement(
+    db: Session, count: InventoryStockCount
+) -> Optional[IngredientStockMovement]:
+    """
+    The ledger movement a count produced, or None if its delta was zero.
+
+    There is at most one (uq_movement_stock_count), and the deferred trigger
+    guarantees there is EXACTLY one when the delta is non-zero and NONE when it is
+    zero — so this is never ambiguous.
+    """
+    return (
+        db.query(IngredientStockMovement)
+        .filter(IngredientStockMovement.stock_count_id == count.id)
+        .first()
+    )
+
+
+def _replay_stock_count(
+    db: Session, existing: InventoryStockCount, request_hash: str
+) -> StockCountResult:
+    """
+    Same key + same payload replays the original count, moving no further stock.
+    Same key + a DIFFERENT payload is a client bug or an attack: replaying the
+    original's result would silently discard the new intent — a manager who
+    re-counted and found 3.5 kg would be told the 3.85 kg they posted an hour ago
+    succeeded, and would walk away believing the shelf was reconciled.
+    """
+    if existing.request_hash != request_hash:
+        raise _conflict(
+            messages.INVENTORY_IDEMPOTENCY_MISMATCH, error="idempotency_mismatch"
+        )
+    return StockCountResult(
+        stock_count=existing,
+        movement=_stock_count_movement(db, existing),
+        replayed=True,
+    )
+
+
+def _require_non_negative(quantity) -> Decimal:
+    """
+    A counted quantity may be ZERO — an empty shelf is a perfectly good count, and
+    arguably the most important one to be able to record. It may never be negative.
+
+    This is deliberately NOT ``_require_positive``: reusing that here would make an
+    empty freezer impossible to report, and a manager who cannot say "there is none
+    left" will say nothing at all.
+    """
+    qty = q3(quantity)
+    if qty < ZERO:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_quantity",
+                "message": messages.INVENTORY_COUNT_QUANTITY_INVALID,
+            },
+        )
+    return qty
+
+
+def record_stock_count(
+    db: Session,
+    *,
+    store_id: int,
+    ingredient_id: int,
+    counted_quantity,
+    reason: str,
+    note: str | None = None,
+    actor_user_id: int,
+    idempotency_key: str | None = None,
+    ip_address: str | None = None,
+) -> StockCountResult:
+    """
+    Apply a physical count: make this store's on-hand equal what was counted.
+
+        on_hand  := counted_quantity        (via a signed STOCK_COUNT_ADJUSTMENT)
+        reserved :  UNCHANGED
+        available:  changes only because on_hand did (it is a generated column)
+
+    Reserved is deliberately untouched. A count observes what is physically on the
+    shelf; it says nothing about what has been promised to accepted orders, and a
+    manager counting the freezer has no business silently un-promising a waffle to
+    the customer waiting at table four.
+
+    ``store_id`` is the authenticated staff member's store, passed by the router
+    from the session. It is NEVER read from the request body — a Store A manager
+    cannot count Store B's freezer by naming Store B, and the database would refuse
+    the row even if this function were wrong (fk_stock_count_actor_store binds the
+    counter to their own store).
+
+    Counting BELOW reserved is refused with 409 ``stock_count_below_reserved``.
+    If the shelf holds 3 kg while 5 kg is promised, the honest reading is not "the
+    system was wrong" but "this shop has sold 2 kg it does not have". Writing on-hand
+    down to 3 would break ck_stock_reserved_le_on_hand; releasing reservations to
+    make room would break a promise to a waiting customer. Neither is a stock
+    correction — it is an operational incident, and it needs a human, not a silent
+    ledger row. Cancel or re-source the orders, then count.
+
+    ZERO-delta counts ARE recorded, and write NO movement. The shelf agreed with the
+    system: nothing physical happened, so nothing belongs in the physical ledger —
+    but the fact that somebody LOOKED is exactly what a count is for, so the count
+    row stands. ``result.movement`` is None. See the module docstring of
+    app/models/inventory_stock_count.py.
+
+    All-or-nothing: the count row, its movement (if any), the summary update and the
+    audit record are one database transaction. A deferred trigger re-checks at COMMIT
+    that the count and its movement agree, so a count that claims the shelf was
+    corrected while no stock actually moved cannot be committed.
+    """
+    key = _require_key(idempotency_key)
+    counted = _require_non_negative(counted_quantity)
+    why = _require_reason(reason)
+    memo = (note or "").strip() or None
+
+    key_hash = _sha256(key)
+    # The payload hash covers the request BODY only. The store is not in the body —
+    # it comes from the session — and it is already part of the idempotency lookup,
+    # so a match here is always a match within one store.
+    request_hash = _sha256(_canonical({
+        "cmd": "stock_count",
+        "ingredient_id": ingredient_id,
+        "counted_quantity": str(counted),
+        "reason": why,
+        "note": memo or "",
+    }))
+
+    existing = _find_stock_count_by_key(db, store_id, key_hash)
+    if existing is not None:
+        return _replay_stock_count(db, existing, request_hash)
+
+    try:
+        ingredient, stock = _load_stock_for_update(db, store_id, ingredient_id)
+
+        # Definitive idempotency re-check now that we hold the row lock: an
+        # identical concurrent count may have committed while we waited.
+        existing = _find_stock_count_by_key(db, store_id, key_hash)
+        if existing is not None:
+            db.rollback()
+            return _replay_stock_count(db, existing, request_hash)
+
+        # The system's belief, captured UNDER THE LOCK. This is the whole reason a
+        # count is not a client-computed delta: the figures the difference is
+        # measured against must be the ones that were true at the instant the count
+        # was applied, not the ones the manager's browser last saw. A concurrent
+        # order that reserved stock a second ago is reflected here.
+        system_on_hand = q3(stock.on_hand_quantity)
+        system_reserved = q3(stock.reserved_quantity)
+        delta = counted - system_on_hand
+
+        if counted < system_reserved:
+            raise _conflict(
+                messages.INVENTORY_STOCK_COUNT_BELOW_RESERVED,
+                error="stock_count_below_reserved",
+            )
+
+        count = InventoryStockCount(
+            store_id=store_id,
+            ingredient_id=ingredient_id,
+            counted_quantity=counted,
+            system_on_hand_quantity=system_on_hand,
+            system_reserved_quantity=system_reserved,
+            # delta_quantity is GENERATED by the database from the two columns
+            # above. It is deliberately not written here: a count must not be able
+            # to claim a delta its own numbers do not support.
+            unit=ingredient.unit,
+            reason=why,
+            note=memo,
+            status=STOCK_COUNT_APPLIED,
+            counted_by_user_id=actor_user_id,
+            idempotency_key_hash=key_hash,
+            request_hash=request_hash,
+        )
+        db.add(count)
+        db.flush()  # count.id, which the movement must carry
+
+        movement = None
+        if delta != ZERO:
+            movement = _movement(
+                db,
+                store_id=store_id,
+                ingredient_id=ingredient_id,
+                movement_type=MOVEMENT_STOCK_COUNT_ADJUSTMENT,
+                quantity=abs(delta),
+                delta_on_hand=delta,
+                # A count never moves a promise. Only the shelf.
+                delta_reserved=ZERO,
+                unit=ingredient.unit,
+                reason=why,
+                actor_user_id=actor_user_id,
+                stock_count_id=count.id,
+            )
+            # Set on-hand TO the counted figure rather than adding the delta to it:
+            # the shelf is the authority now, and this is the one place in the
+            # system where that is true. They are arithmetically identical under the
+            # lock, but this says what is meant.
+            stock.on_hand_quantity = counted
+        # else: zero delta. No movement, and on_hand is already equal to counted.
+        # reserved_quantity is untouched in BOTH branches.
+
+        audit(
+            db,
+            entity_type="inventory_stock_count",
+            entity_id=count.id,
+            action=AUDIT_STOCK_COUNTED,
+            actor_type="STAFF",
+            actor_id=str(actor_user_id),
+            ip_address=ip_address,
+            # No session token, no CSRF token, no idempotency key and no request
+            # hash: an audit trail that leaks a replayable credential is a
+            # liability, not a control.
+            payload_after={
+                "stock_count_id": count.id,
+                "store_id": store_id,
+                "ingredient_id": ingredient_id,
+                "counted_quantity": str(counted),
+                "system_on_hand_quantity": str(system_on_hand),
+                "system_reserved_quantity": str(system_reserved),
+                "delta_quantity": str(delta),
+                "unit": ingredient.unit,
+                "actor_user_id": actor_user_id,
+                "reason": why,
+                "status": STOCK_COUNT_APPLIED,
+            },
+        )
+
+        # The deferred count/movement trigger fires HERE. If the movement were
+        # missing, duplicated, or disagreed with the count's own delta, this COMMIT
+        # raises and no stock has moved.
+        db.commit()
+        db.refresh(count)
+        if movement is not None:
+            db.refresh(movement)
+        logger.info(
+            "inventory_stock_counted count=%s store=%s ingredient=%s counted=%s "
+            "system_on_hand=%s delta=%s actor=%s",
+            count.id, store_id, ingredient_id, counted, system_on_hand,
+            delta, actor_user_id,
+        )
+        return StockCountResult(stock_count=count, movement=movement, replayed=False)
+
+    except IntegrityError:
+        # A concurrent count with the same key committed between our re-check and
+        # the insert — uq_stock_count_store_idem caught it. Nothing of ours was
+        # written; return the winner's result rather than counting twice.
+        db.rollback()
+        existing = _find_stock_count_by_key(db, store_id, key_hash)
+        if existing is not None:
+            return _replay_stock_count(db, existing, request_hash)
         raise
     except HTTPException:
         db.rollback()

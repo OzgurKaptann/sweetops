@@ -266,14 +266,31 @@ returning `409` — money safe, stock corrupted.
 | `POST /inventory/purchase-receipts` | `PURCHASE_RECEIPT` | on-hand ↑ |
 | `POST /inventory/manual-adjustments` | `MANUAL_ADJUSTMENT` | on-hand ↑ or ↓ (signed `delta`) |
 | `POST /inventory/waste` | `WASTE` | on-hand ↓, stays visible as waste |
+| `POST /inventory/stock-counts` | `STOCK_COUNT_ADJUSTMENT` | on-hand ↑ or ↓, **set to the counted quantity** |
 
-Every one of them requires an **authenticated actor**, and adjustment and waste
-additionally require a **reason** — enforced by the database, not just the
+Every one of them requires an **authenticated actor**, and adjustment, waste and
+count additionally require a **reason** — enforced by the database, not just the
 service. An unexplained stock correction is indistinguishable from theft.
 
 A negative adjustment or waste that would push `on_hand` below `reserved` is
 refused with `409 insufficient_on_hand`: the shop cannot write off batter that a
-waiting customer's accepted order is already counting on.
+waiting customer's accepted order is already counting on. A **count** below reserved
+is refused too, with its own code (`stock_count_below_reserved`) — see below.
+
+### A physical count is not a manual adjustment
+
+`MANUAL_ADJUSTMENT` records a **difference** someone typed. A physical count records
+the **two numbers the difference came from** — what was on the shelf, and what the
+system believed at that instant — and derives the difference itself. That is what
+makes it checkable afterwards, what lets a shelf that was counted and found *correct*
+leave a trace at all (a zero-delta count is recorded; a zero-delta adjustment is
+rejected as a no-op), and what keeps counted shrinkage distinguishable from a
+deliberate correction in the owner's reports.
+
+So a count is a row in `inventory_stock_counts`, and the ledger movement — if the
+delta is non-zero — points back at it. It sets on-hand **to** the counted figure and
+never touches `reserved`. Full treatment:
+[`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md).
 
 ### Permissions
 
@@ -323,8 +340,27 @@ There are **no ambiguous bare signs**. A `-500` means nothing on its own;
 | `MANUAL_ADJUSTMENT` | ±quantity | 0 |
 | `TRANSFER_OUT` | −quantity | 0 |
 | `TRANSFER_IN` | +quantity | 0 |
+| `STOCK_COUNT_ADJUSTMENT` | ±quantity | 0 |
 
 A row cannot claim to be a `CONSUMPTION` while *adding* to physical stock.
+
+### The stock-count type
+
+`STOCK_COUNT_ADJUSTMENT` is the stock **effect** of a physical count — the signed
+delta that makes on-hand equal what the manager actually found on the shelf. It is
+never written alone: it carries a `stock_count_id`, and a composite foreign key pins
+it to that count's own store and ingredient. The **count** — which holds what was
+counted *and* what the system believed — is the event.
+
+A deferred constraint trigger refuses, at `COMMIT`, any count that does not have
+exactly the movement its own delta demands: **one** matching movement when the delta
+is non-zero, and **none** when it is zero. A count that found the shelf correct
+therefore has no ledger row at all, which is right — nothing physical happened — while
+the count row still stands as evidence that the shelf was checked.
+
+`quantity_delta_reserved` is pinned to `0`. A count observes the shelf; it never
+un-promises a waffle. See
+[`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md).
 
 ### The two transfer types
 
@@ -425,6 +461,23 @@ perfect agreement with each other — both simply short of physical reality — 
 per-store check is wrong. Only comparing the transfer row against its legs finds it.
 A broken pair fails the run and is reported to **both** branches.
 
+Since the physical stock count workflow there is a **fifth** check, of exactly the
+same shape:
+
+```
+   COUNT / MOVEMENT   every stock count has exactly the movement its own delta
+                      demands — ONE matching STOCK_COUNT_ADJUSTMENT when the delta
+                      is non-zero, and NONE when it is zero
+```
+
+A count's correction is an **ordinary** on-hand delta, so check 1 already accounts
+for it — it is not special-cased or excluded. What a total cannot see is a count
+whose movement is **missing or wrong**: the ledger and the summary still agree with
+each other (both hold the pre-count figure) while the count sheet says the shelf was
+corrected. Each record looks internally consistent on its own. The report names the
+`stock_count_id`. Zero-delta counts are the documented policy and are never reported
+as drift.
+
 The store is part of the grain for a reason: if Kadıköy is 40 g short and
 Beşiktaş is 40 g over, a chain-wide total is zero and the report says "OK" while
 both branches are broken. Totals are never summed across stores. See
@@ -449,19 +502,36 @@ python scripts/reconcile_inventory.py --json     # machine-readable, exit 1 on d
 | `available_quantity` | `on_hand − reserved` — what can still be **sold** |
 | `consumed_quantity` | physically used by the kitchen (`CONSUMPTION` movements) |
 | `waste_quantity` | physically thrown away (`WASTE` movements) |
-| `manual_adjustment_quantity` | count corrections (`MANUAL_ADJUSTMENT`) |
+| `manual_adjustment_quantity` | **decided** corrections (`MANUAL_ADJUSTMENT`) — *not* counts |
+| `stock_count_adjustment_quantity` | **counted** discrepancies (`STOCK_COUNT_ADJUSTMENT`) — its own correction type |
 | `purchase_receipt_quantity` | goods received (`PURCHASE_RECEIPT`) — **excludes `TRANSFER_IN`** |
 | `transfer_out_quantity` | shipped to another branch (`TRANSFER_OUT`) — **not waste** |
 | `transfer_in_quantity` | received from another branch (`TRANSFER_IN`) — **not a purchase** |
 | `stockout_risk` | computed from **`available`**, with velocity from **`CONSUMPTION`** |
 
-**Transfers are excluded from waste, purchase receipts and consumption velocity**,
-and this holds *by construction* rather than by a filter someone must remember: the
-analytics queries select `movement_type == CONSUMPTION` explicitly, so a new type is
-excluded from velocity unless someone deliberately adds it. A transfer *does* move
-`on_hand` and therefore `available`, so it legitimately changes **stockout risk** on
-both sides — a branch that ships away its last chocolate really is about to run out.
-Full definitions: [`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md) § 9.
+**Transfers and stock counts are excluded from waste, purchase receipts and
+consumption velocity**, and this holds *by construction* rather than by a filter
+someone must remember: the analytics queries select `movement_type == CONSUMPTION`
+explicitly, so a new type is excluded from velocity unless someone deliberately adds
+it. A transfer *does* move `on_hand` and therefore `available`, so it legitimately
+changes **stockout risk** on both sides — a branch that ships away its last chocolate
+really is about to run out.
+
+A **stock count** behaves the same way, and for the same reason: it is excluded from
+every flow metric (nobody ate, bought, binned or shipped anything — somebody *looked*)
+while absolutely moving `on_hand`, and therefore `available` and stockout risk. A
+count that finds the freezer nearly empty must make the branch look nearly out of
+stock; that is the entire operational point of counting. Being excluded from the flow
+metrics and reflected in the stock level are not in tension: one is about what
+*happened*, the other about what *is*.
+
+`STOCK_COUNT_ADJUSTMENT` is deliberately **not** folded into
+`manual_adjustment_quantity`. A count says "we looked, and reality differs"; an
+adjustment says "we know this figure is wrong". Merging them would hide counted
+shrinkage inside a metric that means "corrections we chose to make".
+
+Full definitions: [`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md) § 9
+and [`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md) § 10.
 
 Two corrections were needed, and both are now enforced by tests:
 

@@ -326,9 +326,12 @@ WebSocket store partitioning is unchanged.
 ```
 GET  /inventory/stock              inventory:read
 GET  /inventory/movements          inventory:read
+GET  /inventory/stock-counts       inventory:read
+GET  /inventory/stock-counts/{id}  inventory:read
 POST /inventory/purchase-receipts  inventory:adjust
 POST /inventory/manual-adjustments inventory:adjust
 POST /inventory/waste              inventory:adjust
+POST /inventory/stock-counts       inventory:adjust
 ```
 
 For every one of them:
@@ -347,6 +350,15 @@ receipt still lands in the caller's own store. (Tested.)
 A staff account with **no store** is refused (`403 no_store_assigned`). There is
 no chain-wide inventory view; inventory is physical, and physical stock sits in a
 named branch.
+
+**Physical stock counts** are store-scoped by the same rules, and the database backs
+them: `fk_stock_count_actor_store` binds the counter to the store whose shelf they
+counted, and `fk_stock_count_stock_store` requires that branch to actually hold a
+stock row for the ingredient. A Kadıköy manager counting Beşiktaş's freezer is not a
+permission check that could be got wrong — it is a row PostgreSQL will not store.
+Another branch's count reads back as `404 stock_count_not_found`, never a 403: a 403
+would confirm it exists. See
+[`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md).
 
 An ingredient the branch has never stocked returns **`404 stock_not_configured`**
 — deliberately distinct from "ingredient not found". The ingredient exists in the
@@ -371,6 +383,10 @@ printed run-book will legitimately send the same `Idempotency-Key` on the same
 day. That is a *coincidence, not a replay* — and if it were treated as one,
 Beşiktaş's 40 kg delivery would silently return Kadıköy's receipt and record no
 stock at all.
+
+Transfers (`uq_transfer_source_idem`) and stock counts (`uq_stock_count_store_idem`)
+scope their idempotency the same way, for the same reason. A printed **count sheet**
+is exactly the kind of shared run-book that produces the collision.
 
 Only `SHA-256(key)` and `SHA-256(canonical payload)` are ever stored. The raw key
 is never persisted.
@@ -474,6 +490,15 @@ ORDER LINES   SUM(reserved − consumed − released) over order_inventory_lines
 ```
 
 Every correlated subquery is keyed on **both** `store_id` and `ingredient_id`.
+
+Two further checks are about **linked rows** rather than totals, and neither can be
+seen by a per-store sum: **transfer pairing** (every transfer has both of its legs)
+and **count/movement agreement** (every stock count has exactly the movement its own
+delta demands — one when non-zero, none when zero). A stock count's correction is an
+ordinary on-hand delta and is fully accounted for by the ledger check above; what the
+extra check catches is a count whose movement is missing or wrong, which leaves the
+ledger and the summary agreeing with **each other** while disagreeing with the count
+sheet.
 
 **Why the store is part of the grain.** Reconciling across stores would be worse
 than not reconciling at all. Kadıköy 500 g short + Beşiktaş 500 g over — two

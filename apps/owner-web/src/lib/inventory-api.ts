@@ -135,6 +135,67 @@ export interface TransferDestinationListResponse {
   items: TransferDestination[];
 }
 
+/**
+ * The result of a physical count.
+ *
+ * `movement_id` is null when the shelf agreed with the system: nothing physical
+ * happened, so no ledger row was written. The count itself still exists — proving
+ * the shelf was checked is exactly what it is for. The UI must therefore treat a
+ * null `movement_id` as a SUCCESS with a different message, never as a failure.
+ *
+ * `system_on_hand_quantity` / `system_reserved_quantity` are what the SERVER
+ * believed at the instant it applied the count, read under a row lock. They may
+ * legitimately differ from what this screen last displayed — an order placed thirty
+ * seconds ago moves them — which is precisely why the delta is computed there and
+ * not here.
+ */
+export interface StockCountReceipt {
+  stock_count_id: number;
+  store_id: number;
+  ingredient_id: number;
+  ingredient_name: string | null;
+  counted_quantity: string;
+  system_on_hand_quantity: string;
+  system_reserved_quantity: string;
+  delta_quantity: string;
+  unit: string;
+  reason: string;
+  note: string | null;
+  status: string;
+  counted_by_user_id: number;
+  movement_id: number | null;
+  on_hand_quantity: string;
+  reserved_quantity: string;
+  available_quantity: string;
+  created_at: string;
+  applied_at: string;
+  idempotent_replay: boolean;
+}
+
+export interface StockCountItem {
+  stock_count_id: number;
+  store_id: number;
+  ingredient_id: number;
+  ingredient_name: string | null;
+  counted_quantity: string;
+  system_on_hand_quantity: string;
+  system_reserved_quantity: string;
+  delta_quantity: string;
+  unit: string;
+  reason: string;
+  note: string | null;
+  status: string;
+  counted_by_user_id: number;
+  movement_id: number | null;
+  created_at: string;
+  applied_at: string;
+}
+
+export interface StockCountListResponse {
+  total: number;
+  items: StockCountItem[];
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /**
@@ -322,4 +383,40 @@ export function createTransfer(
   idempotencyKey: string,
 ): Promise<TransferReceipt> {
   return postJson("/inventory/transfers", body, idempotencyKey);
+}
+
+/**
+ * A physical count.
+ *
+ * Note what this body does NOT carry: no delta, no system quantities, no store.
+ * The client states only what it COUNTED — the server reads what it believed from
+ * the locked stock row and works out the difference itself. A client-computed delta
+ * would be measured against whatever this screen last rendered, which an order
+ * placed in the meantime has already made stale. The backend rejects unknown fields
+ * outright, so sending them is not merely useless but a 422.
+ */
+export interface StockCountBody {
+  ingredient_id: number;
+  /** Decimal as a string. May be "0" — an empty shelf is a valid count. */
+  counted_quantity: string;
+  reason: string;
+  note?: string | null;
+}
+
+export function createStockCount(
+  body: StockCountBody,
+  idempotencyKey: string,
+): Promise<StockCountReceipt> {
+  return postJson("/inventory/stock-counts", body, idempotencyKey);
+}
+
+export function fetchStockCounts(params?: {
+  ingredientId?: number;
+  limit?: number;
+}): Promise<StockCountListResponse> {
+  const q = new URLSearchParams();
+  if (params?.ingredientId !== undefined) q.set("ingredient_id", String(params.ingredientId));
+  if (params?.limit !== undefined) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return getJson(`/inventory/stock-counts${qs ? `?${qs}` : ""}`);
 }

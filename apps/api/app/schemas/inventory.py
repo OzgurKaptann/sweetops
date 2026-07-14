@@ -194,6 +194,103 @@ class TransferListResponse(BaseModel):
     items: list[TransferItem]
 
 
+# ── Physical stock count ─────────────────────────────────────────────────────
+
+class StockCountRequest(BaseModel):
+    """
+    Apply a physical count to the caller's own store.
+
+    ``extra="forbid"``, so this schema does not merely IGNORE a smuggled
+    ``store_id`` / ``actor_user_id`` / ``movement_type`` / ``delta_quantity`` /
+    ``system_on_hand_quantity`` / ``idempotency_key_hash`` / ``request_hash`` — it
+    REJECTS the whole request with a 422. Silently ignoring them would leave a
+    client believing it had counted another branch's freezer, or had dictated the
+    delta, and cheerfully told so.
+
+    Note what is NOT here: the delta, and the system's figures. The client does not
+    get to state them — the server reads them from the locked stock row at the
+    instant the count is applied and computes the delta itself. A client-supplied
+    delta would be computed against whatever the manager's browser last saw, which
+    an order placed thirty seconds ago has already made stale.
+
+    ``counted_quantity`` may be ZERO: an empty shelf is a valid, and important,
+    count. It may not be negative (``ge=0``).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    ingredient_id: int
+    counted_quantity: Decimal = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=500)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class StockCountReceipt(BaseModel):
+    """
+    Result of a physical count: what was counted, what the system believed, and the
+    difference that was applied.
+
+    ``movement_id`` is None for a zero-delta count — the shelf agreed with the
+    system, so no ledger row was written. The count itself still exists and is still
+    evidence that the shelf was checked. See docs/PHYSICAL_STOCK_COUNT_WORKFLOW.md.
+
+    Neither the raw Idempotency-Key nor the request hash is ever exposed — they are
+    stored only as SHA-256 digests, and echoing either back would hand a client a
+    replay token.
+    """
+    stock_count_id: int
+    store_id: int
+    ingredient_id: int
+    ingredient_name: Optional[str] = None
+    counted_quantity: Decimal
+    system_on_hand_quantity: Decimal
+    system_reserved_quantity: Decimal
+    delta_quantity: Decimal
+    unit: str
+    reason: str
+    note: Optional[str] = None
+    status: str
+    counted_by_user_id: int
+    # Null when the count found the shelf correct: no stock moved, so no ledger row.
+    movement_id: Optional[int] = None
+    # The stock state AFTER the count was applied. on_hand now equals counted;
+    # reserved is untouched by definition.
+    on_hand_quantity: Decimal
+    reserved_quantity: Decimal
+    available_quantity: Decimal
+    created_at: datetime
+    applied_at: datetime
+    idempotent_replay: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StockCountItem(BaseModel):
+    """One count as it appears in the history list."""
+    stock_count_id: int
+    store_id: int
+    ingredient_id: int
+    ingredient_name: Optional[str] = None
+    counted_quantity: Decimal
+    system_on_hand_quantity: Decimal
+    system_reserved_quantity: Decimal
+    delta_quantity: Decimal
+    unit: str
+    reason: str
+    note: Optional[str] = None
+    status: str
+    counted_by_user_id: int
+    movement_id: Optional[int] = None
+    created_at: datetime
+    applied_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StockCountListResponse(BaseModel):
+    total: int
+    items: list[StockCountItem]
+
+
 class MovementReceipt(BaseModel):
     """Result of a manual stock command, including the resulting stock state.
 

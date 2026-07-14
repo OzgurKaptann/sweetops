@@ -22,6 +22,7 @@ import {
   InventoryNetworkUncertainError,
   createManualAdjustment,
   createPurchaseReceipt,
+  createStockCount,
   createTransfer,
   createWaste,
   fetchStock,
@@ -125,6 +126,99 @@ test("transfer sends the Idempotency-Key header", async () => {
   const req = seen();
   assert.equal(req.headers["Idempotency-Key"], "key-transfer-1");
   assert.match(req.url, /\/inventory\/transfers$/);
+});
+
+test("stock count sends the Idempotency-Key header", async () => {
+  const seen = captureOk();
+  await createStockCount(
+    {
+      ingredient_id: 1,
+      counted_quantity: "9.250",
+      reason: "Haftalık dolap sayımı",
+      note: null,
+    },
+    "key-count-1",
+  );
+
+  const req = seen();
+  assert.equal(req.headers["Idempotency-Key"], "key-count-1");
+  assert.match(req.url, /\/inventory\/stock-counts$/);
+  assert.equal(req.method, "POST");
+});
+
+test("a stock count sends only what was COUNTED — never the delta or the store", async () => {
+  // The server reads the system's figures from the row it locks and computes the
+  // difference itself. A client-supplied delta would be measured against whatever
+  // this screen last rendered, which an order placed since has already made stale —
+  // and the backend rejects unknown fields outright, so sending one is a 422.
+  const seen = captureOk();
+  await createStockCount(
+    {
+      ingredient_id: 1,
+      counted_quantity: "9.250",
+      reason: "Haftalık dolap sayımı",
+      note: null,
+    },
+    "key-count-2",
+  );
+
+  const body = seen().body as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), [
+    "counted_quantity",
+    "ingredient_id",
+    "note",
+    "reason",
+  ]);
+  for (const forbidden of [
+    "store_id",
+    "delta_quantity",
+    "system_on_hand_quantity",
+    "system_reserved_quantity",
+    "actor_user_id",
+    "movement_type",
+    "idempotency_key_hash",
+    "request_hash",
+    "status",
+  ]) {
+    assert.equal(forbidden in body, false, `${forbidden} must never be sent`);
+  }
+});
+
+test("a count with no key is refused locally, before the request is sent", async () => {
+  let called = false;
+  globalThis.fetch = (async () => {
+    called = true;
+    return { ok: true, status: 200, json: async () => ({}) } as Response;
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      createStockCount(
+        { ingredient_id: 1, counted_quantity: "9.250", reason: "sayim" },
+        "",
+      ),
+    (err: unknown) =>
+      err instanceof InventoryApiError && err.code === "idempotency_required",
+  );
+  assert.equal(called, false, "no count should have left the client");
+});
+
+test("a count whose outcome is unknown throws the UNCERTAIN error, not a failure", async () => {
+  // The stock may well have been corrected. Collapsing this into a generic failure
+  // is what makes a manager re-enter the form by hand, minting a fresh key and
+  // genuinely applying the correction twice.
+  globalThis.fetch = (async () => {
+    throw new TypeError("network down");
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      createStockCount(
+        { ingredient_id: 1, counted_quantity: "9.250", reason: "sayim" },
+        "key-count-3",
+      ),
+    (err: unknown) => err instanceof InventoryNetworkUncertainError,
+  );
 });
 
 test("a mutation with no key is refused locally, before the request is sent", async () => {
