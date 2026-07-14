@@ -39,6 +39,7 @@ from app.models.ingredient_stock import (
     IngredientStock,
     IngredientStockMovement,
 )
+from app.models.inventory_stock_count import InventoryStockCount
 from app.models.inventory_transfer import InventoryTransfer
 from app.models.store import Store
 from app.schemas.inventory import (
@@ -46,6 +47,10 @@ from app.schemas.inventory import (
     MovementListResponse,
     MovementReceipt,
     PurchaseReceiptRequest,
+    StockCountItem,
+    StockCountListResponse,
+    StockCountReceipt,
+    StockCountRequest,
     StockListResponse,
     TransferDestinationListResponse,
     TransferItem,
@@ -512,3 +517,196 @@ def get_transfer(
         )
     transfer, ingredient = row
     return _transfer_item(transfer, ingredient, store_id)
+
+
+# ── Physical stock counts ────────────────────────────────────────────────────
+#
+# A count is ONE business event that remembers what was on the shelf AND what the
+# system believed, not a bare signed correction. See
+# docs/PHYSICAL_STOCK_COUNT_WORKFLOW.md.
+#
+# The store is always the session's store. There is no store_id field to send
+# (StockCountRequest forbids unknown fields outright), and there is no
+# delta/system-quantity field either — the server reads those from the locked stock
+# row and computes the difference itself. A client cannot dictate the delta, and
+# cannot count another branch's freezer.
+
+
+def _movement_id_for_count(db: Session, count_id: int) -> int | None:
+    """The count's ledger movement, or None when its delta was zero."""
+    row = (
+        db.query(IngredientStockMovement.id)
+        .filter(IngredientStockMovement.stock_count_id == count_id)
+        .first()
+    )
+    return row.id if row else None
+
+
+def _count_item(
+    count: InventoryStockCount, ingredient: Ingredient, movement_id: int | None
+) -> dict:
+    return {
+        "stock_count_id": count.id,
+        "store_id": count.store_id,
+        "ingredient_id": count.ingredient_id,
+        "ingredient_name": ingredient.name if ingredient else None,
+        "counted_quantity": count.counted_quantity,
+        "system_on_hand_quantity": count.system_on_hand_quantity,
+        "system_reserved_quantity": count.system_reserved_quantity,
+        "delta_quantity": count.delta_quantity,
+        "unit": count.unit,
+        "reason": count.reason,
+        "note": count.note,
+        "status": count.status,
+        "counted_by_user_id": count.counted_by_user_id,
+        "movement_id": movement_id,
+        "created_at": count.created_at,
+        "applied_at": count.applied_at,
+    }
+
+
+def _count_receipt(
+    db: Session, result: inventory_service.StockCountResult
+) -> StockCountReceipt:
+    c = result.stock_count
+    stock = (
+        db.query(IngredientStock)
+        .filter(
+            IngredientStock.store_id == c.store_id,
+            IngredientStock.ingredient_id == c.ingredient_id,
+        )
+        .first()
+    )
+    ingredient = db.get(Ingredient, c.ingredient_id)
+    return StockCountReceipt(
+        stock_count_id=c.id,
+        store_id=c.store_id,
+        ingredient_id=c.ingredient_id,
+        ingredient_name=ingredient.name if ingredient else None,
+        counted_quantity=c.counted_quantity,
+        system_on_hand_quantity=c.system_on_hand_quantity,
+        system_reserved_quantity=c.system_reserved_quantity,
+        delta_quantity=c.delta_quantity,
+        unit=c.unit,
+        reason=c.reason,
+        note=c.note,
+        status=c.status,
+        counted_by_user_id=c.counted_by_user_id,
+        # None for a zero-delta count: nothing moved, so there is no ledger row.
+        movement_id=result.movement.id if result.movement else None,
+        on_hand_quantity=stock.on_hand_quantity if stock else 0,
+        reserved_quantity=stock.reserved_quantity if stock else 0,
+        available_quantity=stock.available_quantity if stock else 0,
+        created_at=c.created_at,
+        applied_at=c.applied_at,
+        idempotent_replay=result.replayed,
+    )
+
+
+@router.post("/stock-counts", response_model=StockCountReceipt)
+def create_stock_count(
+    body: StockCountRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_ADJUST)),
+):
+    """
+    Apply a physical count: set the caller's store's on-hand stock to what was
+    physically counted on the shelf.
+
+    Reserved stock never changes — a count observes the shelf, and says nothing
+    about promises already made to accepted orders. Available moves only because
+    on-hand did (it is a generated column).
+
+    A count BELOW reserved is refused (409 ``stock_count_below_reserved``): that is
+    not a stock correction, it is a shop discovering it has sold stock it does not
+    have, and it needs a human decision about the orders — not a silent ledger row.
+
+    A ZERO-delta count is recorded and writes no movement. Proving the shelf was
+    checked and found correct is the point.
+
+    Requires ``inventory:adjust`` — the same physical-stock authority as waste,
+    adjustment and transfer, and for the same reason: this permanently changes what
+    a branch believes is on its shelves. Plus a trusted Origin, a CSRF token, and an
+    ``Idempotency-Key``, so a retried count sheet is applied once.
+    """
+    _no_store(response)
+
+    result = inventory_service.record_stock_count(
+        db,
+        # The session's store. Never the body's.
+        store_id=_store_id(staff),
+        ingredient_id=body.ingredient_id,
+        counted_quantity=body.counted_quantity,
+        reason=body.reason,
+        note=body.note,
+        actor_user_id=staff.user_id,
+        idempotency_key=_idem_key(request),
+        ip_address=_client_ip(request),
+    )
+    return _count_receipt(db, result)
+
+
+@router.get("/stock-counts", response_model=StockCountListResponse)
+def list_stock_counts(
+    response: Response,
+    ingredient_id: int | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
+):
+    """Physical counts taken in the caller's store, newest first."""
+    _no_store(response)
+    store_id = _store_id(staff)
+
+    q = (
+        db.query(InventoryStockCount, Ingredient)
+        .join(Ingredient, Ingredient.id == InventoryStockCount.ingredient_id)
+        .filter(InventoryStockCount.store_id == store_id)
+    )
+    if ingredient_id is not None:
+        q = q.filter(InventoryStockCount.ingredient_id == ingredient_id)
+
+    rows = q.order_by(InventoryStockCount.id.desc()).limit(limit).all()
+    items = [
+        _count_item(c, ing, _movement_id_for_count(db, c.id)) for c, ing in rows
+    ]
+    return {"total": len(items), "items": items}
+
+
+@router.get("/stock-counts/{stock_count_id}", response_model=StockCountItem)
+def get_stock_count(
+    stock_count_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
+):
+    """
+    One count, if it was taken in the caller's store.
+
+    Another branch's count 404s rather than 403s: the caller has no business knowing
+    it exists, and a 403 would confirm that it does.
+    """
+    _no_store(response)
+    store_id = _store_id(staff)
+
+    row = (
+        db.query(InventoryStockCount, Ingredient)
+        .join(Ingredient, Ingredient.id == InventoryStockCount.ingredient_id)
+        .filter(
+            InventoryStockCount.id == stock_count_id,
+            InventoryStockCount.store_id == store_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "stock_count_not_found",
+                "message": messages.INVENTORY_STOCK_COUNT_NOT_FOUND,
+            },
+        )
+    count, ingredient = row
+    return _count_item(count, ingredient, _movement_id_for_count(db, count.id))

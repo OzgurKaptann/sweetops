@@ -37,8 +37,15 @@ from tests.conftest import (
 
 _API_DIR = Path(__file__).resolve().parents[1]
 
-_REVISION = "f4b8c1d90e26"          # inventory transfer workflow (head)
+_REVISION = "f4b8c1d90e26"          # inventory transfer workflow (this branch)
 _PREVIOUS = "e2c9a4b16d38"          # store-scoped inventory
+
+# This migration is no longer the head — later branches (the physical stock count
+# workflow, and whatever follows) stack on top of it. So nothing here may assume it
+# IS the head: it asserts only that the chain has exactly ONE head, that this
+# revision is in the applied history, and that a round trip returns the database to
+# whatever the head currently is. Hardcoding the newest revision here is what makes
+# every future migration break this file.
 
 _PAIRING_TRIGGERS = (
     ("inventory_transfers", "trg_inventory_transfers_paired"),
@@ -132,6 +139,21 @@ def _check_clause(name: str) -> str:
     ) or ""
 
 
+def _head_revision() -> str:
+    """
+    The chain's current head, read from Alembic rather than hardcoded.
+
+    This branch is no longer the head, and the one after it will not be either. A
+    test that pins the newest revision id is a test that every future migration has
+    to come back and edit.
+    """
+    proc = _alembic_raw("heads")
+    assert proc.returncode == 0, proc.stderr
+    heads = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    assert len(heads) == 1, f"Alembic must have exactly one head, got: {heads}"
+    return heads[0].split()[0]
+
+
 @pytest.fixture(autouse=True)
 def _restore_head():
     """Whatever a test does to the schema, put the database back at head."""
@@ -146,11 +168,18 @@ def _restore_head():
 def test_alembic_has_a_single_head():
     """Two heads mean `alembic upgrade head` is ambiguous and deployment is a
     coin toss. See docs/ALEMBIC_SINGLE_HEAD_RESOLUTION.md."""
-    proc = _alembic_raw("heads")
+    _head_revision()  # asserts exactly one head
+
+
+def test_this_revision_is_in_the_applied_history():
+    """
+    This branch is an ANCESTOR of the head now, not the head itself. What must
+    remain true is that it is actually applied — its schema is present and the
+    database has run through it.
+    """
+    proc = _alembic_raw("history")
     assert proc.returncode == 0, proc.stderr
-    heads = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    assert len(heads) == 1, f"Alembic must have exactly one head, got: {heads}"
-    assert _REVISION in heads[0]
+    assert _REVISION in proc.stdout
 
 
 def test_transfer_table_and_movement_columns_exist():
@@ -296,9 +325,11 @@ def test_downgrade_removes_only_this_branch_and_reupgrade_restores_it(db):
     )
 
     # ── Re-upgrade ─────────────────────────────────────────────────────────
+    # Back to whatever the head is now — this branch plus everything stacked on top
+    # of it, not this branch alone.
     _alembic("upgrade", "head")
 
-    assert _scalar("SELECT version_num FROM alembic_version") == _REVISION
+    assert _scalar("SELECT version_num FROM alembic_version") == _head_revision()
     assert _table_exists("inventory_transfers")
     for name in _TRANSFER_CONSTRAINTS:
         assert _constraint_exists(name), f"{name} did not come back"
@@ -351,8 +382,12 @@ def test_downgrade_refuses_while_transfers_exist(db, make_store, make_staff):
         combined = proc.stdout + proc.stderr
         assert "TransfersExist" in combined or "transfer(s) exist" in combined, combined
 
-        # Nothing was committed: the schema and the transfer are both intact.
-        assert _scalar("SELECT version_num FROM alembic_version") == _REVISION
+        # Nothing was committed: the schema and the transfer are both intact. The
+        # whole downgrade runs in ONE transaction, so the refusal rolls back every
+        # step of it — including the later branches that were being unwound on the
+        # way down to this one. The database is therefore still at HEAD, not at this
+        # revision.
+        assert _scalar("SELECT version_num FROM alembic_version") == _head_revision()
         assert _table_exists("inventory_transfers")
         assert _scalar(
             "SELECT count(*) FROM inventory_transfers WHERE ingredient_id = :i", i=ing_id

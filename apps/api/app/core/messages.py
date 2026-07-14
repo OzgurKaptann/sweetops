@@ -144,6 +144,26 @@ INVENTORY_TRANSFER_INSUFFICIENT_AVAILABLE = (
 INVENTORY_TRANSFER_NOT_FOUND = "Bu transfer bulunamadı."
 
 
+# ── Physical stock count ─────────────────────────────────────────────────────
+# The counted quantity is below what accepted orders are already promised. This is
+# NOT a stock correction — it means the shop has sold stock it does not physically
+# have, and quietly writing on-hand down would break a promise made to a customer
+# who is sitting at a table waiting. So the message names the cause (ayrılmış stok)
+# and points at the only honest fix: deal with the orders first, then count.
+INVENTORY_STOCK_COUNT_BELOW_RESERVED = (
+    "Sayım sonucu, bekleyen siparişler için ayrılmış stoktan düşük olamaz. "
+    "Önce ilgili siparişleri kontrol edin."
+)
+
+# A counted quantity may be ZERO — an empty shelf is a valid count, and the one a
+# manager most needs to be able to report. It may never be negative.
+INVENTORY_COUNT_QUANTITY_INVALID = "Sayım sonucu negatif olamaz."
+
+# No such count, or it belongs to another branch. A 404 and not a 403: a 403 would
+# confirm the count exists.
+INVENTORY_STOCK_COUNT_NOT_FOUND = "Bu sayım kaydı bulunamadı."
+
+
 # ── Payment settlement / cashier (cashier-web) ───────────────────────────────
 # Order/table/settlement not found or belongs to another store — non-disclosing,
 # but still tells the cashier what to do next instead of "kayıt bulunamadı".

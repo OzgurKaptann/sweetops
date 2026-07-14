@@ -16,6 +16,7 @@ import {
 } from "@/lib/inventory-api";
 import { inventoryErrorMessage } from "@/lib/inventory-errors";
 import {
+  INVENTORY_ACTIONS,
   INVENTORY_COPY,
   type OperationBanner,
   type OperationKind,
@@ -36,13 +37,8 @@ import {
 
 const MOVEMENT_LIMIT = 100;
 
-const ACTIONS: Array<{ kind: OperationKind; label: string; primary?: boolean }> = [
-  { kind: "purchase_receipt", label: "Mal kabul", primary: true },
-  { kind: "waste", label: "Fire kaydı" },
-  { kind: "manual_adjustment", label: "Manuel düzeltme" },
-  { kind: "transfer", label: "Şube transferi" },
-];
-
+// The action list (and its Turkish copy) lives in lib/inventory-view.ts, where the
+// rest of this screen's copy is written and unit-tested.
 const BANNER_STYLE: Record<OperationBanner["tone"], string> = {
   success: "bg-emerald-50 border-emerald-200 text-emerald-800",
   info: "bg-blue-50 border-blue-200 text-blue-800",
@@ -162,7 +158,7 @@ export default function InventoryPage() {
         {/* Actions */}
         {canAdjust ? (
           <div className="flex flex-wrap gap-2">
-            {ACTIONS.map(({ kind, label, primary }) => (
+            {INVENTORY_ACTIONS.map(({ kind, label, primary }) => (
               <button
                 key={kind}
                 onClick={() => {

@@ -22,6 +22,15 @@
  *   TRANSFER_IN      — stock received from another branch. Nothing was bought.
  * Labelling a transfer as "Fire" or "Mal kabul" would quietly corrupt the
  * owner's read of both waste and purchasing.
+ *
+ * A third distinction, and the same kind of mistake:
+ *   MANUAL_ADJUSTMENT      — "Manuel düzeltme". Someone knew a figure was wrong and
+ *                            corrected it.
+ *   STOCK_COUNT_ADJUSTMENT — "Sayım düzeltmesi". Someone COUNTED the shelf and the
+ *                            system was made to agree with what they found.
+ * They are different events with different evidence behind them. Showing a counted
+ * discrepancy as "Manuel düzeltme" would hide shrinkage inside a label that means
+ * "we decided to change this number".
  */
 export const MOVEMENT_TYPE_LABEL: Record<string, string> = {
   RESERVATION_CREATED: "Stok ayrıldı",
@@ -33,6 +42,7 @@ export const MOVEMENT_TYPE_LABEL: Record<string, string> = {
   PURCHASE_RECEIPT: "Mal kabul",
   TRANSFER_OUT: "Şubeden çıkış",
   TRANSFER_IN: "Şubeye giriş",
+  STOCK_COUNT_ADJUSTMENT: "Sayım düzeltmesi",
 };
 
 /** Kitchen preparation state of an order. */

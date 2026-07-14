@@ -39,6 +39,18 @@ export const INVENTORY_ERROR_NETWORK_UNCERTAIN =
   "aynı işlemi tekrar göndermeden önce sonucu doğrulayın.";
 
 /**
+ * The same uncertainty, said in the vocabulary of a physical count.
+ *
+ * Worth its own string rather than reusing the generic one: a manager holding a
+ * count sheet is thinking about a SAYIM, not an "işlem", and the instruction that
+ * actually protects the ledger — go and look at the movements before you send it
+ * again — has to be the thing they read.
+ */
+export const STOCK_COUNT_ERROR_NETWORK_UNCERTAIN =
+  "Sayım sonucunun kaydedilip kaydedilmediği doğrulanamadı. " +
+  "Aynı işlemi tekrar göndermeden önce stok hareketlerini kontrol edin.";
+
+/**
  * Backend `error` code → Turkish copy.
  *
  * Codes come from app/services/inventory_service.py and app/core/deps.py and are
@@ -66,6 +78,16 @@ export const INVENTORY_ERROR_MESSAGE: Record<string, string> = {
   same_store_transfer: "Kaynak ve hedef şube aynı olamaz.",
   destination_store_not_found: "Hedef şube bulunamadı.",
   transfer_not_found: "Bu transfer bulunamadı.",
+
+  // ── Physical stock count ───────────────────────────────────────────────────
+  // NOT phrased as "the count is wrong". The count may well be right — that is
+  // precisely the problem, because it means the shop has promised stock it does not
+  // physically have. So the copy sends the manager to the orders, which is the only
+  // place that can actually be resolved.
+  stock_count_below_reserved:
+    "Sayım sonucu ayrılmış stoktan düşük olamaz. Ayrılmış stok bekleyen siparişler " +
+    "için tutuluyor; önce ilgili siparişleri kontrol edin.",
+  stock_count_not_found: "Bu sayım kaydı bulunamadı.",
 
   // ── Command validation ─────────────────────────────────────────────────────
   invalid_quantity: "Stok miktarı sıfırdan büyük olmalı.",
@@ -120,10 +142,17 @@ export function looksDisplaySafe(message: string): boolean {
 /**
  * The one function a component calls. Give it whatever was thrown; get back a
  * sentence a manager can act on.
+ *
+ * `kind` is optional and only changes the NETWORK-UNCERTAIN copy, where the
+ * operation's own vocabulary matters: a manager holding a count sheet needs to read
+ * about a sayım. Everything else resolves identically for every operation, because
+ * the backend's error codes already are the specific thing.
  */
-export function inventoryErrorMessage(err: unknown): string {
+export function inventoryErrorMessage(err: unknown, kind?: string): string {
   if (err instanceof InventoryNetworkUncertainError) {
-    return INVENTORY_ERROR_NETWORK_UNCERTAIN;
+    return kind === "stock_count"
+      ? STOCK_COUNT_ERROR_NETWORK_UNCERTAIN
+      : INVENTORY_ERROR_NETWORK_UNCERTAIN;
   }
 
   if (err instanceof InventoryApiError) {

@@ -32,6 +32,29 @@ create one (a deferred constraint trigger checks the pairing at COMMIT), so this
 check is here to catch what got in some OTHER way: a manual SQL edit, a restore
 from an inconsistent backup, a future migration bug.
 
+...and, since the physical stock count workflow, a fifth check of the same shape:
+
+    5. COUNT / MOVEMENT every stock count has exactly the ledger movement its own
+                        delta demands — ONE matching STOCK_COUNT_ADJUSTMENT when the
+                        delta is non-zero, and NONE when it is zero
+
+A count's correction is an ORDINARY on-hand delta, so check 1 already accounts for
+it: the STOCK_COUNT_ADJUSTMENT is summed with every other movement and the store
+reconciles on its own. It is deliberately NOT special-cased or excluded — a count
+saying the shelf holds 350 g less really does mean the shelf holds 350 g less.
+
+What check 1 cannot see is a count whose movement is MISSING or WRONG. A count row
+claiming the shelf was corrected, with no movement behind it, leaves the ledger and
+the summary in perfect agreement with each other — both simply still hold the old
+figure, and nothing in a per-store total is wrong. The count sheet and the ledger
+then tell different stories and each looks internally consistent. Only comparing the
+count against its movement finds it.
+
+Zero-delta counts are the documented policy and are NOT drift: the shelf agreed with
+the system, nothing physical happened, and no movement was written. Such a count
+contributes nothing to the ledger and must never be reported as a mismatch — it is
+evidence that the shelf was checked, which is exactly what it is for.
+
 Why the store is part of the grain
 ----------------------------------
 Reconciling across stores would be worse than not reconciling at all. Suppose
@@ -283,6 +306,139 @@ def _transfer_issue(out_count: int, in_count: int) -> str:
     return f"duplicated legs (out={out_count}, in={in_count})"
 
 
+def reconcile_stock_counts(
+    store_id: int | None = None,
+    ingredient_id: int | None = None,
+) -> list[dict]:
+    """
+    Return one row per BROKEN stock count — a count whose ledger movement does not
+    match it.
+
+    A healthy count produces exactly the movement its own delta demands:
+
+        delta <> 0   ONE  STOCK_COUNT_ADJUSTMENT in the count's store, for its
+                          ingredient, with quantity = abs(delta),
+                          quantity_delta_on_hand = delta, quantity_delta_reserved = 0
+        delta  = 0   NONE — the shelf agreed with the system, so nothing physical
+                          happened and nothing belongs in the physical ledger
+
+    Anything else is a count that cannot be trusted, and the two cases are reported
+    apart because they mean opposite things:
+
+        non-zero delta, no movement   the shelf was corrected on PAPER only. The
+                                      system still believes the old figure, and the
+                                      count sheet says otherwise.
+        zero delta, a movement        stock was moved by a count that found nothing
+                                      wrong — an unexplained correction wearing a
+                                      count's clothes.
+        wrong amount / direction      the ledger moved a different quantity from the
+                                      one the count says it found.
+        duplicated                    the same correction posted twice.
+
+    A zero-delta count with no movement is HEALTHY and is never reported.
+    """
+    db = SessionLocal()
+    try:
+        filters = []
+        params: dict = {}
+        if store_id is not None:
+            filters.append("c.store_id = :sid")
+            params["sid"] = store_id
+        if ingredient_id is not None:
+            filters.append("c.ingredient_id = :iid")
+            params["iid"] = ingredient_id
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+        rows = db.execute(
+            text(
+                f"""
+                SELECT
+                    c.id                  AS stock_count_id,
+                    c.store_id            AS store_id,
+                    st.name               AS store_name,
+                    c.ingredient_id       AS ingredient_id,
+                    i.name                AS ingredient_name,
+                    c.counted_quantity    AS counted_quantity,
+                    c.system_on_hand_quantity AS system_on_hand_quantity,
+                    c.delta_quantity      AS delta_quantity,
+                    c.unit                AS unit,
+                    c.status              AS status,
+                    COALESCE((
+                        SELECT COUNT(*)
+                        FROM ingredient_stock_movements m
+                        WHERE m.stock_count_id          = c.id
+                          AND m.movement_type           = 'STOCK_COUNT_ADJUSTMENT'
+                          AND m.store_id                = c.store_id
+                          AND m.ingredient_id           = c.ingredient_id
+                          AND m.quantity                = abs(c.delta_quantity)
+                          AND m.quantity_delta_on_hand  = c.delta_quantity
+                          AND m.quantity_delta_reserved = 0
+                    ), 0)                 AS matching_count,
+                    COALESCE((
+                        SELECT COUNT(*)
+                        FROM ingredient_stock_movements m
+                        WHERE m.stock_count_id = c.id
+                    ), 0)                 AS movement_count
+                FROM inventory_stock_counts c
+                JOIN ingredients i  ON i.id  = c.ingredient_id
+                JOIN stores      st ON st.id = c.store_id
+                {where}
+                ORDER BY c.id
+                """
+            ),
+            params,
+        ).fetchall()
+    finally:
+        db.close()
+
+    results: list[dict] = []
+    for r in rows:
+        delta = _q3(r.delta_quantity)
+        matching = int(r.matching_count)
+        total = int(r.movement_count)
+
+        if delta == 0 and total == 0:
+            continue  # healthy: the shelf was checked and found correct
+        if delta != 0 and matching == 1 and total == 1:
+            continue  # healthy: exactly the movement the delta demands
+
+        results.append({
+            "stock_count_id": r.stock_count_id,
+            "store_id": r.store_id,
+            "store_name": r.store_name,
+            "ingredient_id": r.ingredient_id,
+            "ingredient_name": r.ingredient_name,
+            "counted_quantity": str(_q3(r.counted_quantity)),
+            "system_on_hand_quantity": str(_q3(r.system_on_hand_quantity)),
+            "delta_quantity": str(delta),
+            "unit": r.unit,
+            "status": r.status,
+            "matching_movements": matching,
+            "total_movements": total,
+            "issue": _stock_count_issue(delta, matching, total),
+        })
+    return results
+
+
+def _stock_count_issue(delta: Decimal, matching: int, total: int) -> str:
+    if delta == 0:
+        return (
+            f"zero-delta count has {total} ledger movement(s) — stock was moved by a "
+            "count that found nothing wrong"
+        )
+    if total == 0:
+        return (
+            "missing STOCK_COUNT_ADJUSTMENT — the shelf was corrected on paper only, "
+            "and the system still believes the pre-count figure"
+        )
+    if total > 1:
+        return f"duplicated movements (total={total}, matching={matching})"
+    return (
+        "movement does not match the count — wrong quantity, wrong direction, wrong "
+        "store/ingredient, or it moved reserved stock"
+    )
+
+
 def _group_by_store(rows: list[dict]) -> dict[int, list[dict]]:
     grouped: dict[int, list[dict]] = {}
     for row in rows:
@@ -313,6 +469,10 @@ def main() -> int:
     broken_transfers = reconcile_transfers(
         store_id=args.store_id, ingredient_id=args.ingredient
     )
+    # ...and so is count/movement agreement, for exactly the same reason.
+    broken_counts = reconcile_stock_counts(
+        store_id=args.store_id, ingredient_id=args.ingredient
+    )
 
     if args.json:
         # Per-store counts as well as the overall count: a caller must be able to
@@ -322,6 +482,7 @@ def main() -> int:
             "checked_count": len(rows),
             "mismatch_count": len(mismatches),
             "broken_transfer_count": len(broken_transfers),
+            "broken_stock_count_count": len(broken_counts),
             "stores": [
                 {
                     "store_id": sid,
@@ -335,14 +496,15 @@ def main() -> int:
                 for sid, store_rows in by_store.items()
             ],
             "broken_transfers": broken_transfers,
+            "broken_stock_counts": broken_counts,
         }, indent=2))
-        return 1 if (mismatches or broken_transfers) else 0
+        return 1 if (mismatches or broken_transfers or broken_counts) else 0
 
     scope = "all stores" if args.store_id is None else f"store {args.store_id}"
     if args.ingredient is not None:
         scope += f", ingredient {args.ingredient}"
 
-    if not rows and not broken_transfers:
+    if not rows and not broken_transfers and not broken_counts:
         print(f"Inventory reconciliation: no stock rows found ({scope}).")
         return 0
 
@@ -411,7 +573,30 @@ def main() -> int:
                 f"TRANSFER_IN rows={t['transfer_in_movements']})"
             )
 
-    return 1 if (mismatches or broken_transfers) else 0
+    # ── Stock count / movement agreement ──────────────────────────────────
+    if not broken_counts:
+        print(
+            f"\n  stock counts: every count has exactly the ledger movement its "
+            f"delta demands ({scope})."
+        )
+    else:
+        print(f"\n  BROKEN STOCK COUNTS ({len(broken_counts)}):")
+        for c in broken_counts:
+            print(
+                f"    stock_count {c['stock_count_id']}: "
+                f"store {c['store_id']} ({c['store_name']}), "
+                f"ingredient {c['ingredient_id']} ({c['ingredient_name']}), "
+                f"counted {c['counted_quantity']} {c['unit']} "
+                f"vs system {c['system_on_hand_quantity']} {c['unit']} "
+                f"(delta {c['delta_quantity']} {c['unit']})"
+            )
+            print(
+                f"      {c['issue']} "
+                f"(matching movements={c['matching_movements']}, "
+                f"total={c['total_movements']})"
+            )
+
+    return 1 if (mismatches or broken_transfers or broken_counts) else 0
 
 
 if __name__ == "__main__":

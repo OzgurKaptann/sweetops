@@ -30,6 +30,7 @@ from app.models.ingredient_stock import (
     IngredientStockMovement,
     OrderInventoryLine,
 )
+from app.models.inventory_stock_count import InventoryStockCount
 from app.models.inventory_transfer import InventoryTransfer
 from app.models.order import Order
 from app.models.order_item import OrderItem
@@ -215,9 +216,14 @@ def stock_for(
 # role owns the table) and is unreachable from ordinary application DML or an
 # SQL-injection path, so it is not a production bypass. The trigger is restored
 # before the transaction commits.
-_INVENTORY_TRIGGER = (
-    "ingredient_stock_movements",
-    "trg_ingredient_stock_movements_immutable",
+#
+# inventory_stock_counts is append-only for the same reason and by the same
+# function: a count that was got wrong is superseded by counting again, never
+# edited, so today's manager cannot rewrite what yesterday's manager says they saw
+# on the shelf.
+_INVENTORY_TRIGGERS = (
+    ("ingredient_stock_movements", "trg_ingredient_stock_movements_immutable"),
+    ("inventory_stock_counts", "trg_inventory_stock_counts_immutable"),
 )
 
 
@@ -225,12 +231,13 @@ _INVENTORY_TRIGGER = (
 def _inventory_maintenance(db: Session):
     """Ownership-gated teardown escape hatch — see note above."""
     from sqlalchemy import text
-    table, trig = _INVENTORY_TRIGGER
-    db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {trig}"))
+    for table, trig in _INVENTORY_TRIGGERS:
+        db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {trig}"))
     try:
         yield
     finally:
-        db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trig}"))
+        for table, trig in _INVENTORY_TRIGGERS:
+            db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trig}"))
 
 
 def purge_inventory_for_orders(db: Session, order_ids: list[int]) -> None:
@@ -321,6 +328,13 @@ def purge_inventory_for_store(db: Session, store_id: int) -> None:
             IngredientStockMovement.store_id == store_id
         ).delete(synchronize_session=False)
 
+        # Stock counts, once the movements that FK to them are gone. Unlike a
+        # transfer, a count lives entirely in ONE store, so this store's counts are
+        # exactly the ones to remove.
+        db.query(InventoryStockCount).filter(
+            InventoryStockCount.store_id == store_id
+        ).delete(synchronize_session=False)
+
     if transfer_ids:
         db.query(InventoryTransfer).filter(
             InventoryTransfer.id.in_(transfer_ids)
@@ -364,6 +378,13 @@ def cleanup_ingredient(db: Session, ingredient_id: int) -> None:
     with _inventory_maintenance(db):
         db.query(IngredientStockMovement).filter(
             IngredientStockMovement.ingredient_id == ingredient_id
+        ).delete(synchronize_session=False)
+
+        # Stock counts, once the movements that FK to them are gone. They also FK
+        # to ingredient_stock (deleted below) and to users, so they cannot outlive
+        # this call.
+        db.query(InventoryStockCount).filter(
+            InventoryStockCount.ingredient_id == ingredient_id
         ).delete(synchronize_session=False)
 
     # Transfers next: their legs are gone, and they FK to ingredient_stock (about

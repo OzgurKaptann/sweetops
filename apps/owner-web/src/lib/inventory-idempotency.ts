@@ -56,11 +56,28 @@ export interface TransferCommand {
   note?: string | null;
 }
 
+/**
+ * A physical count.
+ *
+ * `countedQuantity` is what was found on the shelf — NOT a delta. The delta is the
+ * server's to compute, so it is not part of the command and not part of its
+ * fingerprint: two counts of the same shelf that found the same quantity are the
+ * same command, even if the system's belief moved between them.
+ */
+export interface StockCountCommand {
+  kind: "stock_count";
+  ingredientId: number;
+  countedQuantity: string;
+  reason: string;
+  note?: string | null;
+}
+
 export type InventoryCommand =
   | PurchaseReceiptCommand
   | WasteCommand
   | ManualAdjustmentCommand
-  | TransferCommand;
+  | TransferCommand
+  | StockCountCommand;
 
 /**
  * Deterministic fingerprint of the *logical* command.
@@ -98,6 +115,14 @@ export function fingerprintCommand(cmd: InventoryCommand): string {
         destinationStoreId: cmd.destinationStoreId,
         ingredientId: cmd.ingredientId,
         quantity: cmd.quantity,
+        reason: cmd.reason,
+        note: cmd.note ?? null,
+      });
+    case "stock_count":
+      return JSON.stringify({
+        kind: cmd.kind,
+        ingredientId: cmd.ingredientId,
+        countedQuantity: cmd.countedQuantity,
         reason: cmd.reason,
         note: cmd.note ?? null,
       });
