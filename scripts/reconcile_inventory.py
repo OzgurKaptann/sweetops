@@ -55,6 +55,27 @@ the system, nothing physical happened, and no movement was written. Such a count
 contributes nothing to the ledger and must never be reported as a mismatch — it is
 evidence that the shelf was checked, which is exactly what it is for.
 
+...and, since inventory threshold alerts, a sixth check that is NOT a stock check at
+all, and is reported separately for exactly that reason:
+
+    6. THRESHOLDS       every configured alert threshold is coherent (non-negative,
+                        and critical <= minimum <= target across whichever of them are
+                        set)
+
+A threshold is CONFIGURATION, not stock. It is the level at which a branch wants to be
+warned — not a quantity anybody owns. No threshold column appears anywhere in checks
+1–5: not in the summary, not in the ledger, not in the order lines. So a threshold
+cannot cause a stock mismatch, cannot contribute to one, and cannot mask one, and
+editing a threshold moves no stock (which is why the threshold endpoint writes no
+ledger movement at all).
+
+Consequently threshold problems are WARNINGS and do NOT affect the exit code. This
+script exits non-zero when the STOCK is wrong; a nonsensical warning level does not
+make the shop's books wrong, it just makes its alert screen useless. Folding the two
+together would mean a mis-set threshold produced a failing reconciliation, and the
+next person to see one would learn that a red reconciliation does not necessarily mean
+the stock is wrong — which is the one thing it must always mean.
+
 Why the store is part of the grain
 ----------------------------------
 Reconciling across stores would be worse than not reconciling at all. Suppose
@@ -439,6 +460,140 @@ def _stock_count_issue(delta: Decimal, matching: int, total: int) -> str:
     )
 
 
+def audit_thresholds(
+    store_id: int | None = None,
+    ingredient_id: int | None = None,
+) -> list[dict]:
+    """
+    Return one row per stock row whose ALERT THRESHOLDS are incoherent.
+
+    Read the boundary here carefully, because it is the whole point of this function
+    existing separately from every other check in this file:
+
+        A threshold is NOT stock.
+
+    It is a setting — the level at which a branch wants to be warned. It is not a
+    quantity anybody owns, it never appears in the ledger, and no threshold column is
+    read by ``reconcile()``. So a threshold can NEVER cause a stock-vs-ledger mismatch,
+    can never contribute to one, and can never mask one. Editing a threshold moves no
+    stock, which is exactly why the threshold endpoint writes no movement.
+
+    That is also why the anomalies found here are reported as WARNINGS and do not
+    change the exit code. This script's contract is "every summary matches its ledger
+    and its order lines", and a nonsensical warning level does not falsify that
+    contract — the shop's books are still correct, its alert screen is just badly
+    configured. Folding the two together would mean a mis-set threshold made the stock
+    reconciliation "fail", and the next person to see a red build would learn to ignore
+    it.
+
+    What is reported:
+
+        negative threshold      promises an alert that can never fire (no quantity can
+                                go below zero), so the manager believes they are
+                                covered by a control that silently does nothing
+        critical > minimum      an inverted ladder: the ingredient reaches CRITICAL
+                                before it ever reaches LOW, so the early warning never
+                                appears at all
+        minimum > target        restocking to target lands the branch straight back
+                                into LOW — a replenishment that is a warning the moment
+                                it arrives
+        critical > target       the same, one rung down; the only thing holding these
+                                two together when minimum is not configured
+
+    Every one of these is refused by a CHECK constraint (see migration c8a4e7b13f92),
+    so a healthy database cannot produce one. This check is here to catch what got in
+    some OTHER way: a manual SQL edit, a restore from an inconsistent backup, a future
+    migration bug.
+
+    NOT reported: an unconfigured threshold. NULL means "nobody has said what low means
+    here", which is a perfectly valid state and the one every branch starts in. Nagging
+    about it would train people to ignore this report.
+    """
+    db = SessionLocal()
+    try:
+        filters = []
+        params: dict = {}
+        if store_id is not None:
+            filters.append("s.store_id = :sid")
+            params["sid"] = store_id
+        if ingredient_id is not None:
+            filters.append("s.ingredient_id = :iid")
+            params["iid"] = ingredient_id
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+        rows = db.execute(
+            text(
+                f"""
+                SELECT
+                    s.store_id          AS store_id,
+                    st.name             AS store_name,
+                    s.ingredient_id     AS ingredient_id,
+                    i.name              AS ingredient_name,
+                    s.unit              AS unit,
+                    s.critical_quantity AS critical_quantity,
+                    s.minimum_quantity  AS minimum_quantity,
+                    s.target_quantity   AS target_quantity
+                FROM ingredient_stock s
+                JOIN ingredients i  ON i.id  = s.ingredient_id
+                JOIN stores      st ON st.id = s.store_id
+                {where}
+                ORDER BY s.store_id, s.ingredient_id
+                """
+            ),
+            params,
+        ).fetchall()
+    finally:
+        db.close()
+
+    results: list[dict] = []
+    for r in rows:
+        critical = None if r.critical_quantity is None else _q3(r.critical_quantity)
+        minimum = None if r.minimum_quantity is None else _q3(r.minimum_quantity)
+        target = None if r.target_quantity is None else _q3(r.target_quantity)
+
+        issues: list[str] = []
+        for name, value in (
+            ("critical", critical), ("minimum", minimum), ("target", target)
+        ):
+            if value is not None and value < 0:
+                issues.append(
+                    f"negative {name} threshold ({value}) — no quantity can fall below "
+                    "zero, so this alert can never fire"
+                )
+        if critical is not None and minimum is not None and critical > minimum:
+            issues.append(
+                f"critical ({critical}) > minimum ({minimum}) — the ingredient would "
+                "reach CRITICAL before it ever reached LOW, so the low-stock warning "
+                "never fires"
+            )
+        if minimum is not None and target is not None and minimum > target:
+            issues.append(
+                f"minimum ({minimum}) > target ({target}) — restocking to target would "
+                "leave the branch still LOW"
+            )
+        if critical is not None and target is not None and critical > target:
+            issues.append(
+                f"critical ({critical}) > target ({target}) — restocking to target "
+                "would leave the branch still CRITICAL"
+            )
+
+        if not issues:
+            continue
+
+        results.append({
+            "store_id": r.store_id,
+            "store_name": r.store_name,
+            "ingredient_id": r.ingredient_id,
+            "ingredient_name": r.ingredient_name,
+            "unit": r.unit,
+            "critical_quantity": None if critical is None else str(critical),
+            "minimum_quantity": None if minimum is None else str(minimum),
+            "target_quantity": None if target is None else str(target),
+            "issues": issues,
+        })
+    return results
+
+
 def _group_by_store(rows: list[dict]) -> dict[int, list[dict]]:
     grouped: dict[int, list[dict]] = {}
     for row in rows:
@@ -473,6 +628,15 @@ def main() -> int:
     broken_counts = reconcile_stock_counts(
         store_id=args.store_id, ingredient_id=args.ingredient
     )
+    # Threshold anomalies are a WARNING, not a mismatch, and deliberately do not enter
+    # the exit code. A threshold is configuration, not stock: it appears nowhere in the
+    # ledger, contributes nothing to any total above, and a badly-set warning level
+    # does not make the shop's books wrong. Failing the reconciliation over one would
+    # teach people that a red reconciliation does not mean the stock is wrong — which
+    # is the one thing it must always mean. See audit_thresholds().
+    threshold_warnings = audit_thresholds(
+        store_id=args.store_id, ingredient_id=args.ingredient
+    )
 
     if args.json:
         # Per-store counts as well as the overall count: a caller must be able to
@@ -497,6 +661,10 @@ def main() -> int:
             ],
             "broken_transfers": broken_transfers,
             "broken_stock_counts": broken_counts,
+            # Reported, but NOT part of mismatch_count and NOT part of the exit code:
+            # a threshold is configuration, not stock.
+            "threshold_warning_count": len(threshold_warnings),
+            "threshold_warnings": threshold_warnings,
         }, indent=2))
         return 1 if (mismatches or broken_transfers or broken_counts) else 0
 
@@ -596,6 +764,30 @@ def main() -> int:
                 f"total={c['total_movements']})"
             )
 
+    # ── Threshold configuration (WARNINGS — never a stock mismatch) ───────
+    if not threshold_warnings:
+        print(
+            f"\n  thresholds: every configured alert threshold is coherent ({scope}). "
+            f"Thresholds are configuration and never affect the reconciliation above."
+        )
+    else:
+        print(
+            f"\n  THRESHOLD WARNINGS ({len(threshold_warnings)}) — configuration only; "
+            f"stock and ledger are unaffected:"
+        )
+        for t in threshold_warnings:
+            print(
+                f"    store {t['store_id']} ({t['store_name']}), "
+                f"ingredient {t['ingredient_id']} ({t['ingredient_name']}): "
+                f"critical={t['critical_quantity']} minimum={t['minimum_quantity']} "
+                f"target={t['target_quantity']} {t['unit']}"
+            )
+            for issue in t["issues"]:
+                print(f"      {issue}")
+
+    # Threshold warnings are deliberately absent from this expression. This script
+    # exits non-zero when the STOCK is wrong, and a mis-set warning level does not make
+    # the stock wrong.
     return 1 if (mismatches or broken_transfers or broken_counts) else 0
 
 

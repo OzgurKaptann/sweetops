@@ -14,6 +14,7 @@ from .ingredient_stock import (
 )
 from .inventory_transfer import InventoryTransfer
 from .inventory_stock_count import InventoryStockCount
+from .inventory_threshold import InventoryThresholdUpdate
 from .order import Order
 from .order_item import OrderItem
 from .order_item_ingredient import OrderItemIngredient
@@ -40,6 +41,7 @@ __all__ = [
     "OrderInventoryLine",
     "InventoryTransfer",
     "InventoryStockCount",
+    "InventoryThresholdUpdate",
     "Order",
     "OrderItem",
     "OrderItemIngredient",

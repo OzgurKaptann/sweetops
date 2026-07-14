@@ -16,7 +16,7 @@
  * operation. The client-side transfer checks below are courtesy validation — they
  * spare the manager a round-trip, and the server re-decides regardless.
  */
-import { movementTypeLabel } from "./labels.ts";
+import { labelFor, movementTypeLabel } from "./labels.ts";
 
 // ── Quantity formatting ──────────────────────────────────────────────────────
 //
@@ -600,6 +600,393 @@ export function validateStockCountForm(input: StockCountFormInput): string[] {
 
   if (!input.reason.trim()) errors.push(TRANSFER_VALIDATION.reasonRequired);
   return errors;
+}
+
+// ── Threshold alerts ─────────────────────────────────────────────────────────
+//
+// A threshold is CONFIGURATION, not stock: the level at which this branch wants to be
+// warned. Editing one moves nothing, and every message below is careful to say so —
+// a manager who suspects that setting a warning level might silently change their
+// stock will not set one.
+//
+// This section is also where the six wire statuses become Turkish, and it is the ONLY
+// place they may. `ThresholdRow` deliberately keeps `status` (the components need it
+// to pick a colour) but carries `statusLabel` beside it, so a component never has a
+// reason to print the raw value — and `thresholdStatusLabel` renders an unrecognised
+// status as "Bilinmiyor" rather than leaking a new enum the day the backend adds one.
+
+/** The six answers the alert screen can give, as the API sends them. */
+export type ThresholdStatus =
+  | "BELOW_RESERVED"
+  | "OUT_OF_STOCK"
+  | "CRITICAL"
+  | "LOW"
+  | "HEALTHY"
+  | "NOT_CONFIGURED";
+
+/**
+ * Two pairs here are easy to conflate and expensive to get wrong.
+ *
+ * "Stokta yok" vs "Ayrılmış stoktan düşük": the first means there is nothing available
+ * to promise anybody. The second means the branch has promised MORE than it physically
+ * holds — not a stock level but an incident. A manager who reads "stokta yok" goes and
+ * orders more; one who reads "ayrılmış stoktan düşük" goes and looks at the orders
+ * that cannot be fulfilled. Merging them would hide the row that needs a human today.
+ *
+ * "Stok yeterli" vs "Eşik tanımlı değil": the first is a statement of fact — the stock
+ * is above every level this branch asked to be warned at. The second is the ABSENCE of
+ * such a statement: nobody has said what low means here. Rendering an unconfigured
+ * ingredient as "yeterli" would be the screen inventing reassurance it has no basis
+ * for, which is precisely how a monitoring system starts lying to the person relying
+ * on it.
+ */
+export const THRESHOLD_STATUS_LABEL: Record<string, string> = {
+  BELOW_RESERVED: "Ayrılmış stoktan düşük",
+  OUT_OF_STOCK: "Stokta yok",
+  CRITICAL: "Kritik stok",
+  LOW: "Düşük stok",
+  HEALTHY: "Stok yeterli",
+  NOT_CONFIGURED: "Eşik tanımlı değil",
+};
+
+/** The one place a threshold status becomes screen text. Never returns the raw enum. */
+export function thresholdStatusLabel(status: string | null | undefined): string {
+  return labelFor(THRESHOLD_STATUS_LABEL, status, "Bilinmiyor");
+}
+
+/** Column headers for the threshold table, and the words the rest of the UI reuses. */
+export const THRESHOLD_LABELS = {
+  status: "Durum",
+  critical: "Kritik eşik",
+  minimum: "Minimum eşik",
+  target: "Hedef stok",
+  recommendedRestock: "Önerilen tamamlama",
+  available: "Kullanılabilir stok",
+  ingredient: "Malzeme",
+  reason: "Sebep",
+} as const;
+
+/**
+ * What the recommended top-up column means — and, pointedly, what it is not.
+ *
+ * It is not a purchase order. Nothing is ordered, nothing is reserved, no supplier is
+ * named, and no part of the system acts on this number. The manager reads it and
+ * decides.
+ */
+export const RECOMMENDED_RESTOCK_HINT =
+  "Hedef stok seviyesine ulaşmak için önerilen tamamlama miktarı";
+
+export const THRESHOLD_COPY = {
+  heading: "Stok uyarıları",
+  empty: "Bu şube için henüz stok tanımlanmamış.",
+  emptyHint: "Şubenizin stok tanımları oluşturulduktan sonra uyarılar burada görünecek.",
+  notConfigured: "Eşik tanımlı değil",
+  /** Rendered in a cell where a threshold has not been set. Not "0". */
+  unset: "—",
+} as const;
+
+/**
+ * The summary cards, in the order they appear.
+ *
+ * Only the four that require a DECISION are shown. "Stok yeterli" is deliberately not
+ * a card: a manager scanning the top of this screen is looking for what needs doing,
+ * and a big number of healthy ingredients is exactly the reassurance that stops them
+ * reading the row that does not.
+ *
+ * "Eşik tanımlı değil" IS a card, and that is the point of it — the ingredients nobody
+ * has thought about are the ones that will surprise you, and they are invisible in
+ * every other view precisely because nobody has configured anything for them.
+ */
+export type ThresholdSummaryKey =
+  | "below_reserved"
+  | "out_of_stock"
+  | "critical"
+  | "low"
+  | "not_configured";
+
+export interface ThresholdSummaryCard {
+  key: ThresholdSummaryKey;
+  label: string;
+  count: number;
+  /** Drives the colour only. The label is what is read. */
+  tone: "danger" | "warning" | "neutral";
+}
+
+export interface ThresholdSummarySource {
+  below_reserved: number;
+  out_of_stock: number;
+  critical: number;
+  low: number;
+  healthy: number;
+  not_configured: number;
+  total_recommended_restock: string;
+}
+
+/**
+ * Build the summary cards from the server's counts.
+ *
+ * BELOW_RESERVED gets a card only when it is non-zero. It should never happen — the
+ * database makes it unrepresentable — so a permanent "0" card would train managers to
+ * read past the one row that would mean the shop has sold stock it does not have.
+ * Everything else is always shown, including a zero: "0 kritik" is information a
+ * manager actively wants, and a card that vanishes when things are fine is a card
+ * nobody trusts is working.
+ */
+export function thresholdSummaryCards(
+  summary: ThresholdSummarySource,
+): ThresholdSummaryCard[] {
+  const cards: ThresholdSummaryCard[] = [];
+
+  if (summary.below_reserved > 0) {
+    cards.push({
+      key: "below_reserved",
+      label: THRESHOLD_STATUS_LABEL.BELOW_RESERVED,
+      count: summary.below_reserved,
+      tone: "danger",
+    });
+  }
+  cards.push(
+    {
+      key: "critical",
+      label: THRESHOLD_STATUS_LABEL.CRITICAL,
+      count: summary.critical,
+      tone: "danger",
+    },
+    {
+      key: "low",
+      label: THRESHOLD_STATUS_LABEL.LOW,
+      count: summary.low,
+      tone: "warning",
+    },
+    {
+      key: "out_of_stock",
+      label: THRESHOLD_STATUS_LABEL.OUT_OF_STOCK,
+      count: summary.out_of_stock,
+      tone: "danger",
+    },
+    {
+      key: "not_configured",
+      label: THRESHOLD_STATUS_LABEL.NOT_CONFIGURED,
+      count: summary.not_configured,
+      tone: "neutral",
+    },
+  );
+  return cards;
+}
+
+/** "Toplam önerilen tamamlama: 12,5" — or null when there is nothing to suggest. */
+export function totalRecommendedRestockLabel(
+  summary: ThresholdSummarySource,
+): string | null {
+  const total = Number(summary.total_recommended_restock);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  return `Toplam önerilen tamamlama: ${formatQuantity(summary.total_recommended_restock)}`;
+}
+
+export interface ThresholdSource {
+  ingredient_id: number;
+  ingredient_name: string;
+  unit: string;
+  on_hand_quantity: string;
+  reserved_quantity: string;
+  available_quantity: string;
+  critical_quantity: string | null;
+  minimum_quantity: string | null;
+  target_quantity: string | null;
+  status: string;
+  status_label: string;
+  recommended_restock_quantity: string | null;
+  threshold_updated_at: string | null;
+}
+
+/**
+ * One row of the alert table, fully rendered.
+ *
+ * Every string on it is already Turkish and already formatted. `status` survives
+ * because the component needs it to choose a colour — but `statusLabel` is beside it,
+ * so there is never a reason to print the raw value, and it is the label the table
+ * renders.
+ */
+export interface ThresholdRow {
+  ingredientId: number;
+  ingredientName: string;
+  unit: string;
+  available: string;
+  status: string;
+  statusLabel: string;
+  critical: string;
+  minimum: string;
+  target: string;
+  recommendedRestock: string;
+  /** True for the rows a manager must actually do something about. */
+  needsAttention: boolean;
+}
+
+export function toThresholdRow(item: ThresholdSource): ThresholdRow {
+  return {
+    ingredientId: item.ingredient_id,
+    ingredientName: item.ingredient_name,
+    unit: item.unit,
+    available: formatQuantity(item.available_quantity),
+    status: item.status,
+    // The server already sent a Turkish label, but this app translates from the wire
+    // status ITSELF rather than trusting the string: it is the client's own guarantee
+    // that a raw enum can never reach the screen, and it holds even if a future
+    // endpoint forgets to send a label.
+    statusLabel: thresholdStatusLabel(item.status),
+    // An unconfigured threshold renders as "—", never as "0". Zero is a real threshold
+    // ("warn me only when it is actually gone") and a manager must be able to tell the
+    // two apart at a glance.
+    critical: formatQuantity(item.critical_quantity),
+    minimum: formatQuantity(item.minimum_quantity),
+    target: formatQuantity(item.target_quantity),
+    recommendedRestock: formatQuantity(item.recommended_restock_quantity),
+    needsAttention:
+      item.status === "BELOW_RESERVED" ||
+      item.status === "OUT_OF_STOCK" ||
+      item.status === "CRITICAL" ||
+      item.status === "LOW",
+  };
+}
+
+// ── Threshold edit form ──────────────────────────────────────────────────────
+
+/**
+ * The sentence that makes the form safe to use.
+ *
+ * A manager who is not certain that editing a threshold leaves their stock alone will
+ * not edit a threshold — and an alert system nobody configures is an alert system that
+ * never fires. So the form says it outright.
+ */
+export const THRESHOLD_HINT =
+  "Eşikler stok uyarıları için kullanılır. Bu işlem stok miktarını değiştirmez.";
+
+/** Leaving a field empty is how a threshold is cleared. Said explicitly, not implied. */
+export const THRESHOLD_CLEAR_HINT =
+  "Boş bıraktığınız eşik tanımsız olur ve o seviye için uyarı verilmez.";
+
+export const THRESHOLD_VALIDATION = {
+  ingredientRequired: "Malzeme seçin.",
+  negative: "Eşik değerleri negatif olamaz.",
+  invalid: "Eşik değerleri geçerli bir sayı olmalı.",
+  criticalAboveMinimum: "Kritik eşik minimum eşikten büyük olamaz.",
+  minimumAboveTarget: "Minimum eşik hedef stoktan büyük olamaz.",
+  criticalAboveTarget: "Kritik eşik hedef stoktan büyük olamaz.",
+  reasonRequired: "Sebep girin.",
+} as const;
+
+export const THRESHOLD_MESSAGES = {
+  success: "Stok eşikleri güncellendi.",
+  replay: "Bu eşik güncellemesi daha önce kaydedilmiş.",
+} as const;
+
+export interface ThresholdFormInput {
+  ingredientId: number | null;
+  /** Empty string means NOT CONFIGURED. It does not mean zero. */
+  critical: string;
+  minimum: string;
+  target: string;
+  reason: string;
+}
+
+/**
+ * Parse one threshold field.
+ *
+ * Returns `null` for an empty field (not configured) and `NaN` for a field that is
+ * present but not a number, so the caller can tell "the manager left this blank" apart
+ * from "the manager typed nonsense". Collapsing those two into null would silently
+ * CLEAR a threshold because someone fat-fingered a letter into it.
+ */
+export function parseThreshold(raw: string): number | null {
+  const text = raw.trim();
+  if (!text) return null;
+  return Number(text);
+}
+
+/**
+ * Validate the threshold form. Returns [] when it may be submitted.
+ *
+ * Courtesy validation, not a security control: the service enforces every one of these
+ * rules (`threshold_negative`, `threshold_critical_above_minimum`,
+ * `threshold_minimum_above_target`, `threshold_critical_above_target`) and the DATABASE
+ * enforces them under that, so a client that skipped this function entirely still
+ * could not store an inverted ladder. What this buys is that the manager is told which
+ * rule they broke without a round-trip.
+ *
+ * The ordering checks run only between the fields that are actually SET, which is the
+ * documented policy: configuring critical alone, or minimum and target without a
+ * critical, are all legitimate.
+ */
+export function validateThresholdForm(input: ThresholdFormInput): string[] {
+  const errors: string[] = [];
+  if (input.ingredientId === null) errors.push(THRESHOLD_VALIDATION.ingredientRequired);
+
+  const critical = parseThreshold(input.critical);
+  const minimum = parseThreshold(input.minimum);
+  const target = parseThreshold(input.target);
+  const parsed = [critical, minimum, target];
+
+  if (parsed.some((v) => v !== null && !Number.isFinite(v))) {
+    errors.push(THRESHOLD_VALIDATION.invalid);
+  } else {
+    if (parsed.some((v) => v !== null && v < 0)) {
+      errors.push(THRESHOLD_VALIDATION.negative);
+    }
+    if (critical !== null && minimum !== null && critical > minimum) {
+      errors.push(THRESHOLD_VALIDATION.criticalAboveMinimum);
+    }
+    if (minimum !== null && target !== null && minimum > target) {
+      errors.push(THRESHOLD_VALIDATION.minimumAboveTarget);
+    }
+    // Load-bearing on its own when minimum is NOT set: nothing else relates critical
+    // to target in that case.
+    if (critical !== null && target !== null && critical > target) {
+      errors.push(THRESHOLD_VALIDATION.criticalAboveTarget);
+    }
+  }
+
+  if (!input.reason.trim()) errors.push(THRESHOLD_VALIDATION.reasonRequired);
+  return errors;
+}
+
+/**
+ * The request body, built from the form.
+ *
+ * An empty field becomes `null` — NOT CONFIGURED — and never "0". The store is absent
+ * because it comes from the session, and the ingredient is absent because it goes in
+ * the path; the backend rejects unknown fields outright, so there is nothing to smuggle
+ * in even by accident.
+ */
+export function thresholdRequestBody(input: ThresholdFormInput): {
+  critical_quantity: string | null;
+  minimum_quantity: string | null;
+  target_quantity: string | null;
+  reason: string;
+} {
+  const field = (raw: string): string | null => {
+    const text = raw.trim();
+    return text === "" ? null : text;
+  };
+  return {
+    critical_quantity: field(input.critical),
+    minimum_quantity: field(input.minimum),
+    target_quantity: field(input.target),
+    reason: input.reason.trim(),
+  };
+}
+
+/**
+ * The banner after a threshold update.
+ *
+ * A REPLAY is not a second success. The backend recognised the idempotency key and
+ * changed nothing — it did not even re-stamp the timestamp. Reporting "güncellendi"
+ * again would leave the manager believing they had made two decisions.
+ */
+export function thresholdBanner(opts: { replay?: boolean } = {}): OperationBanner {
+  if (opts.replay) {
+    return { tone: "info", message: THRESHOLD_MESSAGES.replay };
+  }
+  return { tone: "success", message: THRESHOLD_MESSAGES.success };
 }
 
 // ── Transfer list rows ───────────────────────────────────────────────────────

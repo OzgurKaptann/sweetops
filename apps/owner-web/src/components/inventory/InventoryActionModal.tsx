@@ -18,7 +18,7 @@ import {
 import {
   createCommandIdempotency,
   fingerprintCommand,
-  type InventoryCommand,
+  type StockCommand,
 } from "@/lib/inventory-idempotency";
 import {
   INVENTORY_COPY,
@@ -134,7 +134,7 @@ export function InventoryActionModal({
   // for an ingredient is not a thing this screen can do.
   const ingredientOptions = stock;
 
-  const buildCommand = (): InventoryCommand | null => {
+  const buildCommand = (): StockCommand | null => {
     if (ingredientId === null) return null;
     switch (kind) {
       case "purchase_receipt":
@@ -278,7 +278,7 @@ export function InventoryActionModal({
           key,
         );
         replay = receipt.idempotent_replay;
-      } else {
+      } else if (command.kind === "stock_count") {
         const receipt = await createStockCount(
           {
             ingredient_id: command.ingredientId,
@@ -292,6 +292,14 @@ export function InventoryActionModal({
         // `movement_id: null` means the shelf agreed with the system. The count WAS
         // applied — it is just that nothing physical had to move.
         noDelta = receipt.movement_id === null;
+      } else {
+        // Every StockCommand is handled above, and this dialog only ever builds one:
+        // a threshold update is NOT a stock operation (it moves nothing and writes no
+        // ledger row) and belongs to ThresholdEditModal. Exhaustive by construction —
+        // if a sixth stock command is added to the union without a branch here, this
+        // line stops compiling.
+        const unreachable: never = command;
+        throw new Error(`Unhandled inventory command: ${JSON.stringify(unreachable)}`);
       }
 
       // A confirmed outcome — the key has done its job and must not be reused.

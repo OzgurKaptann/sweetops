@@ -132,6 +132,25 @@ Database constraints:
 | `ck_stock_reserved_nonneg` | ditto for promises |
 | `ck_stock_reserved_le_on_hand` | **backorders are disabled** — the shop may not promise batter it does not physically have |
 
+### Alert thresholds live on this row too — and are not stock
+
+Since the threshold-alerts branch the same row also carries `critical_quantity`,
+`minimum_quantity`, `target_quantity`, `threshold_updated_at` and
+`threshold_updated_by_user_id`.
+
+They are **configuration, not quantities the shop owns**: the levels at which this
+branch wants to be warned. Nothing in this document changes because of them —
+reservation, consumption, release, waste, adjustment and the ledger are all exactly as
+described here. A threshold change writes **no movement of any type**, so it cannot
+appear in the ledger, in reconciliation, or in any analytics figure defined in §17.
+
+`NULL` means *not configured*, which is a distinct state from zero. The status derived
+from these levels is computed against **`available_quantity`**, never on-hand alone —
+the same number order acceptance tests against, and for the same reason: batter already
+promised to a waiting customer is not batter this branch can still use.
+
+→ [`INVENTORY_THRESHOLD_ALERTS.md`](INVENTORY_THRESHOLD_ALERTS.md)
+
 ### Naming note
 
 `stock_quantity` was **renamed** to `on_hand_quantity` rather than kept as an
@@ -486,6 +505,12 @@ both branches are broken. Totals are never summed across stores. See
 It **never writes**. A reconciler that "repairs" drift by overwriting the summary
 destroys the evidence needed to find the bug that caused it.
 
+A sixth check reports incoherent **alert thresholds** (negative, or an inverted
+`critical <= minimum <= target` ladder). These are **warnings and never affect the exit
+code**: a threshold is configuration, appears nowhere in the ledger, and a badly-set
+warning level does not make the shop's books wrong. This script exits non-zero when the
+**stock** is wrong, and that must remain the only thing a red run can mean.
+
 ```bash
 python scripts/reconcile_inventory.py            # all ingredients
 python scripts/reconcile_inventory.py --json     # machine-readable, exit 1 on drift
@@ -530,8 +555,23 @@ metrics and reflected in the stock level are not in tension: one is about what
 adjustment says "we know this figure is wrong". Merging them would hide counted
 shrinkage inside a metric that means "corrections we chose to make".
 
-Full definitions: [`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md) § 9
-and [`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md) § 10.
+### Threshold changes are in none of these
+
+An **alert threshold** change appears in no row of the table above, and needed no
+exclusion filter to keep it out. Every metric here is defined over `movement_type`, and
+a threshold change **is not a movement of any type** — there is no threshold movement
+type, and `ck_movement_type_domain` would refuse the row if some future service tried to
+write one. So configuring a warning level cannot touch waste, purchase receipts,
+consumption velocity, transfer metrics or reconciliation, whatever anybody later forgets.
+
+The one thing a threshold **does** change is `stockout_risk`, and that is the entire
+point: raising the minimum on chocolate makes the same shelf read as *low*, because the
+branch has just said that this much chocolate is not enough. No stock moved; the
+assessment of it did.
+
+Full definitions: [`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md) § 9,
+[`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md) § 10 and
+[`INVENTORY_THRESHOLD_ALERTS.md`](INVENTORY_THRESHOLD_ALERTS.md) § Reconciliation and analytics.
 
 Two corrections were needed, and both are now enforced by tests:
 

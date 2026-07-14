@@ -196,6 +196,88 @@ export interface StockCountListResponse {
   items: StockCountItem[];
 }
 
+// ── Threshold alerts ─────────────────────────────────────────────────────────
+//
+// A threshold is CONFIGURATION, not stock: the level at which this branch wants to
+// be warned. Reading these endpoints moves nothing, and the PATCH moves nothing
+// either — it writes no stock and no ledger movement. The quantities on the receipt
+// are echoed back unchanged, which is what proves it.
+
+/**
+ * One ingredient's alert line.
+ *
+ * `status` is the English wire value (CRITICAL, NOT_CONFIGURED …) and is what the
+ * app COMPARES against; `status_label` is the Turkish sentence the server already
+ * wrote. Neither is ever rendered raw — see thresholdStatusLabel() in
+ * ./inventory-view.ts, which is the one place a status becomes screen text and which
+ * renders an unrecognised value as "Bilinmiyor" rather than as the enum.
+ *
+ * `recommended_restock_quantity` is target − available, and null when no target is
+ * configured or the branch is already at it. It is a SUGGESTION: it orders nothing,
+ * reserves nothing and names no supplier.
+ */
+export interface ThresholdAlertItem {
+  ingredient_id: number;
+  ingredient_name: string;
+  unit: string;
+  on_hand_quantity: string;
+  reserved_quantity: string;
+  available_quantity: string;
+  critical_quantity: string | null;
+  minimum_quantity: string | null;
+  target_quantity: string | null;
+  status: string;
+  status_label: string;
+  recommended_restock_quantity: string | null;
+  last_movement_at: string | null;
+  threshold_updated_at: string | null;
+  threshold_updated_by_user_id: number | null;
+}
+
+/**
+ * The counts behind the summary cards, computed SERVER-SIDE.
+ *
+ * `total_recommended_restock` in particular is a sum of decimal quantities, and this
+ * app deliberately does not do stock arithmetic — adding JSON number strings in a
+ * browser is how "0.1 + 0.2" ends up on a stock report.
+ */
+export interface ThresholdAlertSummary {
+  below_reserved: number;
+  out_of_stock: number;
+  critical: number;
+  low: number;
+  healthy: number;
+  not_configured: number;
+  total_recommended_restock: string;
+}
+
+export interface ThresholdAlertListResponse {
+  total: number;
+  summary: ThresholdAlertSummary;
+  items: ThresholdAlertItem[];
+}
+
+export interface ThresholdReceipt {
+  ingredient_id: number;
+  store_id: number;
+  ingredient_name: string | null;
+  unit: string;
+  critical_quantity: string | null;
+  minimum_quantity: string | null;
+  target_quantity: string | null;
+  /** Unchanged by the update. Present so the UI can show that nothing moved. */
+  on_hand_quantity: string;
+  reserved_quantity: string;
+  available_quantity: string;
+  status: string;
+  status_label: string;
+  recommended_restock_quantity: string | null;
+  reason: string;
+  threshold_updated_at: string | null;
+  threshold_updated_by_user_id: number | null;
+  idempotent_replay: boolean;
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /**
@@ -255,7 +337,16 @@ async function getJson<T>(path: string): Promise<T> {
   return res.json();
 }
 
-async function postJson<T>(
+/**
+ * Every state-changing inventory call, whatever its verb.
+ *
+ * The three things that make a stock command safe travel together here and are not
+ * optional: the session cookie, the CSRF header, and the `Idempotency-Key`. A caller
+ * cannot send a mutation without a key — `sendJson` refuses locally rather than let a
+ * command go out that the backend will reject and that could not be safely retried.
+ */
+async function sendJson<T>(
+  method: "POST" | "PATCH",
   path: string,
   body: unknown,
   idempotencyKey: string,
@@ -270,7 +361,7 @@ async function postJson<T>(
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
-      method: "POST",
+      method,
       credentials: "include",
       cache: "no-store",
       headers: {
@@ -288,6 +379,14 @@ async function postJson<T>(
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw await parseError(res);
   return res.json();
+}
+
+function postJson<T>(path: string, body: unknown, idempotencyKey: string): Promise<T> {
+  return sendJson("POST", path, body, idempotencyKey);
+}
+
+function patchJson<T>(path: string, body: unknown, idempotencyKey: string): Promise<T> {
+  return sendJson("PATCH", path, body, idempotencyKey);
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -419,4 +518,48 @@ export function fetchStockCounts(params?: {
   if (params?.limit !== undefined) q.set("limit", String(params.limit));
   const qs = q.toString();
   return getJson(`/inventory/stock-counts${qs ? `?${qs}` : ""}`);
+}
+
+// ── Threshold alerts ─────────────────────────────────────────────────────────
+
+export function fetchThresholdAlerts(params?: {
+  status?: string;
+}): Promise<ThresholdAlertListResponse> {
+  const q = new URLSearchParams();
+  if (params?.status) q.set("status", params.status);
+  const qs = q.toString();
+  return getJson(`/inventory/threshold-alerts${qs ? `?${qs}` : ""}`);
+}
+
+/**
+ * The COMPLETE threshold configuration for one ingredient.
+ *
+ * Note what this body does NOT carry: no store, no ingredient (it is in the path), no
+ * status, and no stock quantity. The store comes from the session and the server
+ * derives the status itself — a client does not get to declare an ingredient healthy.
+ * The backend rejects unknown fields outright, so sending any of them is not merely
+ * useless but a 422.
+ *
+ * A null threshold means NOT CONFIGURED, and clearing one is a real decision the
+ * server logs. This is deliberately not a partial patch: "leave this alone" and "clear
+ * this" would otherwise be the same request.
+ */
+export interface ThresholdUpdateBody {
+  /** Decimal as a string, or null to clear. Never a float. */
+  critical_quantity: string | null;
+  minimum_quantity: string | null;
+  target_quantity: string | null;
+  reason: string;
+}
+
+export function updateThresholds(
+  ingredientId: number,
+  body: ThresholdUpdateBody,
+  idempotencyKey: string,
+): Promise<ThresholdReceipt> {
+  return patchJson(
+    `/inventory/stock/${ingredientId}/thresholds`,
+    body,
+    idempotencyKey,
+  );
 }

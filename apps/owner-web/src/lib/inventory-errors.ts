@@ -51,6 +51,23 @@ export const STOCK_COUNT_ERROR_NETWORK_UNCERTAIN =
   "Aynı işlemi tekrar göndermeden önce stok hareketlerini kontrol edin.";
 
 /**
+ * The same uncertainty, in the vocabulary of a threshold.
+ *
+ * It sends the manager to the STOCK SCREEN rather than to the movement ledger, and
+ * that difference is the point: a threshold update writes no movement, so a manager
+ * told to "check the stock movements" would find nothing there and conclude the update
+ * failed — then re-enter it by hand, minting a new key and re-logging the decision. The
+ * thresholds themselves are on the stock screen, which is where the answer actually is.
+ */
+export const THRESHOLD_ERROR_NETWORK_UNCERTAIN =
+  "Eşik güncellemesinin kaydedilip kaydedilmediği doğrulanamadı. " +
+  "Aynı işlemi tekrar göndermeden önce stok ekranını kontrol edin.";
+
+/** Shown when a threshold update fails and nothing more specific can be said. */
+export const THRESHOLD_ERROR_UNKNOWN =
+  "Eşikler güncellenemedi. Lütfen tekrar deneyin.";
+
+/**
  * Backend `error` code → Turkish copy.
  *
  * Codes come from app/services/inventory_service.py and app/core/deps.py and are
@@ -88,6 +105,14 @@ export const INVENTORY_ERROR_MESSAGE: Record<string, string> = {
     "Sayım sonucu ayrılmış stoktan düşük olamaz. Ayrılmış stok bekleyen siparişler " +
     "için tutuluyor; önce ilgili siparişleri kontrol edin.",
   stock_count_not_found: "Bu sayım kaydı bulunamadı.",
+
+  // ── Threshold alerts ───────────────────────────────────────────────────────
+  // Each names the rule that was broken, because "geçersiz değer" leaves the manager
+  // guessing which of the three fields the server objected to.
+  threshold_negative: "Eşik değerleri negatif olamaz.",
+  threshold_critical_above_minimum: "Kritik eşik minimum eşikten büyük olamaz.",
+  threshold_minimum_above_target: "Minimum eşik hedef stoktan büyük olamaz.",
+  threshold_critical_above_target: "Kritik eşik hedef stoktan büyük olamaz.",
 
   // ── Command validation ─────────────────────────────────────────────────────
   invalid_quantity: "Stok miktarı sıfırdan büyük olmalı.",
@@ -149,22 +174,30 @@ export function looksDisplaySafe(message: string): boolean {
  * the backend's error codes already are the specific thing.
  */
 export function inventoryErrorMessage(err: unknown, kind?: string): string {
-  if (err instanceof InventoryNetworkUncertainError) {
-    return kind === "stock_count"
+  const uncertain =
+    kind === "stock_count"
       ? STOCK_COUNT_ERROR_NETWORK_UNCERTAIN
-      : INVENTORY_ERROR_NETWORK_UNCERTAIN;
-  }
+      : kind === "threshold_update"
+        ? THRESHOLD_ERROR_NETWORK_UNCERTAIN
+        : INVENTORY_ERROR_NETWORK_UNCERTAIN;
+  // The generic fallback is per-operation too: "İşlem tamamlanamadı" leaves a manager
+  // who was editing a threshold wondering whether their STOCK is now wrong. It is not,
+  // and the copy should not let them fear it.
+  const unknown =
+    kind === "threshold_update" ? THRESHOLD_ERROR_UNKNOWN : INVENTORY_ERROR_UNKNOWN;
+
+  if (err instanceof InventoryNetworkUncertainError) return uncertain;
 
   if (err instanceof InventoryApiError) {
     const known = INVENTORY_ERROR_MESSAGE[err.code];
     if (known) return known;
     if (err.message && looksDisplaySafe(err.message)) return err.message;
-    return INVENTORY_ERROR_UNKNOWN;
+    return unknown;
   }
 
   // A TypeError from our own code, a parse failure, anything at all. Whatever it
   // says, it was written for a developer — so it is not shown.
-  return INVENTORY_ERROR_UNKNOWN;
+  return unknown;
 }
 
 /**

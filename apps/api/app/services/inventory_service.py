@@ -66,6 +66,15 @@ from app.models.inventory_stock_count import (
     STOCK_COUNT_APPLIED,
     InventoryStockCount,
 )
+from app.models.inventory_threshold import (
+    THRESHOLD_STATUS_BELOW_RESERVED,
+    THRESHOLD_STATUS_CRITICAL,
+    THRESHOLD_STATUS_HEALTHY,
+    THRESHOLD_STATUS_LOW,
+    THRESHOLD_STATUS_NOT_CONFIGURED,
+    THRESHOLD_STATUS_OUT_OF_STOCK,
+    InventoryThresholdUpdate,
+)
 from app.models.inventory_transfer import TRANSFER_COMPLETED, InventoryTransfer
 from app.models.order import Order
 from app.models.store import Store
@@ -85,6 +94,9 @@ AUDIT_ADJUSTED = "INVENTORY_ADJUSTED"
 AUDIT_RECEIVED = "INVENTORY_RECEIVED"
 AUDIT_TRANSFERRED = "INVENTORY_TRANSFERRED"
 AUDIT_STOCK_COUNTED = "INVENTORY_STOCK_COUNTED"
+# Threshold changes are CONFIGURATION, not stock. This is the only audit action in
+# this module whose event moved no stock at all.
+AUDIT_THRESHOLDS_UPDATED = "INVENTORY_THRESHOLDS_UPDATED"
 
 
 # ── Quantity maths ───────────────────────────────────────────────────────────
@@ -1612,3 +1624,436 @@ def record_stock_count(
     except HTTPException:
         db.rollback()
         raise
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Inventory threshold alerts
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Everything below this line is about CONFIGURATION and VISIBILITY. Not one function
+# here moves stock, writes a movement, or touches reserved. A threshold says at what
+# level a branch wants to be warned; changing it changes what the alert screen says
+# and nothing else.
+#
+# That is enforced, not merely intended: `update_thresholds` never calls `_movement`,
+# never assigns to on_hand_quantity or reserved_quantity, and there is no movement
+# type a threshold change could be written as (ck_movement_type_domain would refuse
+# the row). See app/models/inventory_threshold.py and
+# docs/INVENTORY_THRESHOLD_ALERTS.md.
+
+
+def threshold_status(stock: IngredientStock) -> str:
+    """
+    Classify one ingredient's stock in one branch against that branch's thresholds.
+
+    AVAILABLE is the number the thresholds are tested against — never on-hand. This
+    is the single most important decision in this file, and it is the same one order
+    acceptance already makes (see `check_availability`): stock that accepted orders
+    are already promised is not stock this branch can still use. A shelf holding 8 kg
+    of chocolate with 7.5 kg promised to waiting customers has 0.5 kg it can actually
+    do anything with, and telling the manager it is healthy because the shelf looks
+    full is how a branch cheerfully accepts an order it cannot cook.
+
+    Priority, strongest incident first:
+
+        BELOW_RESERVED   on_hand < reserved. The branch has promised stock it does
+                         not physically hold. ck_stock_reserved_le_on_hand makes this
+                         unrepresentable, so it should never appear — but if physical
+                         reality or a future bug ever produces it, it must be shouted
+                         about, not filed under "stokta yok" beside a merely empty
+                         shelf. Checked FIRST for exactly that reason.
+        OUT_OF_STOCK     available <= 0. Nothing left to promise anybody.
+        CRITICAL         available <= critical_quantity (if configured)
+        LOW              available <= minimum_quantity (if configured)
+        HEALTHY          above every alert threshold that IS configured
+        NOT_CONFIGURED   no alert threshold configured for this row
+
+    Two subtleties worth stating plainly.
+
+    OUT_OF_STOCK is decided BEFORE NOT_CONFIGURED: an empty shelf is empty whether or
+    not anybody got round to configuring a threshold for it. A manager does not need
+    to have set a level to be told there is none left.
+
+    target_quantity is NOT an alert threshold. It answers "how much should I buy?",
+    not "am I in trouble?" — so a row with ONLY a target configured is NOT_CONFIGURED
+    (nothing has been said about when to warn), even though its recommended restock
+    quantity is perfectly computable. Treating a target as an alert level would fire a
+    warning at every level below the replenishment point, i.e. almost always.
+    """
+    on_hand = q3(stock.on_hand_quantity)
+    reserved = q3(stock.reserved_quantity)
+    # available_quantity is a GENERATED column (on_hand - reserved). It is read, never
+    # recomputed — the database is the authority on its own derived value.
+    avail = q3(stock.available_quantity)
+
+    if on_hand < reserved:
+        return THRESHOLD_STATUS_BELOW_RESERVED
+
+    if avail <= ZERO:
+        return THRESHOLD_STATUS_OUT_OF_STOCK
+
+    critical = None if stock.critical_quantity is None else q3(stock.critical_quantity)
+    minimum = None if stock.minimum_quantity is None else q3(stock.minimum_quantity)
+
+    if critical is None and minimum is None:
+        return THRESHOLD_STATUS_NOT_CONFIGURED
+
+    if critical is not None and avail <= critical:
+        return THRESHOLD_STATUS_CRITICAL
+    if minimum is not None and avail <= minimum:
+        return THRESHOLD_STATUS_LOW
+
+    return THRESHOLD_STATUS_HEALTHY
+
+
+def recommended_restock_quantity(stock: IngredientStock) -> Optional[Decimal]:
+    """
+    How much to bring in to reach the branch's target level:
+
+        target_quantity - available_quantity
+
+    None when no target is configured, and None when available already meets or
+    exceeds it — there is nothing to recommend, and a zero would render as a number in
+    a column of numbers and invite someone to order zero of something.
+
+    This is a SUGGESTION on a screen. It is not a purchase order, it does not name a
+    supplier, it does not reserve anything, and nothing in the system acts on it. The
+    manager reads it and decides. See docs/INVENTORY_THRESHOLD_ALERTS.md § "Why these
+    are not purchase orders".
+
+    Measured against AVAILABLE, consistently with the status: stock already promised
+    to accepted orders will not be on the shelf to satisfy tomorrow's demand, so
+    counting it as if it were there is how a branch under-orders.
+    """
+    if stock.target_quantity is None:
+        return None
+    target = q3(stock.target_quantity)
+    avail = q3(stock.available_quantity)
+    if avail >= target:
+        return None
+    return target - avail
+
+
+@dataclass(frozen=True)
+class ThresholdResult:
+    """A threshold decision's outcome, and whether it was an idempotent replay."""
+
+    update: InventoryThresholdUpdate
+    stock: IngredientStock
+    replayed: bool
+
+
+def _find_threshold_update_by_key(
+    db: Session, store_id: int, key_hash: str
+) -> Optional[InventoryThresholdUpdate]:
+    """
+    Look up a previous threshold update by idempotency key WITHIN THIS STORE.
+
+    Store-scoped for the same reason every other idempotency lookup here is: two
+    branch managers working from the same printed run-book will legitimately send the
+    same Idempotency-Key, and that collision is a coincidence, not a replay. Without
+    the store in the lookup, Beşiktaş's update would return Kadıköy's result and
+    quietly configure nothing — leaving a branch believing it had set up an alert it
+    has not got.
+    """
+    return (
+        db.query(InventoryThresholdUpdate)
+        .filter(
+            InventoryThresholdUpdate.store_id == store_id,
+            InventoryThresholdUpdate.idempotency_key_hash == key_hash,
+        )
+        .first()
+    )
+
+
+def _replay_threshold_update(
+    db: Session,
+    existing: InventoryThresholdUpdate,
+    request_hash: str,
+    stock: IngredientStock,
+) -> ThresholdResult:
+    """
+    Same key + same payload replays the original decision, changing nothing.
+
+    Nothing is written: not the stock row, not `threshold_updated_at`, and not a
+    second audit event. That is what makes `threshold_updated_at` mean "when the
+    levels last actually CHANGED" rather than "when somebody last pressed the button",
+    which is the only version of that timestamp an owner can use to ask who moved a
+    threshold and when.
+
+    Same key + a DIFFERENT payload is refused with a 409. Replaying the original under
+    the new intent would tell a manager who has just lowered the critical level to
+    2 kg that their change succeeded, while the branch quietly keeps warning at 5.
+    """
+    if existing.request_hash != request_hash:
+        raise _conflict(
+            messages.INVENTORY_IDEMPOTENCY_MISMATCH, error="idempotency_mismatch"
+        )
+    return ThresholdResult(update=existing, stock=stock, replayed=True)
+
+
+def _validate_thresholds(
+    critical: Optional[Decimal],
+    minimum: Optional[Decimal],
+    target: Optional[Decimal],
+) -> None:
+    """
+    The alert ladder must make sense — including when only PART of it is configured.
+
+    Every check here is also a database CHECK constraint (see the migration). It is
+    duplicated in the service not because the constraint might be missing, but because
+    a constraint violation surfaces as an IntegrityError with a constraint name in it,
+    and a constraint name is exactly the kind of internal a manager must never be
+    shown. The database is the guarantee; this is the sentence they read.
+
+    An inverted ladder is not cosmetic. critical > minimum means an ingredient reaches
+    CRITICAL before it ever reaches LOW — the "go and look at this" warning the manager
+    set up to buy themselves time never fires, and the first thing they hear about the
+    chocolate is that it is critical.
+    """
+    for value in (critical, minimum, target):
+        if value is not None and value < ZERO:
+            # A negative threshold promises an alert that can never fire: no quantity
+            # can go below zero. A control that silently does nothing is worse than no
+            # control, because it is believed.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "threshold_negative",
+                    "message": messages.INVENTORY_THRESHOLD_NEGATIVE,
+                },
+            )
+
+    if critical is not None and minimum is not None and critical > minimum:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "threshold_critical_above_minimum",
+                "message": messages.INVENTORY_THRESHOLD_CRITICAL_ABOVE_MINIMUM,
+            },
+        )
+    if minimum is not None and target is not None and minimum > target:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "threshold_minimum_above_target",
+                "message": messages.INVENTORY_THRESHOLD_MINIMUM_ABOVE_TARGET,
+            },
+        )
+    # Load-bearing on its own when minimum is NOT configured: nothing else holds
+    # critical and target together in that case.
+    if critical is not None and target is not None and critical > target:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "threshold_critical_above_target",
+                "message": messages.INVENTORY_THRESHOLD_CRITICAL_ABOVE_TARGET,
+            },
+        )
+
+
+def _opt_q3(value) -> Optional[Decimal]:
+    """Quantise a threshold, preserving the NULL that means 'not configured'."""
+    return None if value is None else q3(value)
+
+
+def update_thresholds(
+    db: Session,
+    *,
+    store_id: int,
+    ingredient_id: int,
+    critical_quantity=None,
+    minimum_quantity=None,
+    target_quantity=None,
+    reason: str,
+    actor_user_id: int,
+    idempotency_key: str | None = None,
+    ip_address: str | None = None,
+) -> ThresholdResult:
+    """
+    Set this branch's alert thresholds for one ingredient.
+
+    Moves NO stock. on_hand_quantity and reserved_quantity are not read for writing,
+    not assigned to, and no ledger row is created — this function does not call
+    `_movement` at all. available_quantity is a generated column of the two it does
+    not touch, so it cannot move either. A threshold is a setting; the shelf is
+    unchanged by an opinion about the shelf.
+
+    The request states the COMPLETE threshold configuration. An omitted or explicitly
+    null field means that threshold is NOT CONFIGURED, and clearing one is a real
+    decision that gets its own log row. This is deliberately not "patch the fields you
+    mention": a partial-update semantics would make a null ambiguous between "leave it
+    alone" and "clear it", and the request hash — which is what idempotency compares —
+    could not tell those two intents apart either.
+
+    ``store_id`` is the authenticated staff member's store, passed by the router from
+    the session. It is NEVER read from the request body: a Store A manager cannot
+    configure Store B's alerts by naming Store B, and the database would refuse the
+    row even if this function were wrong (fk_threshold_update_actor_store binds the
+    actor to the branch whose thresholds they set).
+
+    Thresholds are only ever set on a stock row that ALREADY EXISTS in this branch.
+    Configuring a threshold does not create stock — a row materialised by an opinion
+    about an ingredient the branch has never carried would be a shelf that exists only
+    because someone said they would like to be warned about it.
+    """
+    key = _require_key(idempotency_key)
+    why = _require_reason(reason)
+
+    critical = _opt_q3(critical_quantity)
+    minimum = _opt_q3(minimum_quantity)
+    target = _opt_q3(target_quantity)
+    _validate_thresholds(critical, minimum, target)
+
+    key_hash = _sha256(key)
+    # The payload hash covers the request BODY only. The store is not in the body — it
+    # comes from the session — and it is already part of the idempotency lookup, so a
+    # match here is always a match within one store.
+    #
+    # An unconfigured threshold hashes as "" and never as "0": a manager who cleared
+    # the critical level and one who set it to zero have made DIFFERENT decisions, and
+    # a retry of one must not be mistaken for the other.
+    request_hash = _sha256(_canonical({
+        "cmd": "update_thresholds",
+        "ingredient_id": ingredient_id,
+        "critical_quantity": "" if critical is None else str(critical),
+        "minimum_quantity": "" if minimum is None else str(minimum),
+        "target_quantity": "" if target is None else str(target),
+        "reason": why,
+    }))
+
+    existing = _find_threshold_update_by_key(db, store_id, key_hash)
+    if existing is not None:
+        return _replay_threshold_update(
+            db, existing, request_hash, _read_stock(db, store_id, ingredient_id)
+        )
+
+    try:
+        # The stock row is locked FOR UPDATE even though no quantity is written: two
+        # managers editing the same ingredient's thresholds at once must serialise, or
+        # the old_* values logged by the loser would describe a state that never
+        # existed between the two decisions.
+        _ingredient, stock = _load_stock_for_update(db, store_id, ingredient_id)
+
+        # Definitive idempotency re-check now that we hold the row lock: an identical
+        # concurrent update may have committed while we waited.
+        existing = _find_threshold_update_by_key(db, store_id, key_hash)
+        if existing is not None:
+            db.rollback()
+            return _replay_threshold_update(db, existing, request_hash, stock)
+
+        old_critical = _opt_q3(stock.critical_quantity)
+        old_minimum = _opt_q3(stock.minimum_quantity)
+        old_target = _opt_q3(stock.target_quantity)
+
+        update = InventoryThresholdUpdate(
+            store_id=store_id,
+            ingredient_id=ingredient_id,
+            old_critical_quantity=old_critical,
+            old_minimum_quantity=old_minimum,
+            old_target_quantity=old_target,
+            new_critical_quantity=critical,
+            new_minimum_quantity=minimum,
+            new_target_quantity=target,
+            reason=why,
+            updated_by_user_id=actor_user_id,
+            idempotency_key_hash=key_hash,
+            request_hash=request_hash,
+        )
+        db.add(update)
+        db.flush()
+
+        # The ONLY columns this function writes. Note what is absent: on_hand_quantity,
+        # reserved_quantity, last_restocked. The shelf is not the manager's opinion of
+        # the shelf.
+        stock.critical_quantity = critical
+        stock.minimum_quantity = minimum
+        stock.target_quantity = target
+        stock.threshold_updated_at = func.now()
+        stock.threshold_updated_by_user_id = actor_user_id
+
+        audit(
+            db,
+            entity_type="inventory_threshold",
+            entity_id=update.id,
+            action=AUDIT_THRESHOLDS_UPDATED,
+            actor_type="STAFF",
+            actor_id=str(actor_user_id),
+            ip_address=ip_address,
+            # No session token, no CSRF token, no idempotency key and no request hash:
+            # an audit trail that leaks a replayable credential is a liability, not a
+            # control.
+            payload_after={
+                "store_id": store_id,
+                "ingredient_id": ingredient_id,
+                "old_critical_quantity": _audit_qty(old_critical),
+                "old_minimum_quantity": _audit_qty(old_minimum),
+                "old_target_quantity": _audit_qty(old_target),
+                "new_critical_quantity": _audit_qty(critical),
+                "new_minimum_quantity": _audit_qty(minimum),
+                "new_target_quantity": _audit_qty(target),
+                "actor_user_id": actor_user_id,
+                "reason": why,
+            },
+        )
+
+        db.commit()
+        db.refresh(update)
+        db.refresh(stock)
+        logger.info(
+            "inventory_thresholds_updated update=%s store=%s ingredient=%s actor=%s "
+            "critical=%s minimum=%s target=%s",
+            update.id, store_id, ingredient_id, actor_user_id, critical, minimum, target,
+        )
+        return ThresholdResult(update=update, stock=stock, replayed=False)
+
+    except IntegrityError:
+        # A concurrent update with the same key committed between our re-check and the
+        # insert — uq_threshold_update_store_idem caught it. Nothing of ours was
+        # written; return the winner's result rather than logging the decision twice.
+        db.rollback()
+        existing = _find_threshold_update_by_key(db, store_id, key_hash)
+        if existing is not None:
+            return _replay_threshold_update(
+                db, existing, request_hash, _read_stock(db, store_id, ingredient_id)
+            )
+        raise
+    except HTTPException:
+        db.rollback()
+        raise
+
+
+def _read_stock(db: Session, store_id: int, ingredient_id: int) -> IngredientStock:
+    """
+    This store's stock row, read WITHOUT a lock.
+
+    Used only on the replay path, which writes nothing and therefore has nothing to
+    serialise against. Taking a FOR UPDATE lock to answer "what did this command do
+    when it ran an hour ago?" would make a retry — the very thing idempotency exists to
+    make cheap and safe — block a real stock movement.
+    """
+    stock = (
+        db.query(IngredientStock)
+        .filter(
+            IngredientStock.store_id == store_id,
+            IngredientStock.ingredient_id == ingredient_id,
+        )
+        .first()
+    )
+    if stock is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "stock_not_configured",
+                "message": messages.INVENTORY_STOCK_NOT_CONFIGURED,
+            },
+        )
+    return stock
+
+
+def _audit_qty(value: Optional[Decimal]) -> Optional[str]:
+    """
+    A threshold, for the audit payload. None stays None — it means NOT CONFIGURED, and
+    writing "0" there would record a decision the manager did not make.
+    """
+    return None if value is None else str(value)

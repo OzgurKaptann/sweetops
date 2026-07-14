@@ -26,7 +26,10 @@ See docs/STORE_SCOPED_INVENTORY.md.
 """
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from app.core import messages
@@ -40,6 +43,14 @@ from app.models.ingredient_stock import (
     IngredientStockMovement,
 )
 from app.models.inventory_stock_count import InventoryStockCount
+from app.models.inventory_threshold import (
+    THRESHOLD_STATUS_BELOW_RESERVED,
+    THRESHOLD_STATUS_CRITICAL,
+    THRESHOLD_STATUS_HEALTHY,
+    THRESHOLD_STATUS_LOW,
+    THRESHOLD_STATUS_NOT_CONFIGURED,
+    THRESHOLD_STATUS_OUT_OF_STOCK,
+)
 from app.models.inventory_transfer import InventoryTransfer
 from app.models.store import Store
 from app.schemas.inventory import (
@@ -52,6 +63,9 @@ from app.schemas.inventory import (
     StockCountReceipt,
     StockCountRequest,
     StockListResponse,
+    ThresholdAlertListResponse,
+    ThresholdReceipt,
+    ThresholdUpdateRequest,
     TransferDestinationListResponse,
     TransferItem,
     TransferListResponse,
@@ -710,3 +724,233 @@ def get_stock_count(
         )
     count, ingredient = row
     return _count_item(count, ingredient, _movement_id_for_count(db, count.id))
+
+
+# ── Threshold alerts ─────────────────────────────────────────────────────────
+#
+# Early warning, before a stockout becomes a customer-order problem. A threshold is
+# CONFIGURATION: reading these routes moves nothing, and writing one moves nothing
+# either — no stock quantity changes and no ledger row is written. See
+# docs/INVENTORY_THRESHOLD_ALERTS.md.
+#
+# These are emphatically NOT purchase orders. Nothing here names a supplier, orders
+# anything, reserves anything, or is acted upon by any other part of the system. The
+# recommended top-up quantity is a number on a screen that a manager reads and then
+# decides about.
+
+
+def _status_label(status: str) -> str:
+    """
+    The Turkish sentence for a status. An unknown value renders as
+    "Eşik tanımlı değil" rather than as a raw enum — no wire value ever reaches a
+    screen, not even by way of a status this server does not recognise.
+    """
+    return messages.INVENTORY_THRESHOLD_STATUS_LABEL.get(
+        status, messages.INVENTORY_THRESHOLD_STATUS_LABEL[THRESHOLD_STATUS_NOT_CONFIGURED]
+    )
+
+
+def _last_movement_at(db: Session, store_id: int) -> dict[int, object]:
+    """
+    When each ingredient last moved in this branch — one grouped query, not one per row.
+
+    Context, not a threshold: "critical, and nothing has moved for nine days" and
+    "critical, and it was consumed twice this morning" are the same status and very
+    different problems.
+    """
+    rows = (
+        db.query(
+            IngredientStockMovement.ingredient_id,
+            sa_func.max(IngredientStockMovement.created_at).label("last_at"),
+        )
+        .filter(IngredientStockMovement.store_id == store_id)
+        .group_by(IngredientStockMovement.ingredient_id)
+        .all()
+    )
+    return {r.ingredient_id: r.last_at for r in rows}
+
+
+@router.get("/threshold-alerts", response_model=ThresholdAlertListResponse)
+def list_threshold_alerts(
+    response: Response,
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_READ)),
+):
+    """
+    Which ingredients in the CALLER'S BRANCH are healthy, low, critical or out.
+
+    Every active ingredient this branch stocks appears — including the ones nobody has
+    configured a threshold for, which report NOT_CONFIGURED. That is deliberate: an
+    alert screen that silently omits the rows it has no opinion about is an alert
+    screen that hides exactly the ingredient nobody has thought about yet.
+
+    Status is computed against AVAILABLE stock (on_hand − reserved), never on-hand
+    alone. Stock already promised to accepted orders is not stock this branch can use
+    for new demand, so a full-looking shelf whose contents are all spoken for is LOW —
+    and it should be. See ``inventory_service.threshold_status``.
+
+    Requires ``inventory:read`` and a store-assigned session. There is no store
+    parameter and no "all branches" view: the absence of the parameter is the security
+    property, exactly as for every other route in this module.
+    """
+    _no_store(response)
+    store_id = _store_id(staff)
+
+    rows = (
+        db.query(Ingredient, IngredientStock)
+        .join(
+            IngredientStock,
+            (IngredientStock.ingredient_id == Ingredient.id)
+            & (IngredientStock.store_id == store_id),
+        )
+        .filter(Ingredient.is_active == True)  # noqa: E712
+        .order_by(Ingredient.name)
+        .all()
+    )
+    last_moved = _last_movement_at(db, store_id)
+
+    counts = {
+        THRESHOLD_STATUS_BELOW_RESERVED: 0,
+        THRESHOLD_STATUS_OUT_OF_STOCK: 0,
+        THRESHOLD_STATUS_CRITICAL: 0,
+        THRESHOLD_STATUS_LOW: 0,
+        THRESHOLD_STATUS_HEALTHY: 0,
+        THRESHOLD_STATUS_NOT_CONFIGURED: 0,
+    }
+    total_restock = Decimal("0")
+    items = []
+
+    for ing, stock in rows:
+        row_status = inventory_service.threshold_status(stock)
+        restock = inventory_service.recommended_restock_quantity(stock)
+
+        # The summary counts EVERY row in the branch, before any filter is applied.
+        # A manager who filters to "kritik" must still see that four other ingredients
+        # are low — otherwise the cards would agree with the filter rather than with
+        # the branch, and the filter would be hiding the very thing the cards exist to
+        # surface.
+        counts[row_status] = counts.get(row_status, 0) + 1
+        if restock is not None:
+            total_restock += restock
+
+        if status is not None and row_status != status:
+            continue
+
+        items.append({
+            "ingredient_id": ing.id,
+            "ingredient_name": ing.name,
+            "unit": stock.unit,
+            "on_hand_quantity": stock.on_hand_quantity,
+            "reserved_quantity": stock.reserved_quantity,
+            "available_quantity": stock.available_quantity,
+            "critical_quantity": stock.critical_quantity,
+            "minimum_quantity": stock.minimum_quantity,
+            "target_quantity": stock.target_quantity,
+            "status": row_status,
+            "status_label": _status_label(row_status),
+            "recommended_restock_quantity": restock,
+            "last_movement_at": last_moved.get(ing.id),
+            "threshold_updated_at": stock.threshold_updated_at,
+            "threshold_updated_by_user_id": stock.threshold_updated_by_user_id,
+        })
+
+    return {
+        "total": len(items),
+        "summary": {
+            "below_reserved": counts[THRESHOLD_STATUS_BELOW_RESERVED],
+            "out_of_stock": counts[THRESHOLD_STATUS_OUT_OF_STOCK],
+            "critical": counts[THRESHOLD_STATUS_CRITICAL],
+            "low": counts[THRESHOLD_STATUS_LOW],
+            "healthy": counts[THRESHOLD_STATUS_HEALTHY],
+            "not_configured": counts[THRESHOLD_STATUS_NOT_CONFIGURED],
+            "total_recommended_restock": total_restock,
+        },
+        "items": items,
+    }
+
+
+@router.patch(
+    "/stock/{ingredient_id}/thresholds", response_model=ThresholdReceipt
+)
+def update_stock_thresholds(
+    ingredient_id: int,
+    body: ThresholdUpdateRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    staff: CurrentStaff = Depends(require_permission(PERM_INVENTORY_ADJUST)),
+):
+    """
+    Set this branch's alert thresholds for one ingredient.
+
+    Changes NO stock. on_hand, reserved and available are untouched, and no movement
+    is written — the response echoes the quantities back precisely so a client can see
+    that they did not move. A manager saying "warn me at 3 kg" has not added, removed
+    or promised a single gram.
+
+    The ingredient comes from the PATH and the store from the SESSION. There is no
+    store_id field to send (``ThresholdUpdateRequest`` forbids unknown fields
+    outright), so configuring another branch's alerts is not a permission check that
+    could be got wrong — it is a request that cannot be expressed.
+
+    The body states the COMPLETE configuration: an omitted or null threshold means NOT
+    CONFIGURED, and clearing one is a real, logged decision.
+
+    Requires ``inventory:adjust``. That is the same authority as waste, adjustment and
+    transfer — not because this touches stock (it does not), but because a threshold
+    quietly lowered until it stops firing is how a branch walks into a stockout with
+    its eyes shut, and that is a decision with the same operational weight as writing
+    stock off. Plus a trusted Origin, a CSRF token (both enforced by
+    ``require_permission`` on state-changing methods), and an ``Idempotency-Key``, so a
+    retried form does not re-log the decision or re-stamp its timestamp.
+    """
+    _no_store(response)
+    store_id = _store_id(staff)
+
+    result = inventory_service.update_thresholds(
+        db,
+        # The session's store. Never the body's.
+        store_id=store_id,
+        # The path's ingredient. Never the body's.
+        ingredient_id=ingredient_id,
+        critical_quantity=body.critical_quantity,
+        minimum_quantity=body.minimum_quantity,
+        target_quantity=body.target_quantity,
+        reason=body.reason,
+        actor_user_id=staff.user_id,
+        idempotency_key=_idem_key(request),
+        ip_address=_client_ip(request),
+    )
+
+    update = result.update
+    stock = result.stock
+    ingredient = db.get(Ingredient, ingredient_id)
+    row_status = inventory_service.threshold_status(stock)
+
+    return ThresholdReceipt(
+        ingredient_id=ingredient_id,
+        store_id=store_id,
+        ingredient_name=ingredient.name if ingredient else None,
+        unit=stock.unit,
+        # On a REPLAY these are the thresholds the ORIGINAL command set, read from its
+        # log row — not necessarily the ones in force now, if a later command changed
+        # them. That is what an idempotent replay means: it reports what THIS command
+        # did, and it did it once.
+        critical_quantity=update.new_critical_quantity,
+        minimum_quantity=update.new_minimum_quantity,
+        target_quantity=update.new_target_quantity,
+        # Unchanged. This operation cannot move them.
+        on_hand_quantity=stock.on_hand_quantity,
+        reserved_quantity=stock.reserved_quantity,
+        available_quantity=stock.available_quantity,
+        status=row_status,
+        status_label=_status_label(row_status),
+        recommended_restock_quantity=inventory_service.recommended_restock_quantity(stock),
+        reason=update.reason,
+        # The log row's own timestamp: when the thresholds actually CHANGED. A replay
+        # returns the original moment rather than "now", because nothing changed now.
+        threshold_updated_at=update.created_at,
+        threshold_updated_by_user_id=update.updated_by_user_id,
+        idempotent_replay=result.replayed,
+    )

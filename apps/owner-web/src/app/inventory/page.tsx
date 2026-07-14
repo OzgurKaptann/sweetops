@@ -6,18 +6,24 @@ import { useAuth } from "@/components/AuthGate";
 import { InventoryActionModal } from "@/components/inventory/InventoryActionModal";
 import { MovementHistoryTable } from "@/components/inventory/MovementHistoryTable";
 import { StockOverviewTable } from "@/components/inventory/StockOverviewTable";
+import { ThresholdAlertsPanel } from "@/components/inventory/ThresholdAlertsPanel";
+import { ThresholdEditModal } from "@/components/inventory/ThresholdEditModal";
 import {
   fetchMovements,
   fetchStock,
+  fetchThresholdAlerts,
   fetchTransferDestinations,
   type MovementItem,
   type StockItem,
+  type ThresholdAlertItem,
+  type ThresholdAlertSummary,
   type TransferDestination,
 } from "@/lib/inventory-api";
 import { inventoryErrorMessage } from "@/lib/inventory-errors";
 import {
   INVENTORY_ACTIONS,
   INVENTORY_COPY,
+  THRESHOLD_COPY,
   type OperationBanner,
   type OperationKind,
 } from "@/lib/inventory-view";
@@ -54,9 +60,12 @@ export default function InventoryPage() {
   const [stock, setStock] = useState<StockItem[]>([]);
   const [movements, setMovements] = useState<MovementItem[]>([]);
   const [destinations, setDestinations] = useState<TransferDestination[]>([]);
+  const [alerts, setAlerts] = useState<ThresholdAlertItem[]>([]);
+  const [alertSummary, setAlertSummary] = useState<ThresholdAlertSummary | null>(null);
 
   const [stockLoading, setStockLoading] = useState(true);
   const [movementsLoading, setMovementsLoading] = useState(true);
+  const [alertsLoading, setAlertsLoading] = useState(true);
   const [movementType, setMovementType] = useState("");
 
   const [banner, setBanner] = useState<OperationBanner | null>(null);
@@ -64,6 +73,8 @@ export default function InventoryPage() {
 
   const [action, setAction] = useState<OperationKind | null>(null);
   const [actionIngredientId, setActionIngredientId] = useState<number | null>(null);
+  const [thresholdIngredientId, setThresholdIngredientId] = useState<number | null>(null);
+  const [thresholdOpen, setThresholdOpen] = useState(false);
 
   const loadStock = useCallback(async () => {
     setStockLoading(true);
@@ -75,6 +86,19 @@ export default function InventoryPage() {
       setLoadError(inventoryErrorMessage(err));
     } finally {
       setStockLoading(false);
+    }
+  }, []);
+
+  const loadAlerts = useCallback(async () => {
+    setAlertsLoading(true);
+    try {
+      const data = await fetchThresholdAlerts();
+      setAlerts(data.items);
+      setAlertSummary(data.summary);
+    } catch (err) {
+      setLoadError(inventoryErrorMessage(err));
+    } finally {
+      setAlertsLoading(false);
     }
   }, []);
 
@@ -101,6 +125,10 @@ export default function InventoryPage() {
     loadMovements();
   }, [loadMovements]);
 
+  useEffect(() => {
+    loadAlerts();
+  }, [loadAlerts]);
+
   // Only needed by the transfer form, and only by a manager who may transfer.
   useEffect(() => {
     if (!canAdjust) return;
@@ -122,8 +150,26 @@ export default function InventoryPage() {
       // the backend is the source of truth for stock, not this component.
       loadStock();
       loadMovements();
+      // Stock moved, so a threshold status may have moved with it — an ingredient that
+      // was healthy before a fire kaydı may be low after it. The thresholds themselves
+      // did not change; what they are judged against did.
+      loadAlerts();
     },
-    [loadStock, loadMovements],
+    [loadStock, loadMovements, loadAlerts],
+  );
+
+  /**
+   * A threshold decision changed no stock, so the stock table and the ledger are
+   * untouched and are deliberately NOT re-read. Only the alert view can have changed,
+   * and re-reading the ledger here would quietly suggest to the next reader that a
+   * threshold edit is the kind of thing that writes to it.
+   */
+  const handleThresholdSuccess = useCallback(
+    (result: OperationBanner) => {
+      setBanner(result);
+      loadAlerts();
+    },
+    [loadAlerts],
   );
 
   return (
@@ -174,6 +220,20 @@ export default function InventoryPage() {
                 {label}
               </button>
             ))}
+            {/* Sits beside the stock operations rather than on a page of its own: the
+                manager who has just seen "Kritik stok" is standing at this screen, and
+                the moment to set a sensible warning level is the moment you wished you
+                had one. */}
+            <button
+              onClick={() => {
+                setThresholdIngredientId(null);
+                setBanner(null);
+                setThresholdOpen(true);
+              }}
+              className="text-sm px-4 py-2 rounded-lg font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              Eşik düzenle
+            </button>
           </div>
         ) : (
           <p className="text-sm text-gray-600 bg-white border border-gray-200 rounded-lg px-4 py-3">
@@ -204,6 +264,32 @@ export default function InventoryPage() {
             {loadError}
           </p>
         )}
+
+        {/* Alerts come FIRST. A manager opening this screen is asking "what needs me
+            today?", and burying that under a full stock table is how the answer gets
+            scrolled past. */}
+        <section className="space-y-3">
+          <div className="flex items-baseline gap-3">
+            <div className="w-1 h-5 rounded-full bg-red-500 shrink-0" />
+            <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">
+              {THRESHOLD_COPY.heading}
+            </h2>
+          </div>
+          <ThresholdAlertsPanel
+            items={alerts}
+            summary={alertSummary}
+            loading={alertsLoading}
+            onEditThresholds={
+              canAdjust
+                ? (ingredientId) => {
+                    setThresholdIngredientId(ingredientId);
+                    setBanner(null);
+                    setThresholdOpen(true);
+                  }
+                : undefined
+            }
+          />
+        </section>
 
         <section className="space-y-3">
           <div className="flex items-baseline gap-3">
@@ -251,6 +337,15 @@ export default function InventoryPage() {
           initialIngredientId={actionIngredientId}
           onClose={() => setAction(null)}
           onSuccess={handleSuccess}
+        />
+      )}
+
+      {thresholdOpen && (
+        <ThresholdEditModal
+          items={alerts}
+          initialIngredientId={thresholdIngredientId}
+          onClose={() => setThresholdOpen(false)}
+          onSuccess={handleThresholdSuccess}
         />
       )}
     </div>

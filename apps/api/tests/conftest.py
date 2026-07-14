@@ -31,6 +31,7 @@ from app.models.ingredient_stock import (
     OrderInventoryLine,
 )
 from app.models.inventory_stock_count import InventoryStockCount
+from app.models.inventory_threshold import InventoryThresholdUpdate
 from app.models.inventory_transfer import InventoryTransfer
 from app.models.order import Order
 from app.models.order_item import OrderItem
@@ -221,9 +222,15 @@ def stock_for(
 # function: a count that was got wrong is superseded by counting again, never
 # edited, so today's manager cannot rewrite what yesterday's manager says they saw
 # on the shelf.
+#
+# inventory_threshold_updates is append-only for the same reason and by the same
+# function: a threshold decision that was got wrong is superseded by making another
+# one, never edited — otherwise today's manager could rewrite what yesterday's manager
+# decided, which is exactly what somebody quietly disarming an alert would want to do.
 _INVENTORY_TRIGGERS = (
     ("ingredient_stock_movements", "trg_ingredient_stock_movements_immutable"),
     ("inventory_stock_counts", "trg_inventory_stock_counts_immutable"),
+    ("inventory_threshold_updates", "trg_inventory_threshold_updates_immutable"),
 )
 
 
@@ -335,6 +342,13 @@ def purge_inventory_for_store(db: Session, store_id: int) -> None:
             InventoryStockCount.store_id == store_id
         ).delete(synchronize_session=False)
 
+        # Threshold decisions. They FK to this store's users and to its stock rows, so
+        # they pin both. No movement FKs to them (a threshold writes none), so they can
+        # go at any point once the trigger is off.
+        db.query(InventoryThresholdUpdate).filter(
+            InventoryThresholdUpdate.store_id == store_id
+        ).delete(synchronize_session=False)
+
     if transfer_ids:
         db.query(InventoryTransfer).filter(
             InventoryTransfer.id.in_(transfer_ids)
@@ -343,6 +357,20 @@ def purge_inventory_for_store(db: Session, store_id: int) -> None:
     db.query(OrderInventoryLine).filter(
         OrderInventoryLine.store_id == store_id
     ).delete(synchronize_session=False)
+
+    # Un-stamp the threshold actor. ingredient_stock.threshold_updated_by_user_id FKs to
+    # users, so a manager who configured a threshold PINS their own user row — and the
+    # caller is about to delete this store's users while its stock rows may still be
+    # around (a stock row outlives its store's staff whenever an ingredient fixture tears
+    # down after a store fixture). In production nothing deletes a user, so the FK is
+    # exactly right there; here it is teardown order that has to give way, and it gives
+    # way by dropping the stamp rather than by weakening the constraint.
+    db.query(IngredientStock).filter(
+        IngredientStock.store_id == store_id
+    ).update(
+        {"threshold_updated_by_user_id": None, "threshold_updated_at": None},
+        synchronize_session=False,
+    )
     db.commit()
 
 
@@ -385,6 +413,12 @@ def cleanup_ingredient(db: Session, ingredient_id: int) -> None:
         # this call.
         db.query(InventoryStockCount).filter(
             InventoryStockCount.ingredient_id == ingredient_id
+        ).delete(synchronize_session=False)
+
+        # Threshold decisions, which FK to ingredient_stock (deleted below) and to
+        # users. They are configuration, not stock — no movement points at them.
+        db.query(InventoryThresholdUpdate).filter(
+            InventoryThresholdUpdate.ingredient_id == ingredient_id
         ).delete(synchronize_session=False)
 
     # Transfers next: their legs are gone, and they FK to ingredient_stock (about

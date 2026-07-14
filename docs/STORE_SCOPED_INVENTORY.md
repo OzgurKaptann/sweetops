@@ -89,15 +89,32 @@ reserved_quantity   promised to THIS store's accepted orders
 available_quantity  GENERATED ALWAYS AS (on_hand - reserved) STORED
 unit, reorder_level, last_restocked, updated_at
 
+critical_quantity            ┐  alert thresholds for THIS store.
+minimum_quantity             │  NULL = not configured (≠ zero).
+target_quantity              │  Configuration, NOT stock — see below.
+threshold_updated_at         │
+threshold_updated_by_user_id ┘
+
 UNIQUE (store_id, ingredient_id)          ← the feature, in one line
 CHECK  on_hand_quantity  >= 0
 CHECK  reserved_quantity >= 0
 CHECK  reserved_quantity <= on_hand_quantity     (no backorders)
+CHECK  critical <= minimum <= target             (pairwise; NULLs vacuously pass)
+CHECK  every threshold >= 0
+FK     (store_id, threshold_updated_by_user_id) → users(store_id, id)
 ```
 
 Two rows for the same ingredient in one store would let two concurrent orders
 lock *different rows* and each believe it had the last 200 g of pistachio. The
 uniqueness constraint is what makes the row lock meaningful.
+
+The **alert thresholds** are store-scoped for exactly the reason the quantities are.
+Kadıköy sells twice the pistachio Beşiktaş does, so *"3 kg is low"* is a true statement
+about one branch and a false one about the other; a chain-wide threshold would either
+cry wolf in the quiet branch or stay silent in the busy one. They are **configuration,
+not stock** — writing one moves no quantity and creates no ledger row — and the status
+derived from them is computed against **`available_quantity`**, never on-hand alone.
+→ [`INVENTORY_THRESHOLD_ALERTS.md`](INVENTORY_THRESHOLD_ALERTS.md)
 
 **`ingredient_stock_movements`** — every row states what happened, how it moved
 on-hand and reserved, and **which branch it happened in**. Order-driven rows also
@@ -614,8 +631,17 @@ Full API suite: **644 passed, 0 failed.**
   reserves nothing, transfers no reserved stock, and is excluded from waste,
   purchase-receipt and consumption analytics. **No approval flow** — see the
   limitations there. → [`INVENTORY_TRANSFER_WORKFLOW.md`](INVENTORY_TRANSFER_WORKFLOW.md)
+* ~~**Per-store reorder thresholds**~~ — **DONE**, in its own branch. `ingredient_stock`
+  now carries `critical_quantity` / `minimum_quantity` / `target_quantity` per
+  (store, ingredient), with a six-state status computed from **available** stock, an
+  owner alert screen, and an append-only log of who changed a warning level and why.
+  It is visibility only: it moves no stock, writes no ledger row, and orders nothing.
+  → [`INVENTORY_THRESHOLD_ALERTS.md`](INVENTORY_THRESHOLD_ALERTS.md)
 * **Supplier management**
-* **Purchase-order management** (purchase *receipts* exist; purchase *orders* do not)
+* **Purchase-order management** (purchase *receipts* exist; purchase *orders* do not.
+  The threshold screen's "önerilen tamamlama" is a suggestion on a screen, not a document
+  — nothing consumes it.)
+* **Automatic reorder / forecasting** — a threshold breach tells a human. It does not act.
 * **Recipe versioning**
 * **Lot / expiry tracking** — batch-level granularity under the store level
 * **Barcode scanning**
