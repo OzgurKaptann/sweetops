@@ -72,12 +72,46 @@ export interface StockCountCommand {
   note?: string | null;
 }
 
-export type InventoryCommand =
+/**
+ * A threshold decision.
+ *
+ * The odd one out: it moves no stock. It is fingerprinted and keyed all the same,
+ * because a retried form must not re-log the decision or re-stamp `threshold_updated_at`
+ * — that timestamp is what an owner reads to ask who moved a warning level and when,
+ * and it is worthless if pressing the button twice moves it.
+ *
+ * A null threshold means NOT CONFIGURED, and it is fingerprinted as null rather than
+ * as "0": clearing the critical level and setting it to zero are DIFFERENT decisions,
+ * and a retry of one must never be mistaken for the other.
+ */
+export interface ThresholdUpdateCommand {
+  kind: "threshold_update";
+  ingredientId: number;
+  criticalQuantity: string | null;
+  minimumQuantity: string | null;
+  targetQuantity: string | null;
+  reason: string;
+}
+
+/**
+ * The commands that actually MOVE STOCK.
+ *
+ * Named as its own union because the distinction is load-bearing, not cosmetic: these
+ * five write a ledger movement and change what is on a shelf. A threshold update does
+ * neither, and keeping it out of this type is what lets the stock dialog be
+ * exhaustively checked — a sixth stock command added without a branch there stops
+ * compiling, while a threshold update simply is not one of these and cannot be
+ * submitted through it by accident.
+ */
+export type StockCommand =
   | PurchaseReceiptCommand
   | WasteCommand
   | ManualAdjustmentCommand
   | TransferCommand
   | StockCountCommand;
+
+/** Everything that carries an Idempotency-Key — stock commands, and threshold edits. */
+export type InventoryCommand = StockCommand | ThresholdUpdateCommand;
 
 /**
  * Deterministic fingerprint of the *logical* command.
@@ -125,6 +159,17 @@ export function fingerprintCommand(cmd: InventoryCommand): string {
         countedQuantity: cmd.countedQuantity,
         reason: cmd.reason,
         note: cmd.note ?? null,
+      });
+    case "threshold_update":
+      return JSON.stringify({
+        kind: cmd.kind,
+        ingredientId: cmd.ingredientId,
+        // null (not configured) is NOT "0". A manager who cleared the critical level
+        // and one who set it to zero made different decisions.
+        criticalQuantity: cmd.criticalQuantity,
+        minimumQuantity: cmd.minimumQuantity,
+        targetQuantity: cmd.targetQuantity,
+        reason: cmd.reason,
       });
   }
 }

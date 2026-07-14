@@ -78,6 +78,60 @@ receive a raw API row — they receive a `StockRow` / `MovementRow` whose fields
 already Turkish and already formatted. There is no `movement_type` field left on a
 `MovementRow` for a table cell to print by accident.
 
+## 2b. Stok uyarıları — the threshold alert panel
+
+Since the threshold-alerts branch, the page **opens** with an alert panel above the stock
+table. A manager arriving here is asking *"what needs me today?"*, and burying that under
+a full stock table is how the answer gets scrolled past.
+
+```
+STOK UYARILARI
+┌──────────────┬──────────────┬──────────────┬────────────────────┐
+│ Kritik stok  │ Düşük stok   │ Stokta yok   │ Eşik tanımlı değil │
+│      2       │      3       │      1       │         5          │
+└──────────────┴──────────────┴──────────────┴────────────────────┘
+Toplam önerilen tamamlama: 12,5
+
+Malzeme │ Kullanılabilir │ Durum        │ Kritik │ Minimum │ Hedef │ Önerilen │
+Çikolata│  4,0 kg        │ Düşük stok   │  2     │  5      │  20   │  16      │ [Eşik düzenle]
+Fıstık  │  0,0 kg        │ Stokta yok   │  1     │  3      │  10   │  10      │ [Eşik düzenle]
+Muz     │  8,0 kg        │ Eşik tanımlı değil │ —  │  —     │  —    │  —       │ [Eşik düzenle]
+```
+
+The table shows **Kullanılabilir stok**, not physical stock, because that is what the
+status was computed against — a full-looking on-hand figure beside a *"Düşük stok"* badge
+looks like a bug and gets the alert ignored. What makes the two differ is reserved stock,
+and the row that is low *because of* reservations is exactly the one a manager most needs
+to understand.
+
+An unconfigured threshold renders as **`—`**, never as `0`. Zero is a real threshold
+(*"warn me only when it is actually gone"*); `—` means nobody has decided anything. Those
+are opposite instructions to whoever reads the row next.
+
+`Ayrılmış stoktan düşük` gets a card only when it is non-zero — a permanent `0` card for
+something the database makes unrepresentable would train people to read straight past the
+one row that would mean the shop has sold stock it does not have. `Stok yeterli` is
+deliberately **not** a card: a big number of healthy ingredients is exactly the
+reassurance that stops someone reading the row that is not.
+
+**Eşik düzenle** opens a form with Malzeme, Kritik eşik, Minimum eşik, Hedef stok and
+Sebep. Its first line is the one that makes it usable:
+
+> Eşikler stok uyarıları için kullanılır. **Bu işlem stok miktarını değiştirmez.**
+
+A manager who is not certain that setting a warning level leaves their stock alone will
+not set one — and an alert system nobody configures never fires. The backend guarantees
+it (the endpoint writes no ledger movement and *cannot*), and the copy says it.
+
+The form is a `PATCH` carrying CSRF and an `Idempotency-Key`, exactly like every stock
+mutation — not because stock moves (it does not), but because a retried form must not
+re-log the decision or re-stamp `threshold_updated_at`, which is the timestamp an owner
+reads to ask who moved a warning level and when.
+
+→ [`INVENTORY_THRESHOLD_ALERTS.md`](INVENTORY_THRESHOLD_ALERTS.md)
+
+---
+
 ## 3. Stock overview
 
 Displayed per ingredient: **Malzeme · Fiziksel stok · Ayrılmış stok ·
@@ -380,7 +434,12 @@ Explicitly out of scope for this branch, and not implemented:
 * purchase-order management
 * lot / expiry tracking
 * barcode scanning
-* physical count (sayım) workflow
+* ~~physical count (sayım) workflow~~ — **DONE**, in its own branch.
+  → [`PHYSICAL_STOCK_COUNT_WORKFLOW.md`](PHYSICAL_STOCK_COUNT_WORKFLOW.md)
+* ~~low-stock / threshold alerts~~ — **DONE**, in its own branch. Summary cards, a
+  threshold-enriched stock table and an `Eşik düzenle` form now sit at the top of this
+  screen. Visibility only: no stock moves, nothing is ordered, and no supplier exists.
+  → [`INVENTORY_THRESHOLD_ALERTS.md`](INVENTORY_THRESHOLD_ALERTS.md)
 
 ## 14. Tests
 

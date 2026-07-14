@@ -164,6 +164,69 @@ INVENTORY_COUNT_QUANTITY_INVALID = "Sayım sonucu negatif olamaz."
 INVENTORY_STOCK_COUNT_NOT_FOUND = "Bu sayım kaydı bulunamadı."
 
 
+# ── Inventory threshold alerts ───────────────────────────────────────────────
+# A threshold is a SETTING, not stock. None of these messages should ever suggest
+# that stock moved, that something was ordered, or that a supplier was involved —
+# see docs/INVENTORY_THRESHOLD_ALERTS.md.
+
+# A threshold below zero would promise an alert that can never fire: no quantity can
+# fall below zero. A control that silently does nothing is worse than no control,
+# because the manager believes they are covered by it.
+INVENTORY_THRESHOLD_NEGATIVE = "Eşik değerleri negatif olamaz."
+
+# An inverted ladder. If critical sits above minimum, the ingredient reaches "kritik"
+# before it ever reaches "düşük", and the early warning the manager set up to give
+# themselves time never appears at all.
+INVENTORY_THRESHOLD_CRITICAL_ABOVE_MINIMUM = (
+    "Kritik eşik minimum eşikten büyük olamaz."
+)
+
+# Restocking to target would land the branch straight back into "düşük stok": a
+# replenishment that is a warning the moment it arrives.
+INVENTORY_THRESHOLD_MINIMUM_ABOVE_TARGET = (
+    "Minimum eşik hedef stoktan büyük olamaz."
+)
+
+# The same ordering rule, for the case where minimum is not configured at all and
+# nothing else is holding critical and target together.
+INVENTORY_THRESHOLD_CRITICAL_ABOVE_TARGET = (
+    "Kritik eşik hedef stoktan büyük olamaz."
+)
+
+# The six alert statuses, in Turkish. The wire value (CRITICAL, NOT_CONFIGURED …)
+# stays the stable English contract; THIS is what a manager reads, and a raw status
+# enum must never reach a screen.
+#
+# Two pairs here are easy to conflate and expensive to get wrong:
+#
+#   "Stokta yok"             there is nothing available to promise anybody.
+#   "Ayrılmış stoktan düşük" the branch has promised MORE than it physically holds.
+#                            Not a stock level — an incident. A manager who reads
+#                            "stokta yok" goes and orders more; one who reads this
+#                            goes and looks at the orders that cannot be fulfilled.
+#
+#   "Stok yeterli"           above every configured warning level. A statement of fact.
+#   "Eşik tanımlı değil"     nobody has said what "low" means here. NOT an all-clear —
+#                            it is the absence of one, and saying "yeterli" instead
+#                            would be the system inventing reassurance it has no basis
+#                            for.
+INVENTORY_THRESHOLD_STATUS_LABEL = {
+    "BELOW_RESERVED": "Ayrılmış stoktan düşük",
+    "OUT_OF_STOCK": "Stokta yok",
+    "CRITICAL": "Kritik stok",
+    "LOW": "Düşük stok",
+    "HEALTHY": "Stok yeterli",
+    "NOT_CONFIGURED": "Eşik tanımlı değil",
+}
+
+# The recommended top-up quantity, explained. Pointedly NOT called a purchase order,
+# a reorder, or anything a supplier would recognise: nothing is ordered, nothing is
+# reserved, and no system acts on this number. The manager reads it and decides.
+INVENTORY_THRESHOLD_RESTOCK_HINT = (
+    "Hedef stok seviyesine ulaşmak için önerilen tamamlama miktarı"
+)
+
+
 # ── Payment settlement / cashier (cashier-web) ───────────────────────────────
 # Order/table/settlement not found or belongs to another store — non-disclosing,
 # but still tells the cashier what to do next instead of "kayıt bulunamadı".

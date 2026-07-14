@@ -187,8 +187,47 @@ class IngredientStock(Base):
     last_restocked = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+    # ── Alert thresholds ─────────────────────────────────────────────────────
+    # Operational EARLY WARNING levels for this ingredient IN THIS BRANCH. They
+    # are configuration, not stock: nothing here is a quantity the shop owns, and
+    # writing to any of them moves no stock and writes no ledger row.
+    #
+    # Store-scoped for the same reason the quantities are. Kadıköy sells twice the
+    # pistachio Beşiktaş does, so "3 kg is low" is a true statement about one branch
+    # and a false one about the other. A chain-wide threshold would either cry wolf
+    # in the quiet branch or stay silent in the busy one.
+    #
+    # NULL means NOT CONFIGURED — never "zero". Zero is a real, meaningful threshold
+    # ("warn me only when it is actually gone"), so the two cannot share a
+    # representation. A branch that has never set a threshold gets NOT_CONFIGURED in
+    # the alert view, which is an honest "nobody has said what low means here" rather
+    # than a fabricated all-clear.
+    #
+    #   critical_quantity  at or below this, the branch is operationally critical
+    #   minimum_quantity   at or below this, stock is low and should be reviewed
+    #   target_quantity    the level replenishment should aim BACK UP to
+    #
+    # target_quantity is deliberately not an alert level. It answers "how much should
+    # I buy?", not "am I in trouble?" — see ck_stock_threshold_* below and
+    # docs/INVENTORY_THRESHOLD_ALERTS.md.
+    critical_quantity = Column(QTY, nullable=True)
+    minimum_quantity = Column(QTY, nullable=True)
+    target_quantity = Column(QTY, nullable=True)
+
+    # Who last changed the thresholds, and when. Written only by the threshold
+    # endpoint; a replay of an already-applied update deliberately does NOT touch
+    # them again, so this timestamp means "when the thresholds last actually
+    # changed", not "when someone last pressed the button".
+    threshold_updated_at = Column(DateTime(timezone=True), nullable=True)
+    threshold_updated_by_user_id = Column(
+        Integer, ForeignKey("users.id"), nullable=True, index=True
+    )
+
     ingredient = relationship("Ingredient", foreign_keys=[ingredient_id])
     store = relationship("Store", foreign_keys=[store_id])
+    threshold_updated_by = relationship(
+        "User", foreign_keys=[threshold_updated_by_user_id]
+    )
 
     __table_args__ = (
         # The grain. Two rows for the same ingredient in one store would let two
@@ -203,6 +242,60 @@ class IngredientStock(Base):
         CheckConstraint(
             "reserved_quantity <= on_hand_quantity",
             name="ck_stock_reserved_le_on_hand",
+        ),
+        # ── Threshold integrity ──────────────────────────────────────────────
+        # A negative threshold has no meaning: a shelf cannot hold less than
+        # nothing, so no quantity could ever fall below it and the alert it
+        # promises would never fire. It is a setting that silently does nothing,
+        # which is worse than no setting at all.
+        CheckConstraint(
+            "critical_quantity IS NULL OR critical_quantity >= 0",
+            name="ck_stock_threshold_critical_nonneg",
+        ),
+        CheckConstraint(
+            "minimum_quantity IS NULL OR minimum_quantity >= 0",
+            name="ck_stock_threshold_minimum_nonneg",
+        ),
+        CheckConstraint(
+            "target_quantity IS NULL OR target_quantity >= 0",
+            name="ck_stock_threshold_target_nonneg",
+        ),
+        # The ordering invariant, stated pairwise so that any PARTIAL configuration
+        # is still checked. Each clause is vacuously true when either side is NULL,
+        # which is exactly the documented policy: configure one, two or three
+        # thresholds, and whichever ones you DID configure must make sense together.
+        #
+        # critical > minimum would invert the alert ladder — an ingredient would go
+        # CRITICAL before it ever went LOW, and the "low stock, review it" warning
+        # the manager was relying on would never appear at all.
+        CheckConstraint(
+            "critical_quantity IS NULL OR minimum_quantity IS NULL"
+            " OR critical_quantity <= minimum_quantity",
+            name="ck_stock_threshold_critical_le_minimum",
+        ),
+        # minimum > target would mean restocking to target lands the branch straight
+        # back into LOW: a replenishment that is a warning the moment it arrives.
+        CheckConstraint(
+            "minimum_quantity IS NULL OR target_quantity IS NULL"
+            " OR minimum_quantity <= target_quantity",
+            name="ck_stock_threshold_minimum_le_target",
+        ),
+        # Implied by the two above when all three are set, but load-bearing on its
+        # own when minimum is NOT: critical + target alone must still be ordered.
+        CheckConstraint(
+            "critical_quantity IS NULL OR target_quantity IS NULL"
+            " OR critical_quantity <= target_quantity",
+            name="ck_stock_threshold_critical_le_target",
+        ),
+        # Staff configure thresholds for their OWN branch. users.store_id is
+        # nullable, so a member of staff with no store assignment can never be
+        # recorded as having set one — which is the correct answer, not an accident.
+        # A Kadıköy manager stamped on Beşiktaş's threshold row is unrepresentable,
+        # not merely forbidden.
+        ForeignKeyConstraint(
+            ["store_id", "threshold_updated_by_user_id"],
+            ["users.store_id", "users.id"],
+            name="fk_stock_threshold_actor_store",
         ),
     )
 

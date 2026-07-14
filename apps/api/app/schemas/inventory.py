@@ -291,6 +291,149 @@ class StockCountListResponse(BaseModel):
     items: list[StockCountItem]
 
 
+# ── Inventory threshold alerts ───────────────────────────────────────────────
+#
+# Thresholds are CONFIGURATION, not stock. Nothing in this section moves a gram, and
+# no schema here has a quantity the shop owns — only the levels at which a branch
+# wants to be warned. See docs/INVENTORY_THRESHOLD_ALERTS.md.
+
+
+class ThresholdUpdateRequest(BaseModel):
+    """
+    Set one ingredient's alert thresholds in the caller's own store.
+
+    ``extra="forbid"``, so this schema does not merely IGNORE a smuggled ``store_id``
+    / ``actor_user_id`` / ``status`` / ``on_hand_quantity`` / ``idempotency_key_hash``
+    — it REJECTS the whole request with a 422. Silently ignoring them would leave a
+    client believing it had configured another branch's alerts, or dictated its own
+    status, and cheerfully told so. The store comes from the authenticated session and
+    nowhere else; the ingredient comes from the path. There is deliberately no field
+    here for either.
+
+    The body states the COMPLETE threshold configuration, not a patch of it. An
+    omitted or explicitly null threshold means NOT CONFIGURED, and clearing one is a
+    real decision that is logged like any other. Partial-update semantics would make a
+    null ambiguous between "leave this alone" and "clear this", and the request hash
+    that idempotency compares could not tell those two intents apart either.
+
+    Note there is no field for a STATUS. A client does not get to say an ingredient is
+    healthy; the server derives that from the stock row and these levels.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    # Nullable and unconstrained here on purpose: the non-negativity and ordering rules
+    # are enforced in the service, which can answer with a Turkish sentence naming the
+    # rule that was broken. A bare Pydantic ``ge=0`` would produce a 422 whose body is
+    # an English validation trace, which is exactly what a manager must never be shown.
+    critical_quantity: Optional[Decimal] = None
+    minimum_quantity: Optional[Decimal] = None
+    target_quantity: Optional[Decimal] = None
+
+    # Mandatory. A threshold quietly lowered until it stops firing is how a branch
+    # discovers a stockout at the counter, and the record must say who decided that
+    # and why.
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ThresholdReceipt(BaseModel):
+    """
+    Result of a threshold decision: the levels now in force, and the resulting status.
+
+    The stock quantities are echoed back UNCHANGED — they are here so the manager's
+    screen can show the new status against the stock it was computed from, and they
+    are the proof that the operation moved nothing. There is no ``movement_id`` field
+    on this receipt because a threshold change writes no movement, and there is
+    nowhere for one to appear.
+
+    Neither the raw Idempotency-Key nor the request hash is ever exposed — they are
+    stored only as SHA-256 digests, and echoing either back would hand a client a
+    replay token.
+    """
+    ingredient_id: int
+    store_id: int
+    ingredient_name: Optional[str] = None
+    unit: str
+
+    critical_quantity: Optional[Decimal] = None
+    minimum_quantity: Optional[Decimal] = None
+    target_quantity: Optional[Decimal] = None
+
+    # Unchanged by this operation, by construction.
+    on_hand_quantity: Decimal
+    reserved_quantity: Decimal
+    available_quantity: Decimal
+
+    status: str
+    status_label: str
+    recommended_restock_quantity: Optional[Decimal] = None
+
+    reason: str
+    threshold_updated_at: Optional[datetime] = None
+    threshold_updated_by_user_id: Optional[int] = None
+    idempotent_replay: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ThresholdAlertItem(BaseModel):
+    """
+    One ingredient's alert line for the caller's branch.
+
+    ``status`` is the English wire value (CRITICAL, NOT_CONFIGURED …) and stays the
+    stable contract. ``status_label`` is the Turkish sentence a manager reads. Both are
+    sent so the client never has to invent a translation — and so that a client which
+    somehow received an unknown status still has something safe to display.
+    """
+    ingredient_id: int
+    ingredient_name: str
+    unit: str
+
+    on_hand_quantity: Decimal
+    reserved_quantity: Decimal
+    available_quantity: Decimal
+
+    critical_quantity: Optional[Decimal] = None
+    minimum_quantity: Optional[Decimal] = None
+    target_quantity: Optional[Decimal] = None
+
+    status: str
+    status_label: str
+    # target - available, when a target is configured and available is below it.
+    # A SUGGESTION on a screen: it orders nothing, reserves nothing, and names no
+    # supplier. See docs/INVENTORY_THRESHOLD_ALERTS.md.
+    recommended_restock_quantity: Optional[Decimal] = None
+
+    last_movement_at: Optional[datetime] = None
+    threshold_updated_at: Optional[datetime] = None
+    threshold_updated_by_user_id: Optional[int] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ThresholdAlertSummary(BaseModel):
+    """
+    The counts behind the summary cards, computed SERVER-SIDE.
+
+    Deliberately not left to the client. ``total_recommended_restock`` is a sum of
+    decimal quantities, and a browser adding JSON number strings is how "0.1 + 0.2"
+    ends up on a stock report. The backend does stock arithmetic; the client formats
+    what it is given.
+    """
+    below_reserved: int
+    out_of_stock: int
+    critical: int
+    low: int
+    healthy: int
+    not_configured: int
+    total_recommended_restock: Decimal
+
+
+class ThresholdAlertListResponse(BaseModel):
+    total: int
+    summary: ThresholdAlertSummary
+    items: list[ThresholdAlertItem]
+
+
 class MovementReceipt(BaseModel):
     """Result of a manual stock command, including the resulting stock state.
 

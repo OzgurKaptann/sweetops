@@ -50,8 +50,19 @@ from tests.conftest import (
 
 _API_DIR = Path(__file__).resolve().parents[1]
 
-_REVISION = "a3d7e9c14b62"          # physical stock count workflow (head)
+_REVISION = "a3d7e9c14b62"          # physical stock count workflow (this branch)
 _PREVIOUS = "f4b8c1d90e26"          # inventory transfer workflow
+
+# This migration is no longer the head — later branches (the inventory threshold
+# alerts branch, and whatever follows) stack on top of it. So nothing here may assume
+# it IS the head: it asserts only that the chain has exactly ONE head, that this
+# revision is in the applied history, and that a round trip returns the database to
+# whatever the head currently is. Hardcoding the newest revision here is what makes
+# every future migration break this file — which is exactly what it did the first time.
+#
+# Downgrades target _PREVIOUS explicitly rather than "-1": a relative one-step
+# downgrade unwinds whatever happens to be on top right now (a later branch), not this
+# one. Naming the target is what keeps "remove this branch" meaning THIS branch.
 
 _DB_REJECTS = (IntegrityError, DBAPIError)
 
@@ -142,6 +153,21 @@ def _check_clause(name: str) -> str:
     return _scalar(
         "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :n", n=name
     ) or ""
+
+
+def _head_revision() -> str:
+    """
+    The chain's current head, read from Alembic rather than hardcoded.
+
+    This branch is no longer the head, and the one after it will not be either. A test
+    that pins the newest revision id is a test that every future migration has to come
+    back and edit.
+    """
+    proc = _alembic_raw("heads")
+    assert proc.returncode == 0, proc.stderr
+    heads = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    assert len(heads) == 1, f"Alembic must have exactly one head, got: {heads}"
+    return heads[0].split()[0]
 
 
 @pytest.fixture(autouse=True)
@@ -274,12 +300,19 @@ def _insert_movement(
 
 def test_alembic_has_a_single_head():
     """Two heads mean `alembic upgrade head` is ambiguous and deployment is a coin
-    toss."""
-    proc = _alembic_raw("heads")
+    toss. See docs/ALEMBIC_SINGLE_HEAD_RESOLUTION.md."""
+    _head_revision()  # asserts exactly one head
+
+
+def test_this_revision_is_in_the_applied_history():
+    """
+    This branch is an ANCESTOR of the head now, not the head itself. What must remain
+    true is that it is actually applied — its schema is present and the database has run
+    through it.
+    """
+    proc = _alembic_raw("history")
     assert proc.returncode == 0, proc.stderr
-    heads = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    assert len(heads) == 1, f"Alembic must have exactly one head, got: {heads}"
-    assert _REVISION in heads[0]
+    assert _REVISION in proc.stdout
 
 
 def test_stock_count_table_and_movement_column_exist():
@@ -635,7 +668,11 @@ class TestCountMovementIntegrity:
 
 def test_downgrade_removes_only_this_branchs_schema(db):
     _release(db)
-    _alembic("downgrade", "-1")
+    # To _PREVIOUS, not "-1": a one-step downgrade would unwind whatever later branch
+    # is on top now, not this one. Later branches sitting above are unwound on the way
+    # down to _PREVIOUS and restored by _restore_head — this test asserts only about
+    # THIS branch's schema and the earlier branches it must not have disturbed.
+    _alembic("downgrade", _PREVIOUS)
 
     # Gone: this branch.
     assert not _table_exists("inventory_stock_counts")
@@ -657,7 +694,7 @@ def test_downgrade_removes_only_this_branchs_schema(db):
 
 def test_re_upgrade_restores_everything(db):
     _release(db)
-    _alembic("downgrade", "-1")
+    _alembic("downgrade", _PREVIOUS)
     _alembic("upgrade", "head")
 
     assert _table_exists("inventory_stock_counts")
@@ -668,8 +705,10 @@ def test_re_upgrade_restores_everything(db):
     for table, trigger in _COUNT_TRIGGERS:
         assert _trigger_exists(table, trigger), trigger
 
+    # Back to whatever the head is now — this branch plus everything stacked on top of
+    # it, not this branch alone.
     proc = _alembic_raw("current")
-    assert _REVISION in proc.stdout
+    assert _head_revision() in proc.stdout
 
 
 def test_downgrade_refuses_while_counts_exist(db, env):
@@ -691,7 +730,12 @@ def test_downgrade_refuses_while_counts_exist(db, env):
     assert res.status_code == 200, res.text
     _release(db)
 
-    proc = _alembic_raw("downgrade", "-1")
+    # To _PREVIOUS, not "-1": from a later head, one step would unwind the branch on
+    # top, not this one, and never reach the count migration that is supposed to refuse.
+    # The whole downgrade runs in ONE transaction, so the count migration's refusal
+    # rolls back every step above it too — the database is left at HEAD, and both the
+    # count schema and the count itself survive untouched.
+    proc = _alembic_raw("downgrade", _PREVIOUS)
     assert proc.returncode != 0, "downgrade must refuse while counts exist"
     assert "StockCountsExist" in (proc.stdout + proc.stderr)
 
