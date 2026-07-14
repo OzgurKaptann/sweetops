@@ -114,6 +114,27 @@ class TransferRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=500)
 
 
+class TransferDestination(BaseModel):
+    """
+    A store the caller MAY ship stock to — i.e. every store except their own.
+
+    This is a display list for a destination picker and nothing more: it carries
+    a name and an id, never another branch's stock, staff, takings or table map.
+    Knowing that a sibling branch exists is already implied by the transfer
+    feature itself; knowing what is on its shelves is not, and is not here.
+    """
+    store_id: int
+    name: str
+    location: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TransferDestinationListResponse(BaseModel):
+    total: int
+    items: list[TransferDestination]
+
+
 class TransferReceipt(BaseModel):
     """
     Result of a transfer: the business event, and the id of each of its two legs.

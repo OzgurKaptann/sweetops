@@ -594,7 +594,14 @@ Full API suite: **644 passed, 0 failed.**
 * **Recipe versioning**
 * **Lot / expiry tracking** — batch-level granularity under the store level
 * **Barcode scanning**
-* **Full inventory UI** — manual operations remain protected backend endpoints
+* ~~**Full inventory UI**~~ — **PARTLY DONE**. The store-scoped reads and manual
+  stock commands are now reachable by the person they were built for: owner-web has
+  a `/inventory` screen (stock overview, movement ledger, mal kabul, fire, manuel
+  düzeltme, şube transferi). The store is still never chosen in the UI — it comes
+  from the session, exactly as this document requires, and there is no branch picker
+  to point at another store's stock. What remains backend-only: reconciliation, and
+  a dedicated transfer history view.
+  → [`OWNER_INVENTORY_MANAGEMENT_UI.md`](OWNER_INVENTORY_MANAGEMENT_UI.md)
 * **Advanced forecasting**
 * **Turkish localisation of analytics** (staff-facing inventory errors are Turkish;
   the analytics layer is not)

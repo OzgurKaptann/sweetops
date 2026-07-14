@@ -528,8 +528,41 @@ the previous movement type domain and delta rule verbatim.
 
 ---
 
-## 16. See also
+## 16. The manager-facing surface
 
+Transfers are no longer API-only. Owner-web's `/inventory` screen ("Stok Yönetimi")
+has a **Şube transferi** form: Malzeme, Hedef şube, Miktar, Sebep, Not. It posts to
+`POST /inventory/transfers` with an `Idempotency-Key`, so a retried van manifest
+still ships the chocolate once, and it reports an idempotent replay as a replay
+(*"Bu transfer daha önce tamamlanmış. Stok yeniden gönderilmedi."*) rather than as a
+second success. Both legs appear in the movement ledger as **Şubeden çıkış** /
+**Şubeye giriş** — never as Fire or Mal kabul.
+
+The form needed a way to name the destination branch, and no endpoint offered one, so
+this branch added the smallest possible read: **`GET /inventory/transfer-destinations`**
+— `store_id`, `name`, `location` for every store except the caller's own, behind
+`inventory:read` and a store-assigned session. It carries no stock, staff or takings
+data about the other branch, and it is not a store-management API.
+
+Two client-side guards exist in that form — a same-store destination and a quantity
+above displayed available stock are both refused before submit. **Neither is the
+control.** `transfer_stock()` still rejects both (`same_store_transfer`,
+`insufficient_available`), and `test_inventory_transfer_destinations.py` asserts that
+the service refuses a same-store transfer even when a client ignores the list
+entirely. The point of § 11's training note stands unchanged, and the UI now
+reinforces it: the manual-adjustment form tells the manager, in as many words, to use
+a transfer instead.
+
+The deferred items in this document are still deferred — the UI adds **no** approval
+workflow, **no** in-transit state and **no** cancellation. A transfer is still one
+atomic, completed event.
+→ [`OWNER_INVENTORY_MANAGEMENT_UI.md`](OWNER_INVENTORY_MANAGEMENT_UI.md)
+
+---
+
+## 17. See also
+
+- [`OWNER_INVENTORY_MANAGEMENT_UI.md`](OWNER_INVENTORY_MANAGEMENT_UI.md) — the manager's screen
 - [`STORE_SCOPED_INVENTORY.md`](STORE_SCOPED_INVENTORY.md) — why stock belongs to a branch
 - [`INVENTORY_LIFECYCLE.md`](INVENTORY_LIFECYCLE.md) — reserve → consume → waste
 - `apps/api/app/models/inventory_transfer.py`
