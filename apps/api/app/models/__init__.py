@@ -24,6 +24,7 @@ from .owner_decision import OwnerDecision
 from .payment_settlement import PaymentSettlement
 from .payment_allocation import PaymentAllocation
 from .payment_refund import PaymentRefund
+from .cashier_shift import CashierShift
 
 # Critical: Alembic discovers all models via this import
 __all__ = [
@@ -51,4 +52,5 @@ __all__ = [
     "PaymentSettlement",
     "PaymentAllocation",
     "PaymentRefund",
+    "CashierShift",
 ]

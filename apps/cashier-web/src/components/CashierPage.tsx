@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAuth } from "@/components/AuthGate";
+import ShiftPanel from "@/components/ShiftPanel";
+import { SHIFT_COPY } from "@/lib/shift-view";
 import { canRefund } from "@/lib/auth";
 import {
   ApiError,
@@ -73,6 +75,7 @@ export default function CashierPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SettlementReceipt | null>(null);
   const [busy, setBusy] = useState(false);
+  const [hasOpenShift, setHasOpenShift] = useState<boolean>(true);
 
   // One idempotency store per mounted cashier screen (in-memory only).
   const idem = useRef(createCommandIdempotency());
@@ -207,6 +210,17 @@ export default function CashierPage() {
           <p className="text-sm text-slate-500">{user.store.name}</p>
         )}
       </header>
+
+      {/* Shift reconciliation panel — open at the start of the day, close with a
+          count at the end. Never blocks payment collection. */}
+      <ShiftPanel onShiftChange={setHasOpenShift} />
+
+      {/* Soft, non-blocking warning: payments still work without an open shift. */}
+      {!hasOpenShift && (
+        <p className="mb-6 text-sm rounded px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800">
+          {SHIFT_COPY.paymentWithoutShift}
+        </p>
+      )}
 
       {/* Search */}
       <section className="mb-6">

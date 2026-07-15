@@ -594,6 +594,17 @@ The branch shows a large `package-lock.json` rewrite
   `cashier-web` (8) `node --test` suites, and production `next build` of all four
   web apps all succeeded. `npm audit fix --force` was **not** run.
 
+## 38. Follow-on: cashier shift closing
+
+End-of-day cash reconciliation — listed as deferred below when this branch shipped
+— was later built as a *reconciliation layer over this ledger*, not a change to it.
+A cashier opens a shift with a starting cash figure, and closing snapshots the
+ledger for the shift window (payments this cashier collected, refunds of that
+money) to produce an expected drawer figure, compares it against the counted cash,
+and records the discrepancy. It **does not** mutate settlements or refunds, change
+payment-ledger math, or alter this workflow. See
+[CASHIER_SHIFT_CLOSING.md](./CASHIER_SHIFT_CLOSING.md).
+
 ## 37. Deferred (out of scope for this branch)
 
 - **External payment gateway** — no online card processing / gateway integration.

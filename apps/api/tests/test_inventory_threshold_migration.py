@@ -451,11 +451,22 @@ class TestDatabaseRefuses:
 
 class TestMigrationRoundTrip:
     def test_alembic_has_a_single_head(self):
+        """Two heads mean `alembic upgrade head` is ambiguous and deployment is a
+        coin toss. See docs/ALEMBIC_SINGLE_HEAD_RESOLUTION.md."""
         proc = _alembic_raw("heads")
         assert proc.returncode == 0, proc.stderr
         heads = [ln for ln in proc.stdout.splitlines() if ln.strip()]
         assert len(heads) == 1, f"expected one head, got: {heads}"
-        assert _REVISION in heads[0]
+
+    def test_this_revision_is_in_the_applied_history(self):
+        """
+        This branch is an ANCESTOR of the head now, not the head itself (a later
+        migration was added on top). What must remain true is that it is actually
+        applied — its schema is present and the database has run through it.
+        """
+        proc = _alembic_raw("history")
+        assert proc.returncode == 0, proc.stderr
+        assert _REVISION in proc.stdout
 
     def test_downgrade_removes_only_this_branch(self, db):
         """

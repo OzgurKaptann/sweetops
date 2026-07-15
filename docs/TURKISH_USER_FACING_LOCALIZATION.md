@@ -213,6 +213,32 @@ kept its scenario and its claim — only the expected string was translated (for
 example, `_action_hint(1, "NEW", "ok", 0.5, [])` still asserts the "can wait"
 branch, now `"Bekleyebilir"`). No test's meaning was changed.
 
+## Cashier shift vocabulary (added with shift closing)
+
+The [cashier shift closing](./CASHIER_SHIFT_CLOSING.md) feature introduced a small
+fixed vocabulary. It follows the rules above — the wire enum stays English
+(`OPEN`/`CLOSED`), and only these labels reach a screen:
+
+| Concept | Turkish | Notes |
+| --- | --- | --- |
+| shift | **vardiya** | |
+| open a shift | **Vardiya aç** | |
+| close a shift | **Vardiya kapat** | |
+| opening cash | **Açılış nakdi** | the drawer's starting cash |
+| counted closing cash | **Kapanış nakit sayımı** / **Sayılan kasa** | |
+| expected cash | **Beklenen kasa** | |
+| cash / card collection | **Nakit tahsilat** / **Kart tahsilat** | reuses **tahsilat** |
+| cash / card refund | **Nakit iade** / **Kart iade** | reuses **iade** |
+| net collected | **Net tahsilat** | |
+| discrepancy — balanced | **Denk** | `cash_discrepancy_amount = 0` |
+| discrepancy — short | **Eksik** | drawer is short (negative) |
+| discrepancy — over | **Fazla** | drawer has more than expected (positive) |
+| shift status OPEN / CLOSED | **Açık** / **Kapalı** | never the raw enum |
+
+The status enum and the signed discrepancy are mapped to these labels in
+`shift-view.ts` (cashier-web and owner-web) and asserted display-safe by the
+`shift-view.test.ts` suites, exactly like `labels.ts` for the payment enums.
+
 ## Deferred
 
 Explicitly **not** built here, and not implied by anything above:
