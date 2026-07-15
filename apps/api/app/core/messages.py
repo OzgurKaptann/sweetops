@@ -284,6 +284,44 @@ REFUND_OVER_BALANCE = "Bu tahsilatın iade edilebilir bakiyesi kalmadı."
 REFUND_REASON_REQUIRED = "İade nedeni girmeniz gerekiyor."
 
 
+# ── Cashier shift closing (cashier-web / owner-web) ──────────────────────────
+# A shift command needs an idempotency key.
+SHIFT_IDEMPOTENCY_REQUIRED = "Vardiya işlemi için işlem anahtarı gerekli."
+
+# Same key replayed with a different payload — refuse to replay.
+SHIFT_IDEMPOTENCY_MISMATCH = (
+    "Bu vardiya işlemi farklı bilgilerle daha önce denenmiş. "
+    "Lütfen bilgileri kontrol edip yeniden başlatın."
+)
+
+# Opening / closing cash may be zero but never negative.
+SHIFT_OPENING_CASH_INVALID = "Açılış nakdi negatif olamaz."
+SHIFT_COUNTED_CASH_INVALID = "Kapanış tutarı negatif olamaz."
+
+# No open shift for this cashier/store.
+SHIFT_NONE_OPEN = "Açık vardiya bulunmuyor."
+
+# The cashier already has an open shift at this store. Deliberately not an error
+# the caller has to recover from: the open shift is returned so they can just
+# continue or close it.
+SHIFT_ALREADY_OPEN = "Bu kasiyer için açık vardiya zaten var."
+
+# Shift not found, or it belongs to another store/cashier. Non-disclosing on
+# purpose: a 403 would confirm the shift exists somewhere else.
+SHIFT_NOT_FOUND = "Bu vardiya bulunamadı."
+
+# A closed shift cannot be closed again (except an exact idempotent replay).
+SHIFT_ALREADY_CLOSED = "Bu vardiya zaten kapatılmış."
+
+# The close could not be confirmed (e.g. a mismatched replay against a shift whose
+# state has moved on). Points the cashier at the safe next step rather than a blind
+# retry that could double-submit.
+SHIFT_CLOSE_UNVERIFIED = (
+    "Vardiya kapanışı doğrulanamadı. "
+    "Aynı işlemi tekrar göndermeden önce vardiya durumunu kontrol edin."
+)
+
+
 # ── Order lifecycle (kitchen / cashier) ──────────────────────────────────────
 # No such order, or it belongs to another store. Non-disclosing on purpose: a
 # 403 here would confirm the order exists in some other branch.

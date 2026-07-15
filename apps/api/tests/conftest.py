@@ -47,6 +47,7 @@ from app.models.audit_log import AuditLog  # noqa — ensure registered
 from app.models.payment_settlement import PaymentSettlement
 from app.models.payment_allocation import PaymentAllocation
 from app.models.payment_refund import PaymentRefund
+from app.models.cashier_shift import CashierShift
 from app.services import auth_service, qr_token_service
 
 # Store id used by the legacy order path in the pre-existing test suite.
@@ -667,6 +668,8 @@ def make_staff(db: Session):
 
     yield _make
 
+    # A shift FKs to its cashier, so it must go before the user does.
+    purge_shifts_for_users(db, created_user_ids)
     for uid in created_user_ids:
         db.query(AuthSession).filter(AuthSession.user_id == uid).delete(synchronize_session=False)
         db.query(User).filter(User.id == uid).delete(synchronize_session=False)
@@ -710,7 +713,10 @@ def make_store(db: Session):
     yield _make
 
     for sid in created_ids:
-        # Payment ledger first — settlements/allocations/refunds FK to store,
+        # Cashier shifts first: they FK to the store and its users, so a leftover
+        # shift would block both the user and the store delete below.
+        purge_shifts_for_store(db, sid)
+        # Payment ledger next — settlements/allocations/refunds FK to store,
         # table, user and order and would otherwise block cleanup.
         _purge_payments_for_store(db, sid)
         # Then this store's inventory: movements FK to its users and orders, and
@@ -825,6 +831,47 @@ def purge_payments_for_orders(db: Session, order_ids: list[int]) -> None:
             db.query(PaymentSettlement).filter(
                 PaymentSettlement.id.in_(settlement_ids)
             ).delete(synchronize_session=False)
+    db.commit()
+
+
+# A cashier shift is guarded by a trigger (migration d5c7b3a11e40) that refuses
+# UPDATE/DELETE on a CLOSED shift and every DELETE — with NO runtime bypass, exactly
+# like the ledger. Teardown removes committed shift rows via the same ownership-gated
+# escape hatch: ALTER TABLE ... DISABLE TRIGGER requires table ownership and is
+# unreachable from application DML or an injection path, so it is not a production
+# bypass. The trigger is restored before the transaction commits.
+_SHIFT_TRIGGER = ("cashier_shifts", "trg_cashier_shifts_guard")
+
+
+@contextmanager
+def _shift_maintenance(db: Session):
+    """Ownership-gated teardown escape hatch for cashier_shifts."""
+    from sqlalchemy import text
+    table, trig = _SHIFT_TRIGGER
+    db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {trig}"))
+    try:
+        yield
+    finally:
+        db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trig}"))
+
+
+def purge_shifts_for_store(db: Session, store_id: int) -> None:
+    """Delete every cashier shift for a store (needed before its users/store go)."""
+    with _shift_maintenance(db):
+        db.query(CashierShift).filter(
+            CashierShift.store_id == store_id
+        ).delete(synchronize_session=False)
+    db.commit()
+
+
+def purge_shifts_for_users(db: Session, user_ids: list[int]) -> None:
+    """Delete every cashier shift opened by these cashiers."""
+    if not user_ids:
+        return
+    with _shift_maintenance(db):
+        db.query(CashierShift).filter(
+            CashierShift.cashier_user_id.in_(user_ids)
+        ).delete(synchronize_session=False)
     db.commit()
 
 
