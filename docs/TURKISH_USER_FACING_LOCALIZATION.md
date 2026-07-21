@@ -239,6 +239,58 @@ The status enum and the signed discrepancy are mapped to these labels in
 `shift-view.ts` (cashier-web and owner-web) and asserted display-safe by the
 `shift-view.test.ts` suites, exactly like `labels.ts` for the payment enums.
 
+## Order issue vocabulary (added with order issue refund workflow)
+
+The [order issue refund workflow](./ORDER_ISSUE_REFUND_WORKFLOW.md) introduced a
+fixed vocabulary for handling problematic orders. It follows the rules above — the
+wire enums stay English (`CUSTOMER_CANCELLED`, `FULL_REFUND`, `OPEN`), and only these
+labels reach a screen. It reuses the established money words (**iade**, **tahsilat**)
+rather than inventing new ones.
+
+| Concept | Turkish | Notes |
+| --- | --- | --- |
+| order issue | **Sipariş sorunu** | the panel title |
+| record an issue | **Sorun kaydet** | records the problem only; no money, no stock |
+| resolve an issue | **Sorunu çöz** | |
+| problematic orders (owner) | **Sorunlu siparişler** | owner-web history heading |
+| issue type `CUSTOMER_CANCELLED` | **Müşteri iptal etti** | never the raw enum |
+| issue type `WRONG_ITEM` | **Yanlış ürün** | |
+| issue type `MISSING_ITEM` | **Eksik ürün** | |
+| issue type `QUALITY_PROBLEM` | **Kalite sorunu** | |
+| issue type `DUPLICATE_ORDER` | **Çift sipariş** | |
+| issue type `STAFF_ERROR` | **Personel hatası** | |
+| issue type `OTHER` | **Diğer** | |
+| issue status OPEN / RESOLVED | **Açık** / **Çözüldü** | never the raw enum |
+| resolution `NO_REFUND` | **İadesiz çöz** (action) / **İadesiz çözüldü** (state) | |
+| resolution `CANCEL_ONLY` | **Sadece iptal** | |
+| resolution `FULL_REFUND` | **Tam iade** | reuses **iade** |
+| resolution `PARTIAL_REFUND` | **Kısmi iade** | reuses **iade** |
+| requested refund | **İade tutarı** | what was asked at creation |
+| approved refund | **Onaylanan iade** | what was granted at resolution |
+| remaining refundable | **Kalan iade edilebilir tutar** | the ceiling on a refund |
+| reason / note | **Sebep** / **Not** | |
+| created by / resolved by | **Oluşturan** / **Çözen** | |
+
+Fixed operational lines (backend `messages.py` and the frontend view modules must
+agree word-for-word):
+
+| Situation | Turkish |
+| --- | --- |
+| issue recorded | **Sorun kaydedildi.** |
+| issue resolved | **Sorun çözüldü.** |
+| refund created | **İade başarıyla oluşturuldu.** |
+| refund over the remaining refundable amount | **İade tutarı kalan iade edilebilir tutarı aşamaz.** |
+| consumed stock is not restored | **Hazırlanmış siparişin stoğu otomatik geri alınmaz.** |
+| resolution could not be confirmed (uncertain) | **Bu işlem doğrulanamadı. Aynı işlemi tekrar göndermeden önce sipariş durumunu kontrol edin.** |
+
+The uncertain line deliberately avoids the word *başarısız*: a cashier told an action
+failed will re-enter it by hand and risk a double refund, so the copy asks them to
+check the order status first — the same rule as the shift close-uncertain line above.
+
+The enums are mapped to these labels in `order-issue-view.ts` (cashier-web and
+owner-web) and asserted display-safe by the `order-issue-view.test.ts` suites,
+exactly like `shift-view.ts` for the shift enums.
+
 ## Deferred
 
 Explicitly **not** built here, and not implied by anything above:

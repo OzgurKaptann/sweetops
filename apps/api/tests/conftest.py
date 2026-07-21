@@ -48,6 +48,7 @@ from app.models.payment_settlement import PaymentSettlement
 from app.models.payment_allocation import PaymentAllocation
 from app.models.payment_refund import PaymentRefund
 from app.models.cashier_shift import CashierShift
+from app.models.order_issue import OrderIssue
 from app.services import auth_service, qr_token_service
 
 # Store id used by the legacy order path in the pre-existing test suite.
@@ -266,9 +267,64 @@ def purge_inventory_for_orders(db: Session, order_ids: list[int]) -> None:
     ).delete(synchronize_session=False)
 
 
+# An order issue is guarded by a trigger (migration e7f2a9c04d18) that refuses every
+# DELETE and every UPDATE of a resolved issue — with NO runtime bypass, exactly like
+# the ledger. Teardown removes committed issue rows through the same ownership-gated
+# escape hatch: ALTER TABLE ... DISABLE TRIGGER requires table ownership and is
+# unreachable from application DML or an injection path, so it is not a production
+# bypass. The trigger is restored before the transaction commits.
+_ORDER_ISSUE_TRIGGER = ("order_issues", "trg_order_issues_guard")
+
+
+@contextmanager
+def _order_issue_maintenance(db: Session):
+    """Ownership-gated teardown escape hatch for order_issues."""
+    from sqlalchemy import text
+    table, trig = _ORDER_ISSUE_TRIGGER
+    db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {trig}"))
+    try:
+        yield
+    finally:
+        db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {trig}"))
+
+
+def purge_order_issues_for_orders(db: Session, order_ids: list[int]) -> None:
+    """
+    Delete the order issues raised against these orders, breaking the circular link
+    with payment_refunds first (order_issues.refund_id ↔ payment_refunds.order_issue_id).
+
+    Must run BEFORE the payment ledger of these orders is deleted: an issue's
+    refund_id FK would otherwise block the refund delete.
+    """
+    if not order_ids:
+        return
+    with _ledger_maintenance(db):
+        db.query(PaymentRefund).filter(
+            PaymentRefund.order_id.in_(order_ids)
+        ).update({"order_issue_id": None}, synchronize_session=False)
+    with _order_issue_maintenance(db):
+        db.query(OrderIssue).filter(
+            OrderIssue.order_id.in_(order_ids)
+        ).delete(synchronize_session=False)
+    db.commit()
+
+
+def purge_order_issues_for_store(db: Session, store_id: int) -> None:
+    """Delete every order issue for a store (needed before its refunds/orders go)."""
+    with _ledger_maintenance(db):
+        db.query(PaymentRefund).filter(
+            PaymentRefund.store_id == store_id
+        ).update({"order_issue_id": None}, synchronize_session=False)
+    with _order_issue_maintenance(db):
+        db.query(OrderIssue).filter(
+            OrderIssue.store_id == store_id
+        ).delete(synchronize_session=False)
+    db.commit()
+
+
 def cleanup_orders(db: Session, order_ids: list[int]) -> None:
     """
-    Delete whole orders (inventory → payment → ingredients → items → events).
+    Delete whole orders (issues → inventory → payment → ingredients → items → events).
 
     Needed whenever ONE order references SEVERAL ingredients: the per-ingredient
     cleanup_ingredient deletes order_items for its own ingredient, which would
@@ -277,6 +333,7 @@ def cleanup_orders(db: Session, order_ids: list[int]) -> None:
     """
     if not order_ids:
         return
+    purge_order_issues_for_orders(db, order_ids)
     purge_inventory_for_orders(db, order_ids)
     purge_payments_for_orders(db, order_ids)
 
@@ -457,6 +514,10 @@ def cleanup_ingredient(db: Session, ingredient_id: int) -> None:
     # An order in this set may also carry inventory rows for OTHER ingredients
     # (a multi-ingredient order); those would block the order delete below.
     purge_inventory_for_orders(db, order_ids)
+    # Order issues and the payment ledger of these orders FK to them too, so they
+    # must go before the orders themselves (issues first — see the function).
+    purge_order_issues_for_orders(db, order_ids)
+    purge_payments_for_orders(db, order_ids)
 
     # Delete in FK order
     if oii_ids:
@@ -716,6 +777,9 @@ def make_store(db: Session):
         # Cashier shifts first: they FK to the store and its users, so a leftover
         # shift would block both the user and the store delete below.
         purge_shifts_for_store(db, sid)
+        # Order issues next: they FK to the store, its users, its orders and its
+        # refunds, and the refund link is circular, so they must go before the ledger.
+        purge_order_issues_for_store(db, sid)
         # Payment ledger next — settlements/allocations/refunds FK to store,
         # table, user and order and would otherwise block cleanup.
         _purge_payments_for_store(db, sid)
@@ -811,6 +875,8 @@ def purge_payments_for_orders(db: Session, order_ids: list[int]) -> None:
     """
     if not order_ids:
         return
+    # Order issues link to refunds (circular FK) — remove them first.
+    purge_order_issues_for_orders(db, order_ids)
     settlement_ids = [
         a.settlement_id
         for a in db.query(PaymentAllocation).filter(
@@ -956,6 +1022,7 @@ def make_order(db: Session):
     yield _make
 
     if created:
+        purge_order_issues_for_orders(db, created)
         purge_inventory_for_orders(db, created)
         settlement_ids = [
             a.settlement_id for a in db.query(PaymentAllocation).filter(

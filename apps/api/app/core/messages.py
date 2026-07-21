@@ -343,6 +343,81 @@ ORDER_CANCEL_BLOCKED_PAID = (
 )
 
 
+# ── Order issue & controlled refund workflow (cashier-web / owner-web) ───────
+# An order issue COORDINATES the existing systems (payment refund ledger, inventory
+# lifecycle, cashier shift). None of these messages should ever suggest that stock
+# was silently restored or that the payment ledger was rewritten.
+
+# An issue command needs an idempotency key.
+ISSUE_IDEMPOTENCY_REQUIRED = "Sipariş sorunu işlemi için işlem anahtarı gerekli."
+
+# Same key replayed with a different payload — refuse to replay.
+ISSUE_IDEMPOTENCY_MISMATCH = (
+    "Bu işlem farklı bilgilerle daha önce denenmiş. "
+    "Lütfen bilgileri kontrol edip yeniden başlatın."
+)
+
+# No such order issue, or it belongs to another branch. A 404 and not a 403: a 403
+# would confirm the issue exists in some other branch.
+ISSUE_NOT_FOUND = "Bu sipariş sorunu bulunamadı."
+
+# Unknown issue type / resolution type supplied.
+ISSUE_TYPE_INVALID = "Geçersiz sorun türü."
+ISSUE_RESOLUTION_INVALID = "Geçersiz çözüm türü."
+
+# A reason is mandatory when recording or resolving an issue.
+ISSUE_REASON_REQUIRED = "Sebep girmeniz gerekiyor."
+
+# The requested refund at creation cannot exceed what is still refundable.
+ISSUE_REQUESTED_OVER_REFUNDABLE = (
+    "İade tutarı kalan iade edilebilir tutarı aşamaz."
+)
+
+# The approved refund at resolution cannot exceed what is still refundable.
+ISSUE_APPROVED_OVER_REFUNDABLE = (
+    "İade tutarı kalan iade edilebilir tutarı aşamaz."
+)
+
+# A partial-refund resolution needs a positive approved amount.
+ISSUE_PARTIAL_AMOUNT_REQUIRED = "Kısmi iade için onaylanan tutarı girmeniz gerekiyor."
+
+# A full/partial refund resolution was chosen but nothing is refundable.
+ISSUE_NOTHING_REFUNDABLE = (
+    "Bu siparişin iade edilebilir bakiyesi yok. "
+    "İadesiz çözün veya sadece iptal edin."
+)
+
+# A cancel-only resolution was chosen for an order that still holds collected money.
+ISSUE_CANCEL_BLOCKED_PAID = (
+    "Tahsilatı yapılmış sipariş sadece iptal edilemez. "
+    "Tam iade ile çözerek tahsilatı iade edin."
+)
+
+# The issue is already resolved and cannot be resolved again (except an exact replay).
+ISSUE_ALREADY_RESOLVED = "Bu sipariş sorunu zaten çözülmüş."
+
+# Only OWNER/MANAGER may resolve an issue with a refund; a cashier records the problem
+# and may close it without money, but a refund is a supervisor control.
+ISSUE_REFUND_FORBIDDEN = (
+    "İade işlemi için yetkiniz yok. Bu çözümü yönetici veya işletme sahibi onaylamalı."
+)
+
+# Operational reassurance shown after a cancel/refund: consumed stock is not restored.
+ISSUE_STOCK_NOT_RESTORED = "Hazırlanmış siparişin stoğu otomatik geri alınmaz."
+
+# Success lines.
+ISSUE_CREATED_OK = "Sorun kaydedildi."
+ISSUE_RESOLVED_OK = "Sorun çözüldü."
+ISSUE_REFUND_CREATED_OK = "İade başarıyla oluşturuldu."
+
+# The resolve could not be confirmed (e.g. a mismatched replay). Points at checking
+# order status rather than a blind retry that could double-submit.
+ISSUE_RESOLVE_UNVERIFIED = (
+    "Bu işlem doğrulanamadı. "
+    "Aynı işlemi tekrar göndermeden önce sipariş durumunu kontrol edin."
+)
+
+
 # ── Metrics / analytics (owner-web) ──────────────────────────────────────────
 # The analytics store is down. The rest of the dashboard keeps working, so say
 # so — an owner who thinks the whole system is broken will stop trusting all of it.

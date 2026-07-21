@@ -117,6 +117,9 @@ export default function OwnerDashboard() {
               <a href="/shifts" className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors font-medium">
                 Vardiya →
               </a>
+              <a href="/order-issues" className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors font-medium">
+                Sorunlu Siparişler →
+              </a>
               <a href="/kitchen" className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors font-medium">
                 Mutfak →
               </a>

@@ -751,3 +751,13 @@ asserted the exact bug this branch fixes and is now
 > taken and reconciled against `on_hand_quantity`.** The migration preserves the
 > numbers the old system believed; it cannot verify them against the shelves.
 > Only a human with a scale can do that.
+
+## 25. Follow-on: order issue cancellations
+
+The order issue workflow (see `docs/ORDER_ISSUE_REFUND_WORKFLOW.md`) can cancel an
+order as part of a resolution. It does **not** change inventory behaviour: it calls the
+existing `release_order_reservation` primitive, which releases only the *outstanding*
+reservation and never restores already-consumed stock (`Hazırlanmış siparişin stoğu
+otomatik geri alınmaz.`). A refund moves money, not stock, and a resolution never writes
+a manual-adjustment or stock-count movement. Returning usable stock to the shelf remains
+a separate, explicit, actor-attributed movement and is still deferred.

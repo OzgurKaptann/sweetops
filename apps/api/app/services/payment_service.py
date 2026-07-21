@@ -697,3 +697,129 @@ def _resolve_refund_replay(
         raise _conflict(messages.PAY_IDEMPOTENCY_MISMATCH, error="idempotency_mismatch")
     _audit_replay(db, "payment_refund", existing.allocation_id, staff, ip_address)
     return build_refund_receipt(db, existing, replay=True)
+
+
+# ── Order-level refund for an issue resolution ────────────────────────────────
+
+def order_refundable(order: Order) -> Decimal:
+    """
+    The order's remaining refundable amount = net paid (paid − refunded).
+
+    Equal to the sum of every allocation's refundable balance, because
+    paid = Σ allocation amounts and refunded = Σ refunds. This is the ceiling on
+    what an issue resolution may refund.
+    """
+    rem = net_paid(order)
+    return rem if rem > 0 else Decimal("0.00")
+
+
+def create_issue_refunds(
+    db: Session,
+    *,
+    staff: CurrentStaff,
+    order: Order,
+    issue_id: int,
+    total_amount: Decimal,
+    reason: str,
+    base_key: str,
+    ip_address: Optional[str] = None,
+) -> list[PaymentRefund]:
+    """
+    Refund ``total_amount`` for ``order`` as part of resolving order issue
+    ``issue_id``, distributing it across the order's allocations (ascending id),
+    filling each allocation's remaining refundable balance in turn.
+
+    This is the ONE place an issue resolution touches money, and it reuses the
+    existing append-only refund ledger — it never restates a refunded amount. Each
+    created PaymentRefund carries ``order_issue_id`` so the resolution's refunds
+    can be summed back for reconciliation, and the order summary mirror is updated
+    in the SAME transaction.
+
+    Caller responsibilities (this function does NOT commit):
+      * ``order`` must already be locked FOR UPDATE by the caller,
+      * ``total_amount`` must be > 0 and <= order_refundable(order).
+
+    Per-refund idempotency keys are derived deterministically from the issue's own
+    Idempotency-Key, so the store-scoped uniqueness of the refund ledger holds and a
+    stray replay that reached here would collide rather than double-refund. Returns
+    the created refunds in allocation order (the first is the issue's primary link).
+    """
+    total = q2(total_amount)
+    if total <= 0:
+        raise _conflict(messages.REFUND_OVER_BALANCE, error="refund_over_balance")
+
+    allocations = (
+        db.query(PaymentAllocation)
+        .filter(PaymentAllocation.order_id == order.id)
+        .order_by(PaymentAllocation.id)
+        .all()
+    )
+
+    remaining = total
+    created: list[PaymentRefund] = []
+    for alloc in allocations:
+        if remaining <= 0:
+            break
+        refundable = allocation_refundable(db, alloc)
+        if refundable <= 0:
+            continue
+        take = remaining if remaining < refundable else refundable
+        take = q2(take)
+        settlement = db.get(PaymentSettlement, alloc.settlement_id)
+
+        key_hash = _sha256(f"{base_key}|issue-refund|{issue_id}|{alloc.id}")
+        request_hash = _sha256(_canonical({
+            "cmd": "issue_refund",
+            "issue_id": issue_id,
+            "allocation_id": alloc.id,
+            "amount": str(take),
+            "reason": reason,
+        }))
+
+        refund = PaymentRefund(
+            store_id=order.store_id,
+            settlement_id=settlement.id,
+            allocation_id=alloc.id,
+            order_id=order.id,
+            amount=take,
+            currency=settlement.currency,
+            reason=reason,
+            refunded_by_user_id=staff.user_id,
+            idempotency_key_hash=key_hash,
+            request_hash=request_hash,
+            order_issue_id=issue_id,
+        )
+        db.add(refund)
+        order.refunded_amount = q2(order.refunded_amount) + take
+        remaining -= take
+        created.append(refund)
+
+    if remaining > 0 or not created:
+        # Asked to refund more than the ledger can give back. The caller validated
+        # this against order_refundable, so reaching here means a concurrent refund
+        # consumed the balance under our lock — refuse rather than under-refund.
+        raise _conflict(messages.REFUND_OVER_BALANCE, error="refund_over_balance")
+
+    recompute_order_summary(order)
+    db.flush()  # assign refund ids for the issue's primary link
+
+    for refund in created:
+        audit(
+            db,
+            entity_type="payment_refund",
+            entity_id=refund.allocation_id,
+            action="PAYMENT_REFUNDED",
+            actor_type="STAFF",
+            actor_id=str(staff.user_id),
+            ip_address=ip_address,
+            payload_after={
+                "settlement_id": refund.settlement_id,
+                "allocation_id": refund.allocation_id,
+                "order_id": order.id,
+                "store_id": order.store_id,
+                "amount": q2(refund.amount),
+                "currency": refund.currency,
+                "order_issue_id": issue_id,
+            },
+        )
+    return created
