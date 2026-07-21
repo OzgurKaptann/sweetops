@@ -594,7 +594,7 @@ The branch shows a large `package-lock.json` rewrite
   `cashier-web` (8) `node --test` suites, and production `next build` of all four
   web apps all succeeded. `npm audit fix --force` was **not** run.
 
-## 38. Follow-on: cashier shift closing
+## 37. Follow-on: cashier shift closing
 
 End-of-day cash reconciliation — listed as deferred below when this branch shipped
 — was later built as a *reconciliation layer over this ledger*, not a change to it.
@@ -605,7 +605,20 @@ and records the discrepancy. It **does not** mutate settlements or refunds, chan
 payment-ledger math, or alter this workflow. See
 [CASHIER_SHIFT_CLOSING.md](./CASHIER_SHIFT_CLOSING.md).
 
-## 37. Deferred (out of scope for this branch)
+## 38. Follow-on: order issue refund workflow
+
+Refunds can now also be created by resolving an **order issue** (see
+[ORDER_ISSUE_REFUND_WORKFLOW.md](./ORDER_ISSUE_REFUND_WORKFLOW.md)). This does **not**
+redesign the payment ledger: an issue resolution creates ordinary `payment_refunds`
+rows through `payment_service.create_issue_refunds`, which reuses
+`allocation_refundable` and the same order-summary recompute inside one transaction.
+The ledger remains the single source of truth for refunded money; the only schema
+change here is an additive, nullable `payment_refunds.order_issue_id` link column
+(plus a redundant `uq_refund_store_order_id` unique constraint the issue's composite
+FK references). A FULL/PARTIAL issue refund still requires `payments:refund`, so the
+cashier-never-refunds boundary is preserved.
+
+## 39. Deferred (out of scope for this branch)
 
 - **External payment gateway** — no online card processing / gateway integration.
 - **Cash-drawer shift management** and **end-of-day cash reconciliation**.

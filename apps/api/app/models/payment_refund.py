@@ -8,6 +8,7 @@ from sqlalchemy import (
     Numeric,
     CheckConstraint,
     Index,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -45,6 +46,13 @@ class PaymentRefund(Base):
 
     refunded_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
+    # Set when this refund was created by resolving an order issue. The refund
+    # ledger stays the source of truth for refunded money; this is only the link
+    # back to the operational decision that caused it. NULL for an ordinary
+    # per-allocation refund taken directly at the till. A resolution that spans
+    # several allocations stamps every refund row it creates with the same id.
+    order_issue_id = Column(BigInteger, ForeignKey("order_issues.id"), nullable=True, index=True)
+
     # Idempotency: only SHA-256 hashes are stored, never the raw key/payload.
     idempotency_key_hash = Column(String(64), nullable=False)
     request_hash = Column(String(64), nullable=False)
@@ -65,5 +73,12 @@ class PaymentRefund(Base):
             "store_id",
             "idempotency_key_hash",
             unique=True,
+        ),
+        # Lets an order issue carry a composite FK to (store_id, order_id, id), so a
+        # linked refund is structurally guaranteed to belong to the same store AND
+        # the same order as the issue. Redundant against the primary key, but
+        # PostgreSQL requires a unique constraint on exactly the referenced tuple.
+        UniqueConstraint(
+            "store_id", "order_id", "id", name="uq_refund_store_order_id"
         ),
     )

@@ -10,6 +10,7 @@ from app.routers import (
     public_qr,
     kitchen_orders,
     cashier,
+    order_issues,
     inventory,
     owner_analytics,
     owner_insights,
@@ -38,6 +39,7 @@ app.include_router(public_qr.router)
 app.include_router(public_orders.router)
 app.include_router(kitchen_orders.router)
 app.include_router(cashier.router)
+app.include_router(order_issues.router)
 app.include_router(inventory.router)
 app.include_router(owner_analytics.router)
 app.include_router(owner_insights.router)

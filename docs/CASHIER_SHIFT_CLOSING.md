@@ -262,3 +262,12 @@ the payments it summarised remain. Export the shifts first.
 - purchase orders / supplier management
 - multi-currency accounting
 - enforcing open-shift-before-payment as a hard policy
+
+## Follow-on: order issue refunds
+
+Refunds created by resolving an order issue (see
+`docs/ORDER_ISSUE_REFUND_WORKFLOW.md`) are ordinary `payment_refunds` rows, so they are
+attributed to a shift by the **existing** window rule with no new shift logic: a refund
+inside an open shift window is picked up by the close snapshot, and a CLOSED shift's
+frozen snapshot is unaffected by a refund taken after the close. The shift service is
+unchanged.

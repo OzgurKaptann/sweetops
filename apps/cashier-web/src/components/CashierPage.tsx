@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAuth } from "@/components/AuthGate";
 import ShiftPanel from "@/components/ShiftPanel";
+import { OrderIssuePanel } from "@/components/OrderIssuePanel";
 import { SHIFT_COPY } from "@/lib/shift-view";
 import { canRefund } from "@/lib/auth";
 import {
@@ -76,6 +77,7 @@ export default function CashierPage() {
   const [receipt, setReceipt] = useState<SettlementReceipt | null>(null);
   const [busy, setBusy] = useState(false);
   const [hasOpenShift, setHasOpenShift] = useState<boolean>(true);
+  const [issueOrder, setIssueOrder] = useState<{ id: number; code: string } | null>(null);
 
   // One idempotency store per mounted cashier screen (in-memory only).
   const idem = useRef(createCommandIdempotency());
@@ -309,7 +311,7 @@ export default function CashierPage() {
                       <td className="text-right">{o.order_total}</td>
                       <td className="text-right">{o.net_paid}</td>
                       <td className="text-right">{o.remaining_amount}</td>
-                      <td className="text-right">
+                      <td className="text-right space-x-2 whitespace-nowrap">
                         {o.payable && (
                           <button
                             onClick={() => payOne(o.order_id)}
@@ -319,6 +321,18 @@ export default function CashierPage() {
                             Tahsilat Al
                           </button>
                         )}
+                        <button
+                          onClick={() =>
+                            setIssueOrder(
+                              issueOrder?.id === o.order_id
+                                ? null
+                                : { id: o.order_id, code: o.order_code },
+                            )
+                          }
+                          className="text-amber-600 hover:underline text-xs"
+                        >
+                          Sorun
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -336,6 +350,15 @@ export default function CashierPage() {
                   Tüm hesabı kapat
                 </button>
               </div>
+
+              {issueOrder && (
+                <OrderIssuePanel
+                  orderId={issueOrder.id}
+                  orderCode={issueOrder.code}
+                  profile={user}
+                  onClose={() => setIssueOrder(null)}
+                />
+              )}
             </div>
           )}
         </section>
