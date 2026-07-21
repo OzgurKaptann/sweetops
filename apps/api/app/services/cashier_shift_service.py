@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
@@ -94,10 +94,6 @@ def _forbidden() -> HTTPException:
     return HTTPException(
         status_code=403, detail={"error": "forbidden", "message": messages.AUTH_FORBIDDEN}
     )
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _cashier_display(db: Session, user_id: int) -> str:
@@ -396,7 +392,17 @@ def close_shift(
             db.rollback()
             return _resolve_close_replay(db, locked, key_hash, request_hash)
 
-        closed_at = _now()
+        # closed_at MUST come from the DB server clock, not the app clock. The
+        # window bound (opened_at), the settlement completed_at and the refund
+        # created_at are all DB ``now()``; if closed_at were taken from the app
+        # process (which can run a fraction of a second behind the database) a
+        # payment collected moments before the close would have completed_at >
+        # closed_at and fall OUTSIDE the half-open window, silently zeroing the
+        # snapshot. Sourcing every timestamp from the one clock makes the
+        # ``opened_at <= t < closed_at`` window deterministic. now() is the close
+        # transaction's start time, strictly after every already-committed
+        # payment/refund transaction and before any collected after the close.
+        closed_at = db.execute(select(func.now())).scalar_one()
         totals = compute_shift_totals(
             db,
             store_id=locked.store_id,
