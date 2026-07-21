@@ -35,6 +35,12 @@ migrations, and frontend surfaces:
 - **Physical stock count workflow** reconciling counted vs. system stock.
 - **Inventory threshold alerts** for low stock.
 - **Owner inventory UI** and **owner issue history**.
+- **Owner operational dashboard** — one read-only, store-scoped command center
+  (`GET /owner/operational-dashboard` + owner-web landing zone) aggregating
+  today's orders, collected/refunded money, kitchen tempo, open issues, cashier
+  shifts, and inventory alerts, plus a deterministic attention list. Aggregation
+  only — it reuses each existing source of truth and adds no new money, stock,
+  timing, or schema. Not forecasting, BI, or accounting.
 - **Turkish user-facing copy** across customer and staff surfaces.
 - **Read-only reconciliation scripts** for payments, inventory, order issues, and
   kitchen timing.
@@ -48,8 +54,6 @@ App surfaces: `customer-web`, `kitchen-web`, `cashier-web`, `owner-web`, and the
 
 Work that finishes the MVP without expanding the product's scope:
 
-- **Owner operational dashboard** — consolidate the owner surfaces (inventory,
-  kitchen, order issues, shifts) into a single operational view.
 - **Seed demo and sample data** — reliable, reproducible sample data for
   portfolio/review/demo usage.
 - **Production readiness hardening** — configuration, error handling, and

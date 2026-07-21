@@ -14,6 +14,7 @@ from app.routers import (
     order_issues,
     inventory,
     owner_analytics,
+    owner_dashboard,
     owner_insights,
     owner_metrics,
     owner_payments,
@@ -44,6 +45,7 @@ app.include_router(cashier.router)
 app.include_router(order_issues.router)
 app.include_router(inventory.router)
 app.include_router(owner_analytics.router)
+app.include_router(owner_dashboard.router)
 app.include_router(owner_insights.router)
 app.include_router(owner_metrics.router)
 app.include_router(owner_payments.router)

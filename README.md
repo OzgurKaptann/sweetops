@@ -86,6 +86,7 @@ These modules are implemented in the repository today:
 | Inventory threshold alerts | Low-stock thresholds surface alerts |
 | Owner inventory UI | Owner-facing inventory management screens |
 | Owner issue history | Owner view of order-issue history |
+| Owner operational dashboard | One read-only command center: today's orders, collected/refunded money, kitchen tempo, open issues, shifts, and stock alerts, with an attention list |
 | Turkish user-facing copy | Customer and staff UX in Turkish |
 | Read-only reconciliation scripts | Payments, inventory, and order-issue reconciliation |
 
@@ -146,6 +147,12 @@ The FastAPI service (`apps/api`) mounts the following routers:
   adjustments, waste, transfers, physical stock counts, and threshold alerts.
 - **Owner analytics / insights / metrics / payments** (`/owner…`) — operational
   read views, daily metrics, payment summaries, and owner decisions.
+- **Owner operational dashboard** (`GET /owner/operational-dashboard`) — one
+  read-only, store-scoped aggregate of today's operation (orders, collected/
+  refunded money, kitchen tempo, open issues, cashier shifts, stock alerts) plus
+  a deterministic attention list. Aggregation only; no new money, stock, timing,
+  or schema. See
+  [docs/OWNER_OPERATIONAL_DASHBOARD.md](docs/OWNER_OPERATIONAL_DASHBOARD.md).
 - **WebSockets** — real-time channel used by the kitchen surface.
 
 > **Note on analytics/forecasting endpoints:** a legacy `ingredient-forecast`
@@ -312,6 +319,7 @@ Workflow and subsystem documentation lives in `docs/`:
 - [docs/PHYSICAL_STOCK_COUNT_WORKFLOW.md](docs/PHYSICAL_STOCK_COUNT_WORKFLOW.md)
 - [docs/INVENTORY_THRESHOLD_ALERTS.md](docs/INVENTORY_THRESHOLD_ALERTS.md)
 - [docs/OWNER_INVENTORY_MANAGEMENT_UI.md](docs/OWNER_INVENTORY_MANAGEMENT_UI.md)
+- [docs/OWNER_OPERATIONAL_DASHBOARD.md](docs/OWNER_OPERATIONAL_DASHBOARD.md)
 - [docs/SECURE_QR_TABLE_CONTEXT.md](docs/SECURE_QR_TABLE_CONTEXT.md)
 - [docs/CUSTOMER_ORDER_IDEMPOTENCY.md](docs/CUSTOMER_ORDER_IDEMPOTENCY.md)
 - [docs/STAFF_AUTH_RBAC.md](docs/STAFF_AUTH_RBAC.md)
