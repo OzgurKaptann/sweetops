@@ -1,11 +1,92 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchKitchenOrders, updateOrderStatus } from "@/lib/api";
+import { fetchKitchenOrders, fetchKitchenTiming, updateOrderStatus } from "@/lib/api";
 import { UnauthorizedError } from "@/lib/auth";
 import AuthGate, { useAuth } from "@/components/AuthGate";
 import { connectionStateLabel, orderStatusLabel } from "@/lib/labels";
+import {
+  ActiveTimingSummary,
+  OrderTiming,
+  delayReasonLabel,
+  delayStateLabel,
+  prepPhaseNote,
+  timingLines,
+} from "@/lib/timing";
 import { KitchenOrder } from "@sweetops/types";
+
+// Delay badge styling keyed by the API's delay_state enum (copy is Turkish).
+const DELAY_BADGE_STYLE: Record<string, string> = {
+  ok: "bg-gray-100 text-gray-500",
+  warning: "bg-amber-100 text-amber-800",
+  critical: "bg-red-100 text-red-800",
+};
+
+// ── Kitchen tempo (timing) summary strip ────────────────────────────────────
+function KitchenTempoStrip({ summary }: { summary: ActiveTimingSummary | null }) {
+  if (!summary) return null;
+  const stat = (value: number, label: string, alert = false) => (
+    <div className="flex flex-col items-center px-3">
+      <span className={`text-lg font-bold ${alert ? "text-red-600" : "text-gray-900"}`}>
+        {value}
+      </span>
+      <span className="text-[11px] text-gray-500">{label}</span>
+    </div>
+  );
+  return (
+    <div className="mb-6 bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-semibold text-gray-700">Mutfak temposu</span>
+        <div className="flex items-center divide-x divide-gray-100">
+          {stat(summary.active_orders, "Aktif sipariş")}
+          {stat(summary.waiting_orders, "Bekleyen")}
+          {stat(summary.in_prep_orders, "Hazırlanıyor")}
+          {stat(summary.ready_orders, "Hazır")}
+          {stat(summary.delayed_orders, "Geciken", summary.delayed_orders > 0)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Per-card timing block ───────────────────────────────────────────────────
+function OrderTimingBlock({ timing }: { timing: OrderTiming | undefined }) {
+  if (!timing) {
+    return (
+      <div className="mt-2 text-xs text-gray-400">Zamanlama bilgisi yok</div>
+    );
+  }
+  const lines = timingLines(timing);
+  return (
+    <div className="mt-3 space-y-1">
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-gray-500">{prepPhaseNote(timing)}</span>
+        {timing.is_delayed ? (
+          <span
+            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+              DELAY_BADGE_STYLE[timing.delay_state] ?? DELAY_BADGE_STYLE.ok
+            }`}
+          >
+            {delayStateLabel(timing.delay_state)}
+          </span>
+        ) : (
+          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+            {delayStateLabel(timing.delay_state)}
+          </span>
+        )}
+      </div>
+      {lines.map((l) => (
+        <div key={l.label} className="flex justify-between text-xs">
+          <span className="text-gray-500">{l.label}</span>
+          <span className="font-medium text-gray-800 font-mono">{l.value}</span>
+        </div>
+      ))}
+      {timing.is_delayed && timing.delay_reason && (
+        <div className="text-[11px] text-amber-700">{delayReasonLabel(timing.delay_reason)}</div>
+      )}
+    </div>
+  );
+}
 
 // Connection States
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -21,16 +102,25 @@ export default function KitchenPage() {
 function KitchenDashboard() {
   const { user, logout, reportUnauthorized } = useAuth();
   const [orders, setOrders] = useState<KitchenOrder[]>([]);
+  const [timingById, setTimingById] = useState<Record<number, OrderTiming>>({});
+  const [tempo, setTempo] = useState<ActiveTimingSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Initial HTTP Fetch
+  // Initial HTTP Fetch — orders + derived preparation timing, in parallel.
   const loadOrders = useCallback(async () => {
     try {
-      const data = await fetchKitchenOrders();
+      const [data, timing] = await Promise.all([
+        fetchKitchenOrders(),
+        fetchKitchenTiming(),
+      ]);
       setOrders(data);
+      const byId: Record<number, OrderTiming> = {};
+      for (const t of timing.orders) byId[t.order_id] = t;
+      setTimingById(byId);
+      setTempo(timing.summary);
       setError(false);
     } catch (err) {
       if (err instanceof UnauthorizedError) {
@@ -197,6 +287,8 @@ function KitchenDashboard() {
         </div>
       )}
 
+      <KitchenTempoStrip summary={tempo} />
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
         {orders.map((order) => (
           <div key={order.id} className="bg-white rounded-lg shadow border border-gray-200 overflow-hidden flex flex-col">
@@ -215,6 +307,7 @@ function KitchenDashboard() {
               <div className="text-xs text-gray-400 mt-2">
                 Sipariş saati: {new Date(order.created_at).toLocaleTimeString('tr-TR')}
               </div>
+              <OrderTimingBlock timing={timingById[order.id]} />
             </div>
 
             <div className="p-4 flex-grow">

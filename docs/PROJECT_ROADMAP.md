@@ -19,6 +19,9 @@ migrations, and frontend surfaces:
   context.
 - **Customer order creation** with **idempotent** submission.
 - **Kitchen order lifecycle** with real-time (WebSocket) status transitions.
+- **Kitchen preparation timing metrics** — per-order queue/prep/time-to-ready
+  durations and a live delay/summary view, derived from the existing order
+  status-event log (no new schema). Measurement only, not forecasting.
 - **Staff authentication** (cookie-based sessions) and **role-based access
   control**.
 - **Payment settlement ledger**, **payment allocations**, and **payment
@@ -33,7 +36,8 @@ migrations, and frontend surfaces:
 - **Inventory threshold alerts** for low stock.
 - **Owner inventory UI** and **owner issue history**.
 - **Turkish user-facing copy** across customer and staff surfaces.
-- **Read-only reconciliation scripts** for payments, inventory, and order issues.
+- **Read-only reconciliation scripts** for payments, inventory, order issues, and
+  kitchen timing.
 
 App surfaces: `customer-web`, `kitchen-web`, `cashier-web`, `owner-web`, and the
 `apps/api` FastAPI backend.
@@ -44,8 +48,6 @@ App surfaces: `customer-web`, `kitchen-web`, `cashier-web`, `owner-web`, and the
 
 Work that finishes the MVP without expanding the product's scope:
 
-- **Kitchen preparation timing metrics** — capture and expose prep durations per
-  order/stage.
 - **Owner operational dashboard** — consolidate the owner surfaces (inventory,
   kitchen, order issues, shifts) into a single operational view.
 - **Seed demo and sample data** — reliable, reproducible sample data for

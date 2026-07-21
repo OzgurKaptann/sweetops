@@ -71,6 +71,7 @@ These modules are implemented in the repository today:
 | Customer order creation | Customers create orders from the resolved table context |
 | Customer order idempotency | Duplicate submissions are de-duplicated safely |
 | Kitchen order lifecycle | Orders advance through status transitions with real-time updates |
+| Kitchen preparation timing metrics | Queue/prep/time-to-ready durations and live delay states, derived from the status-event log (measurement, not forecasting) |
 | Staff authentication | Cookie-based staff login/session management |
 | Role-based access control | Endpoints are gated by staff role |
 | Payment settlement ledger | Settlements recorded against orders/tables |
@@ -136,6 +137,8 @@ The FastAPI service (`apps/api`) mounts the following routers:
 - **Public QR context** (`/public/qr-context`) — resolve a signed table token.
 - **Public orders** (`/public/orders`) — customer order creation (idempotent).
 - **Kitchen orders** (`/kitchen/orders`) — kitchen dashboard and status updates.
+- **Kitchen timing** (`/kitchen/timing`) — per-order preparation timing and a
+  live delay/summary view, derived from the order status-event log.
 - **Cashier** (`/cashier`) — open tables, order/table bills, settlements,
   allocations, refunds, and cashier shifts (open, current, list, close).
 - **Order issues** — raise, resolve, and list order issues and their refunds.
@@ -207,12 +210,13 @@ See [docs/STAFF_AUTH_RBAC.md](docs/STAFF_AUTH_RBAC.md) and
   order progress, plus receipts, waste, manual adjustments, transfers, and
   physical counts. Threshold alerts surface low stock.
 - **Reconciliation scripts** (`scripts/reconcile_payments.py`,
-  `scripts/reconcile_inventory.py`, `scripts/reconcile_order_issues.py`) provide
-  read-only integrity checks.
+  `scripts/reconcile_inventory.py`, `scripts/reconcile_order_issues.py`,
+  `scripts/reconcile_kitchen_timing.py`) provide read-only integrity checks.
 
 See [docs/PAYMENT_SETTLEMENT_WORKFLOW.md](docs/PAYMENT_SETTLEMENT_WORKFLOW.md),
-[docs/INVENTORY_LIFECYCLE.md](docs/INVENTORY_LIFECYCLE.md), and
-[docs/ORDER_ISSUE_REFUND_WORKFLOW.md](docs/ORDER_ISSUE_REFUND_WORKFLOW.md).
+[docs/INVENTORY_LIFECYCLE.md](docs/INVENTORY_LIFECYCLE.md),
+[docs/ORDER_ISSUE_REFUND_WORKFLOW.md](docs/ORDER_ISSUE_REFUND_WORKFLOW.md), and
+[docs/KITCHEN_PREP_TIMING_METRICS.md](docs/KITCHEN_PREP_TIMING_METRICS.md).
 
 ---
 
@@ -275,6 +279,7 @@ python scripts/manage_qr_tokens.py
 python scripts/reconcile_payments.py
 python scripts/reconcile_inventory.py
 python scripts/reconcile_order_issues.py
+python scripts/reconcile_kitchen_timing.py
 ```
 
 ---
@@ -284,7 +289,7 @@ python scripts/reconcile_order_issues.py
 - Backend tests use **pytest** (`apps/api`). The current test baseline is
   documented in [docs/TEST_SUITE_BASELINE.md](docs/TEST_SUITE_BASELINE.md).
 - Reconciliation scripts under `scripts/` provide read-only integrity checks for
-  payments, inventory, and order issues.
+  payments, inventory, order issues, and kitchen timing.
 
 Run the API test suite from `apps/api`:
 
@@ -334,9 +339,8 @@ visibility — all with Turkish UX.
 A full breakdown lives in [docs/PROJECT_ROADMAP.md](docs/PROJECT_ROADMAP.md).
 In short:
 
-- **Near-term MVP completion:** kitchen preparation timing metrics, an owner
-  operational dashboard, seed demo/sample data, and production-readiness
-  hardening.
+- **Near-term MVP completion:** an owner operational dashboard, seed demo/sample
+  data, and production-readiness hardening.
 - **Post-MVP backlog:** forecasting, supplier management, purchase orders,
   automatic reorder, scheduled alerts, barcode, lot/expiry tracking, customer
   wallet, coupons/store credit, delivery integration, bank reconciliation,
