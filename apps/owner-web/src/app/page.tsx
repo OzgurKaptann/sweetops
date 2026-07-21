@@ -17,6 +17,9 @@ import { OwnerDecision } from "@/lib/api";
 import { MetricsPanel } from "@/components/MetricsPanel";
 import { MetricAttentionBanner } from "@/components/MetricAttentionBanner";
 
+// Operational command center (read-only aggregate of existing systems)
+import { OperationalDashboardPanel } from "@/components/OperationalDashboardPanel";
+
 // Analytics
 import { HourlyDemandChart } from "@/components/HourlyDemandChart";
 import { IngredientForecastPanel } from "@/components/IngredientForecastPanel";
@@ -144,6 +147,19 @@ export default function OwnerDashboard() {
 
       {/* ── Main content ───────────────────────────────────────────────────── */}
       <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-10">
+
+        {/* ━━━ ZONE 0 · OPERASYON ÖZETI ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+        {/* Read-only command center: today's operation at a glance, aggregated
+            from the existing orders / payments / kitchen / issue / shift /
+            inventory systems. No forecasting, no BI — counts and sums only. */}
+        <section>
+          <SectionHeader
+            title="Operasyon Özeti"
+            subtitle="Bugünün durumu · mevcut sistemlerden canlı okunur"
+            accent="neutral"
+          />
+          <OperationalDashboardPanel key={`ops-summary-${refreshTick}`} refreshTick={refreshTick} />
+        </section>
 
         {/* ━━━ ZONE 1 · TODAY'S PERFORMANCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
         <section>
