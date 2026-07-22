@@ -44,6 +44,15 @@ migrations, and frontend surfaces:
 - **Turkish user-facing copy** across customer and staff surfaces.
 - **Read-only reconciliation scripts** for payments, inventory, order issues, and
   kitchen timing.
+- **Deterministic demo seed data** — one command (`python scripts/seed_demo_data.py`
+  / `npm run seed:demo`) populates a coherent Turkish waffle-shop demo so every
+  surface is meaningful immediately: active/waiting/in-prep/ready/completed and
+  cancelled orders, live kitchen-timing warnings, cash/card/partial payments,
+  direct and issue-driven refunds, open/resolved issues, open and closed shifts
+  (one with a discrepancy), all inventory threshold states, and stock
+  receipts/waste/adjustments/transfers/counts. Idempotent, demo-scoped, and
+  non-destructive: it drives the existing services so the reconcilers stay green
+  and non-demo data is never touched. See `docs/DEMO_SEED_DATA.md`.
 
 App surfaces: `customer-web`, `kitchen-web`, `cashier-web`, `owner-web`, and the
 `apps/api` FastAPI backend.
@@ -54,10 +63,10 @@ App surfaces: `customer-web`, `kitchen-web`, `cashier-web`, `owner-web`, and the
 
 Work that finishes the MVP without expanding the product's scope:
 
-- **Seed demo and sample data** — reliable, reproducible sample data for
-  portfolio/review/demo usage.
 - **Production readiness hardening** — configuration, error handling, and
   operational robustness for a demonstrable deployment.
+
+_Seed demo and sample data is now implemented — see section 1._
 
 Forecasting is **not** in this list. It is deferred until enough reliable
 operational data exists.

@@ -253,7 +253,24 @@ Python (for the API and scripts).
    npm install
    ```
 
-3. Start the frontends (each in its own terminal):
+3. **(Recommended) Seed the demo dataset** so every screen has meaningful data:
+
+   ```bash
+   npm run seed:demo          # or: python scripts/seed_demo_data.py
+   ```
+
+   This one command populates a coherent Turkish waffle-shop demo — active and
+   completed orders, live kitchen-timing warnings, payments and refunds, order
+   issues, cashier shifts, and all inventory threshold states. It is
+   deterministic, idempotent (safe to re-run), strictly scoped to the demo
+   stores, and **non-destructive** to any existing data. It creates **local demo
+   accounts** (all with password `demo1234`) for development/demo use only — see
+   [docs/DEMO_SEED_DATA.md](docs/DEMO_SEED_DATA.md) for the full account list,
+   scenarios, and safety model.
+
+   > ⚠️ Development/demo only — never run the seed against a production database.
+
+4. Start the frontends (each in its own terminal):
 
    ```bash
    npm run dev:customer   # customer-web  -> http://localhost:3001
@@ -277,6 +294,9 @@ npm run build:ui          # build @sweetops/ui
 
 # Backend / infra
 docker-compose up -d      # start API + PostgreSQL
+
+# Demo data (development/demo only — deterministic, idempotent, non-destructive)
+npm run seed:demo         # or: python scripts/seed_demo_data.py
 
 # Operational tooling / staff management
 python scripts/manage_staff_users.py
@@ -320,6 +340,7 @@ Workflow and subsystem documentation lives in `docs/`:
 - [docs/INVENTORY_THRESHOLD_ALERTS.md](docs/INVENTORY_THRESHOLD_ALERTS.md)
 - [docs/OWNER_INVENTORY_MANAGEMENT_UI.md](docs/OWNER_INVENTORY_MANAGEMENT_UI.md)
 - [docs/OWNER_OPERATIONAL_DASHBOARD.md](docs/OWNER_OPERATIONAL_DASHBOARD.md)
+- [docs/DEMO_SEED_DATA.md](docs/DEMO_SEED_DATA.md)
 - [docs/SECURE_QR_TABLE_CONTEXT.md](docs/SECURE_QR_TABLE_CONTEXT.md)
 - [docs/CUSTOMER_ORDER_IDEMPOTENCY.md](docs/CUSTOMER_ORDER_IDEMPOTENCY.md)
 - [docs/STAFF_AUTH_RBAC.md](docs/STAFF_AUTH_RBAC.md)
@@ -347,8 +368,8 @@ visibility — all with Turkish UX.
 A full breakdown lives in [docs/PROJECT_ROADMAP.md](docs/PROJECT_ROADMAP.md).
 In short:
 
-- **Near-term MVP completion:** an owner operational dashboard, seed demo/sample
-  data, and production-readiness hardening.
+- **Near-term MVP completion:** production-readiness hardening. (The owner
+  operational dashboard and deterministic demo/sample data are now implemented.)
 - **Post-MVP backlog:** forecasting, supplier management, purchase orders,
   automatic reorder, scheduled alerts, barcode, lot/expiry tracking, customer
   wallet, coupons/store credit, delivery integration, bank reconciliation,
