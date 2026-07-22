@@ -12,6 +12,7 @@
     "dev:owner": "npm run dev --workspace=owner-web -- --port 3003",
     "dev:cashier": "npm run dev --workspace=cashier-web -- --port 3004",
     "build:types": "npm run build --workspace=@sweetops/types",
-    "build:ui": "npm run build --workspace=@sweetops/ui"
+    "build:ui": "npm run build --workspace=@sweetops/ui",
+    "seed:demo": "python scripts/seed_demo_data.py"
   }
 }
