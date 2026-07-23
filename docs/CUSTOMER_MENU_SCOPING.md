@@ -87,6 +87,14 @@ demo data now exercises store scoping rather than merely permitting it). A real
 shop is provisioned the same way until the authenticated onboarding surface
 (P0-E) exists; **that surface is not part of this branch.**
 
+> **Since resolved.** `feat/store-setup-and-menu-provisioning` adds the owner-facing
+> half: an OWNER/MANAGER can now publish, withdraw, switch off for the day and
+> reorder their own branch's menu from `/setup` in owner-web, and a readiness
+> checklist explains *why* a menu is empty rather than leaving a shop to guess. See
+> [STORE_SETUP_AND_MENU_PROVISIONING.md](STORE_SETUP_AND_MENU_PROVISIONING.md). The
+> seed script remains the only way to create a *store*, and staff accounts, per-store
+> pricing and a printable QR sheet are all still unbuilt.
+
 ---
 
 ## 3. Where it is enforced
@@ -174,9 +182,14 @@ Named so nobody reads a wider claim into it:
 * **No multi-item cart.** One product line per submission. A table ordering two
   waffles *and* a coffee still submits twice. (Roadmap P0-D's cart half.)
 * **No shop onboarding.** Publishing a product still needs the seed script or a
-  developer. That is F-13 / P0-E, untouched.
-* **No QR management surface.** Unchanged.
-* **No per-store pricing.** P1-B.
+  developer. That is F-13 / P0-E, untouched. — **Addressed since**, in part, by
+  `feat/store-setup-and-menu-provisioning`: publishing, withdrawing, availability
+  and menu order are now owner-web actions. Creating a *store* and a staff account
+  still needs a script.
+* **No QR management surface.** Unchanged. — **Addressed since**: tables can be
+  added and renamed, and a table's QR sticker issued or rotated, from `/setup`. The
+  link is still shown exactly once, because the raw token is stored only as a hash.
+* **No per-store pricing.** P1-B. — still true.
 * **No payment, kitchen, cashier, inventory, shift or order-issue change.**
 
 ---

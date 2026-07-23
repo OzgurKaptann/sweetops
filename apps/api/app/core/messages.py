@@ -428,6 +428,74 @@ ISSUE_RESOLVE_UNVERIFIED = (
 )
 
 
+# ── Store setup & menu provisioning (owner-web) ──────────────────────────────
+# Setup is CONFIGURATION: none of these messages should suggest that stock moved,
+# that money changed hands, or that an order was affected. What they do decide is
+# what a guest sitting at a table can see and order, so each one says which branch
+# the decision applies to — "şubenizin menüsü", never "menü".
+
+# A member of staff whose account is not attached to any branch reached a setup
+# route. There is no chain-wide menu to provision and no table to hand them.
+SETUP_NO_STORE_ASSIGNED = (
+    "Hesabınız bir şubeye bağlı değil. Menü ve masa ayarları için şube ataması "
+    "gerekiyor."
+)
+
+# Unknown product id. Products are a chain-wide catalog, so this genuinely means
+# "no such product" rather than "not yours".
+MENU_PRODUCT_NOT_FOUND = "Böyle bir ürün bulunamadı."
+
+# The product exists in the catalog but this branch has never published it, so
+# there is no availability or menu order to change. Says the fix out loud.
+MENU_PRODUCT_NOT_PUBLISHED = (
+    "Bu ürün şubenizin menüsünde yayında değil. Önce menüye ekleyin."
+)
+
+# Product name validation.
+MENU_PRODUCT_NAME_REQUIRED = "Ürün adı girmeniz gerekiyor."
+
+# A product with this name already exists in the catalog. Deliberately NOT phrased
+# as a failure of the manager: the usual cause is a double-submitted form, and the
+# safe next step is to look for the product that is already there.
+MENU_PRODUCT_NAME_TAKEN = (
+    "Bu isimde bir ürün zaten var. Ürün listesinden mevcut ürünü kullanabilirsiniz."
+)
+
+# Price validation. Zero is refused: a menu item a guest can order for nothing is
+# never a deliberate configuration, it is a form that was submitted empty.
+MENU_PRICE_INVALID = "Ürün fiyatı sıfırdan büyük olmalı."
+
+# Menu order validation.
+MENU_SORT_ORDER_INVALID = "Menü sırası negatif olamaz."
+
+# ── Tables & QR (owner-web) ──────────────────────────────────────────────────
+# No such table, or it belongs to another branch. A 404 and not a 403, exactly as
+# for a transfer or a stock count: a 403 would confirm the table exists somewhere.
+TABLE_NOT_FOUND = "Bu masa bulunamadı."
+
+TABLE_NUMBER_REQUIRED = "Masa adı veya numarası girmeniz gerekiyor."
+
+# Two tables with the same number in one branch would make the printed stickers
+# ambiguous, and a guest cannot tell the system which "Masa 3" they are at.
+TABLE_NUMBER_TAKEN = "Bu masa adı şubenizde zaten kullanılıyor."
+
+# A table already has a live sticker and `issue` refuses to mint a competing one.
+# The manager is pointed at rotation, which is the operation that actually
+# replaces a sticker (and says so, because it invalidates the old one).
+QR_TOKEN_ALREADY_ACTIVE = (
+    "Bu masanın geçerli bir QR kodu zaten var. Yeni kod oluşturmak için "
+    "QR kodunu yenileyin; yenilediğinizde eski kod geçersiz olur."
+)
+
+# The raw QR link is shown exactly once, at the moment it is created. It is stored
+# only as a hash and cannot be recovered afterwards — see
+# docs/STORE_SETUP_AND_MENU_PROVISIONING.md § QR.
+QR_LINK_SHOWN_ONCE = (
+    "Bu bağlantı yalnızca bir kez gösterilir. Kaydedin veya QR kodunu şimdi "
+    "bastırın; daha sonra tekrar görüntülenemez."
+)
+
+
 # ── Metrics / analytics (owner-web) ──────────────────────────────────────────
 # The analytics store is down. The rest of the dashboard keeps working, so say
 # so — an owner who thinks the whole system is broken will stop trusting all of it.

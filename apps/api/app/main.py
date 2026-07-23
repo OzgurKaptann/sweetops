@@ -18,6 +18,7 @@ from app.routers import (
     owner_insights,
     owner_metrics,
     owner_payments,
+    owner_setup,
     ws,
 )
 
@@ -49,4 +50,5 @@ app.include_router(owner_dashboard.router)
 app.include_router(owner_insights.router)
 app.include_router(owner_metrics.router)
 app.include_router(owner_payments.router)
+app.include_router(owner_setup.router)
 app.include_router(ws.router)
