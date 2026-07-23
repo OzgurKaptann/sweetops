@@ -1,10 +1,17 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchKitchenOrders, fetchKitchenTiming, updateOrderStatus } from "@/lib/api";
+import { useCallback } from "react";
+import { updateOrderStatus } from "@/lib/api";
 import { UnauthorizedError } from "@/lib/auth";
 import AuthGate, { useAuth } from "@/components/AuthGate";
-import { connectionStateLabel, orderStatusLabel } from "@/lib/labels";
+import {
+  connectionStateLabel,
+  connectionStateNote,
+  lastSyncedLabel,
+  orderStatusLabel,
+} from "@/lib/labels";
+import { KitchenLinkState, isDegradedLink } from "@/lib/liveSync";
+import { useKitchenLiveSync } from "@/lib/useKitchenLiveSync";
 import {
   ActiveTimingSummary,
   OrderTiming,
@@ -13,7 +20,6 @@ import {
   prepPhaseNote,
   timingLines,
 } from "@/lib/timing";
-import { KitchenOrder } from "@sweetops/types";
 
 // Delay badge styling keyed by the API's delay_state enum (copy is Turkish).
 const DELAY_BADGE_STYLE: Record<string, string> = {
@@ -88,8 +94,29 @@ function OrderTimingBlock({ timing }: { timing: OrderTiming | undefined }) {
   );
 }
 
-// Connection States
-type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
+// Badge colours per link state. Only `live` is green — every degraded state is
+// visibly not-green, so a stale board can never pass for a healthy one.
+const LINK_BADGE_STYLE: Record<KitchenLinkState, string> = {
+  connecting:   "bg-yellow-100 text-yellow-800 animate-pulse",
+  live:         "bg-green-100 text-green-800",
+  reconnecting: "bg-amber-100 text-amber-900 animate-pulse",
+  polling:      "bg-blue-100 text-blue-800",
+  stale:        "bg-orange-100 text-orange-900",
+  offline:      "bg-red-100 text-red-800",
+};
+
+// Banner colours for the degraded states that get one.
+const LINK_BANNER_STYLE: Record<string, string> = {
+  reconnecting: "bg-amber-50 border-amber-200 text-amber-800",
+  polling:      "bg-blue-50 border-blue-200 text-blue-800",
+  stale:        "bg-orange-50 border-orange-200 text-orange-900",
+  offline:      "bg-red-50 border-red-200 text-red-700",
+};
+
+// The socket URL is resolved here and nowhere else: it must stay exactly
+// `.../ws/kitchen`, with no store or credential query parameter (the store is
+// derived from the session server-side).
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/kitchen';
 
 export default function KitchenPage() {
   return (
@@ -101,144 +128,44 @@ export default function KitchenPage() {
 
 function KitchenDashboard() {
   const { user, logout, reportUnauthorized } = useAuth();
-  const [orders, setOrders] = useState<KitchenOrder[]>([]);
-  const [timingById, setTimingById] = useState<Record<number, OrderTiming>>({});
-  const [tempo, setTempo] = useState<ActiveTimingSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
-  const wsRef = useRef<WebSocket | null>(null);
 
-  // Initial HTTP Fetch — orders + derived preparation timing, in parallel.
-  const loadOrders = useCallback(async () => {
-    try {
-      const [data, timing] = await Promise.all([
-        fetchKitchenOrders(),
-        fetchKitchenTiming(),
-      ]);
-      setOrders(data);
-      const byId: Record<number, OrderTiming> = {};
-      for (const t of timing.orders) byId[t.order_id] = t;
-      setTimingById(byId);
-      setTempo(timing.summary);
-      setError(false);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        reportUnauthorized();
-        return;
-      }
-      console.error("Failed to fetch kitchen orders:", err);
-      setError(true);
-    } finally {
-      setLoading(false);
-    }
-  }, [reportUnauthorized]);
+  // One controller owns the socket, the reconnect backoff, the fallback poll and
+  // the freshness bookkeeping. See lib/liveSync.ts.
+  const {
+    orders,
+    timing,
+    timingById,
+    link,
+    lastSyncedAt,
+    syncing,
+    loaded,
+    refresh,
+  } = useKitchenLiveSync(WS_URL, reportUnauthorized);
 
-  // Connect WebSocket
-  useEffect(() => {
-    // Ilk olarak HTTP ile yukle
-    loadOrders();
+  const tempo: ActiveTimingSummary | null = timing?.summary ?? null;
+  const degraded = isDegradedLink(link);
 
-    const connectWS = () => {
-      setConnectionState('connecting');
-      const ws = new WebSocket(process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/kitchen');
-      
-      ws.onopen = () => {
-        setConnectionState('connected');
-        console.log("WS Connected to Kitchen");
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          
-          if (payload.event === 'order_created') {
-            console.log("Live Event: New Order", payload.data);
-            // Strateji: Sessizce taze listeyi GET ile yeniden çek (Refetch)
-            loadOrders();
-          } 
-          else if (payload.event === 'order_status_updated') {
-            console.log("Live Event: Status Update", payload.data);
-            const  { order_id, status } = payload.data;
-            
-            // Strateji: Local Patch yap
-            setOrders(prevOrders => {
-                // Eğer yeni konum READY, DELIVERED veya CANCELLED ise ekrandan düşür
-                if (['READY', 'DELIVERED', 'CANCELLED'].includes(status)) {
-                    return prevOrders.filter(o => o.id !== order_id);
-                }
-                
-                // Yoksa mutate ederek ilerle (Örn: IN_PREP vs)
-                return prevOrders.map(o => {
-                    if (o.id === order_id) {
-                        return { ...o, status: status };
-                    }
-                    return o;
-                });
-            });
-          }
-        } catch (err) {
-            console.error("WS Parse Error:", err);
-            // Hatali formattaki event ignore edilir, cokus engellenir.
-        }
-      };
-
-      ws.onclose = () => {
-        setConnectionState('disconnected');
-        // İsteğe bağlı 5 saniyede bir basit reconnect eklenebilir
-        setTimeout(connectWS, 5000); 
-      };
-
-      ws.onerror = () => {
-        setConnectionState('error');
-      };
-
-      wsRef.current = ws;
-    };
-
-    connectWS();
-
-    return () => {
-      if (wsRef.current) {
-         wsRef.current.close();
-      }
-    };
-  }, [loadOrders]);
-
-
-  const handleStatusChange = async (orderId: number, currentStatus: string) => {
-    const nextStatus = currentStatus === "NEW" ? "IN_PREP" : "READY";
-    
-    // Note: WS should echo back and handle the update, but we can do an optimistic 
-    // update here if we want instant feedback before the WS message arrives. 
-    // To prove WS is working, we rely entirely on the WS broadcast for this phase, OR we just let the API call finish and wait for WS.
-    try {
-      await updateOrderStatus(orderId, nextStatus);
-    } catch (err) {
+  const handleStatusChange = useCallback(
+    async (orderId: number, currentStatus: string) => {
+      const nextStatus = currentStatus === "NEW" ? "IN_PREP" : "READY";
+      try {
+        await updateOrderStatus(orderId, nextStatus);
+        // The server broadcasts this change too, but the broadcast is a
+        // background task and the socket may be down. Refreshing here means the
+        // cook sees their own action land regardless of the socket's health.
+        refresh();
+      } catch (err) {
         if (err instanceof UnauthorizedError) {
           reportUnauthorized();
           return;
         }
         alert("Sipariş durumu güncellenemedi. Lütfen tekrar deneyin.");
-    }
-  };
-
-  const CONNECTION_BADGE_STYLE: Record<ConnectionState, string> = {
-    connected:    "bg-green-100 text-green-800",
-    connecting:   "bg-yellow-100 text-yellow-800 animate-pulse",
-    error:        "bg-red-100 text-red-800",
-    disconnected: "bg-gray-100 text-gray-800",
-  };
-
-  const getConnectionBadge = () => (
-    <span
-      className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${CONNECTION_BADGE_STYLE[connectionState]}`}
-    >
-      ● {connectionStateLabel(connectionState)}
-    </span>
+      }
+    },
+    [refresh, reportUnauthorized],
   );
 
-  if (loading) {
+  if (!loaded) {
     return (
       <div className="p-8">
         <p className="text-sm text-gray-500 mb-4">Siparişler yükleniyor…</p>
@@ -254,19 +181,30 @@ function KitchenDashboard() {
       <header className="mb-8 flex justify-between items-center bg-white p-4 rounded-lg shadow-sm">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">🧇 Mutfak Ekranı</h1>
-          <p className="text-gray-500 mt-1">Canlı sipariş takibi</p>
+          <p className="text-gray-500 mt-1">Sipariş takibi</p>
         </div>
         <div className="flex items-center gap-4">
-            {getConnectionBadge()}
-            {connectionState !== 'connected' && (
-                <button
-                  onClick={loadOrders}
-                  className="px-3 py-1 bg-blue-50 text-blue-600 rounded text-sm hover:bg-blue-100 transition-colors"
-                >
-                  Yenile
-
-                </button>
-            )}
+            <div className="flex flex-col items-end gap-1">
+              <span
+                className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${LINK_BADGE_STYLE[link]}`}
+              >
+                ● {connectionStateLabel(link)}
+              </span>
+              {/* When the board last actually received data — the number that
+                  decides whether the cook should trust the screen. */}
+              <span className="text-[11px] text-gray-500">
+                {lastSyncedLabel(lastSyncedAt, Date.now())}
+              </span>
+            </div>
+            {/* Always available, not only while disconnected: the moment it is
+                most needed is right after a reconnect that looks healthy. */}
+            <button
+              onClick={refresh}
+              disabled={syncing}
+              className="px-3 py-1 bg-blue-50 text-blue-600 rounded text-sm hover:bg-blue-100 transition-colors disabled:opacity-60"
+            >
+              {syncing ? "Yenileniyor…" : "Yenile"}
+            </button>
             {user && (
               <span className="text-sm text-gray-500 hidden sm:inline">
                 {user.username}
@@ -281,9 +219,13 @@ function KitchenDashboard() {
         </div>
       </header>
 
-      {error && (
-        <div className="mb-6 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
-          Siparişler yüklenemedi. Bağlantı yeniden kuruluyor…
+      {degraded && (
+        <div
+          className={`mb-6 px-4 py-3 rounded-lg border text-sm ${
+            LINK_BANNER_STYLE[link] ?? LINK_BANNER_STYLE.offline
+          }`}
+        >
+          {connectionStateNote(link)}
         </div>
       )}
 
@@ -344,11 +286,24 @@ function KitchenDashboard() {
           </div>
         ))}
 
-        {orders.length === 0 && !loading && (
+        {/* An empty board only means "no orders" when the link is trustworthy.
+            While degraded it means "we do not know", and it must say so. */}
+        {orders.length === 0 && (
           <div className="col-span-full py-16 text-center border-2 border-dashed border-gray-300 rounded-lg bg-white">
             <div className="text-4xl mb-4">🧇</div>
-            <h3 className="text-lg font-medium text-gray-900 mb-1">Yeni sipariş yok</h3>
-            <p className="text-gray-500">Şu anda hazırlanacak sipariş bulunmuyor.</p>
+            {degraded ? (
+              <>
+                <h3 className="text-lg font-medium text-gray-900 mb-1">
+                  Sipariş listesi doğrulanamıyor
+                </h3>
+                <p className="text-gray-500">{connectionStateNote(link)}</p>
+              </>
+            ) : (
+              <>
+                <h3 className="text-lg font-medium text-gray-900 mb-1">Yeni sipariş yok</h3>
+                <p className="text-gray-500">Şu anda hazırlanacak sipariş bulunmuyor.</p>
+              </>
+            )}
           </div>
         )}
       </div>

@@ -173,6 +173,29 @@ helpers in [`src/lib/timing.ts`](../apps/kitchen-web/src/lib/timing.ts):
 
 All copy is Turkish. The English enums remain the wire contract.
 
+### 6.1 How the timing numbers stay fresh
+
+Every duration on this board is computed server-side against `now`, so a number
+is correct at fetch time and progressively wrong afterwards. Keeping it fresh is
+therefore a client concern, and it lives in
+[`src/lib/liveSync.ts`](../apps/kitchen-web/src/lib/liveSync.ts):
+
+- `/kitchen/orders/` and `/kitchen/timing/orders` are **always fetched as a
+  pair**. Tickets and their delay badges can never come from different moments.
+- Every kitchen WebSocket event that can change the board — `initial_state`,
+  `order_created`, `order_status_updated` — triggers that paired refetch. There
+  is no local-patch path, so a status change refreshes the tempo strip and the
+  per-card badges as well as the card itself.
+- A single interval refreshes the pair every **12 s** whenever the link is
+  degraded, and every **30 s** even when the socket is live — so `delay_state`
+  keeps advancing during a lull, which is exactly when an order is most likely to
+  be forgotten.
+- Data older than **60 s** is not presented as live: the badge drops out of
+  **Canlı** and the header shows when the board last actually received data.
+
+Bursts coalesce into at most one in-flight refetch plus one trailing refetch, so
+a rush does not stampede these two endpoints.
+
 ---
 
 ## 7. Why this is not forecasting
