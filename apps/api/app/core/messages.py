@@ -330,6 +330,16 @@ ORDER_NOT_FOUND = "Bu sipariş bulunamadı."
 # The customer submitted a waffle with no ingredients on it.
 ORDER_NO_INGREDIENTS = "Siparişinizde en az bir malzeme olmalı."
 
+# The chosen product is not on THIS branch's menu, is retired chain-wide, has
+# been switched off for the day, or does not exist at all. One message for all
+# four: a guest can do exactly the same thing about each of them (pick something
+# else from the menu in front of them), and distinguishing them would tell a
+# probing client which product ids exist in other branches.
+ORDER_PRODUCT_UNAVAILABLE = (
+    "Seçtiğiniz ürün şu anda bu şubenin menüsünde bulunmuyor. "
+    "Lütfen menüden bir ürün seçip tekrar deneyin."
+)
+
 # The order already reached a terminal state — nothing left to change.
 ORDER_ALREADY_CLOSED = "Bu sipariş tamamlanmış veya iptal edilmiş."
 

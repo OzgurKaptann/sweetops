@@ -30,30 +30,25 @@ from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.order_item_ingredient import OrderItemIngredient
 from app.models.order_status_event import OrderStatusEvent
-from app.models.product import Product
-from tests.conftest import cleanup_ingredient, make_ingredient, purge_inventory_for_orders
+from tests.conftest import (
+    cleanup_ingredient,
+    cleanup_product,
+    make_ingredient,
+    make_product,
+    purge_inventory_for_orders,
+)
 
 
 # ---------------------------------------------------------------------------
 # Local helpers
 # ---------------------------------------------------------------------------
-
-def make_product(db, *, base_price: Decimal) -> Product:
-    """Create a throwaway product with a known base_price."""
-    prod = Product(
-        name=f"TestWaffle_{uuid.uuid4().hex[:8]}",
-        category="Test",
-        base_price=base_price,
-    )
-    db.add(prod)
-    db.commit()
-    db.refresh(prod)
-    return prod
-
-
-def cleanup_product(db, product_id: int) -> None:
-    db.query(Product).filter(Product.id == product_id).delete(synchronize_session=False)
-    db.commit()
+# ``make_product`` / ``cleanup_product`` come from conftest. They used to be
+# local, created a row named ``TestWaffle_<hex>``, and deleted only the product
+# — which is exactly how eight ₺100.00 "TestWaffle" rows ended up permanently in
+# a customer-facing table (RUNTIME_PRODUCT_GAP_REVIEW F-23): every interrupted
+# run leaked one. The shared helper publishes the product on the store's menu
+# and the cleanup withdraws it again, so an interrupted run now leaves at worst
+# an UNPUBLISHED row, which no guest can reach.
 
 
 def build_payload(store_id, table_id, product_id, item_quantity, ingredients, idem_key=None):

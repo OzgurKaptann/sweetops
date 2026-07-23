@@ -15,6 +15,20 @@ import {
 import type { OrderCreateRequest, QrContextResponse } from "@sweetops/types";
 import { fingerprintOrder, orderIdempotency } from "@/lib/order-idempotency";
 import { orderErrorMessage, qrPhaseMessage } from "@/lib/order-messages";
+import {
+  MAX_QUANTITY,
+  MENU_EMPTY_MESSAGE,
+  blockingReason,
+  buildOrderSubmission,
+  canDecrease,
+  canIncrease,
+  menuIsEmpty,
+  selectedProduct as resolveSelectedProduct,
+  selectionTotal,
+  stepQuantity,
+  type CustomerSelection,
+  type MenuProduct,
+} from "@/lib/order-selection";
 import { acquireQrToken, clearQrToken } from "@/lib/qr-session";
 
 const MAX_TOPPINGS = 6;
@@ -301,6 +315,124 @@ function PopularSection({
   );
 }
 
+// ── Product picker ────────────────────────────────────────────────────────────
+
+/**
+ * The product choice, made explicitly.
+ *
+ * This section is the fix for "the guest never chose a product". Nothing is
+ * pre-selected — not even when the branch sells exactly one thing — so the
+ * order can never contain something nobody tapped.
+ */
+function ProductSection({
+  products,
+  selectedProductId,
+  onSelect,
+}: {
+  products: MenuProduct[];
+  selectedProductId: number | null;
+  onSelect: (id: number) => void;
+}) {
+  return (
+    <section className="px-4 py-3 border-b border-gray-100">
+      <div className="flex items-center gap-1.5 mb-2">
+        <span className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
+          Ürün seçin
+        </span>
+      </div>
+      <div className="grid grid-cols-1 gap-2">
+        {products.map((product) => {
+          const selected = product.id === selectedProductId;
+          return (
+            <button
+              key={product.id}
+              onClick={() => onSelect(product.id)}
+              aria-pressed={selected}
+              className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all ${
+                selected
+                  ? "border-amber-400 bg-amber-50 ring-1 ring-amber-300"
+                  : "border-gray-100 bg-white hover:border-gray-200 hover:bg-gray-50"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={`text-sm font-medium truncate ${
+                    selected ? "text-amber-900" : "text-gray-800"
+                  }`}
+                >
+                  {product.name}
+                </span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span
+                    className={`text-xs font-semibold ${
+                      selected ? "text-amber-700" : "text-gray-500"
+                    }`}
+                  >
+                    ₺{parseFloat(product.base_price).toFixed(0)}
+                  </span>
+                  {selected && (
+                    <span className="w-4 h-4 rounded-full bg-amber-400 text-white text-[10px] flex items-center justify-center font-bold">
+                      ✓
+                    </span>
+                  )}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// ── Quantity stepper ──────────────────────────────────────────────────────────
+
+/**
+ * How many. Visible, bounded, and never assumed: the previous screen hard-coded
+ * `quantity: 1` into the payload with nothing on screen to say so.
+ */
+function QuantityStepper({
+  quantity,
+  onChange,
+}: {
+  quantity: number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-xs text-gray-500">
+        Adet{!canIncrease(quantity) && ` (en fazla ${MAX_QUANTITY})`}
+      </span>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          aria-label="Adedi azalt"
+          disabled={!canDecrease(quantity)}
+          onClick={() => onChange(stepQuantity(quantity, -1))}
+          className="w-8 h-8 rounded-full border border-gray-200 text-gray-700 text-lg leading-none disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          −
+        </button>
+        <span
+          aria-live="polite"
+          className="min-w-[1.5rem] text-center text-sm font-bold text-gray-900"
+        >
+          {quantity}
+        </span>
+        <button
+          type="button"
+          aria-label="Adedi artır"
+          disabled={!canIncrease(quantity)}
+          onClick={() => onChange(stepQuantity(quantity, 1))}
+          className="w-8 h-8 rounded-full border border-gray-200 text-gray-700 text-lg leading-none disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 // Phases of the QR-gated menu screen. Plain query params (?store, ?table) are
@@ -327,6 +459,10 @@ export default function CustomerMenuPageClient() {
   const [qrErrorMessage, setQrErrorMessage] = useState<string | null>(null);
   const [context, setContext] = useState<QrContextResponse | null>(null);
   const [menu, setMenu] = useState<EnrichedMenuResponse | null>(null);
+  // Null until the guest taps a product. Never seeded from the menu — see
+  // lib/order-selection.ts for why there is no "if there is only one" shortcut.
+  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
+  const [quantity, setQuantity] = useState<number>(1);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [upsell, setUpsell] = useState<UpsellSuggestion[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -486,43 +622,51 @@ export default function CustomerMenuPageClient() {
     [toggleIngredient, menu],
   );
 
-  // Price calculation
-  const product = menu?.products[0] ?? null;
+  // The whole submit decision in one value. Everything below — the price, the
+  // button label, whether the button is live — is derived from it, so the screen
+  // and the payload can never disagree about what was chosen.
+  const products: MenuProduct[] = menu?.products ?? [];
+  const selection: CustomerSelection = {
+    qrToken,
+    contextReady: phase === "ready",
+    products,
+    selectedProductId,
+    quantity,
+    ingredientIds: Array.from(selected),
+  };
+
+  // Resolved against the CURRENT menu: a product that was withdrawn while the
+  // guest was choosing toppings resolves to null and disables submit.
+  const product = resolveSelectedProduct(products, selectedProductId);
+  // Only a chosen product contributes a base price — the combo prices below
+  // therefore read as "toppings only" until the guest has picked one, which is
+  // the truth rather than the first product's price standing in for it.
   const basePrice = product ? parseFloat(product.base_price) : 0;
   const ingredientTotal = Array.from(selected).reduce((sum, id) => {
     const ing = ingredientMap.get(id);
     return sum + (ing ? parseFloat(ing.price) : 0);
   }, 0);
-  const totalPrice = basePrice + ingredientTotal;
+  const totalPrice = selectionTotal(product, ingredientTotal, quantity);
+  const submission = buildOrderSubmission(selection);
+  const blocked = blockingReason(selection);
 
   // Submit
   const handleSubmit = async () => {
     // Hard double-click / re-entrancy guard (synchronous, not state-based).
     if (submittingRef.current) return;
-    // Ordering requires a resolved QR context — never a default store.
-    if (!qrToken || phase !== "ready") return;
-    if (selected.size === 0) {
-      showToast("En az bir malzeme seçmelisiniz.");
+    // One gate for every precondition: a resolved QR context, an explicitly
+    // chosen product that is still on the menu, at least one ingredient, and a
+    // quantity inside the bounds. If any of them fails, `submission` is null and
+    // nothing is sent — there is no fallback payload to send instead.
+    if (submission === null) {
+      if (blocked) showToast(blocked);
       return;
     }
-    if (!product) return;
 
-    // Build the logical order payload, then derive one idempotency key for it.
-    // A retry of the same selection reuses the key; any change mints a new one.
-    // The QR token is the trusted context — no numeric store/table is sent.
-    const payload: OrderCreateRequest = {
-      qr_token: qrToken,
-      items: [
-        {
-          product_id: product.id,
-          quantity: 1,
-          ingredients: Array.from(selected).map((id) => ({
-            ingredient_id: id,
-            quantity: 1,
-          })),
-        },
-      ],
-    };
+    // Derive one idempotency key for this logical order. A retry of the same
+    // selection reuses the key; any change (including the quantity) mints a new
+    // one. The QR token is the trusted context — no numeric store/table is sent.
+    const payload: OrderCreateRequest = submission;
     const idempotencyKey = orderIdempotency.getOrCreateKey(
       fingerprintOrder(payload),
     );
@@ -535,6 +679,8 @@ export default function CustomerMenuPageClient() {
       // retire the attempt and reset the cart so it can never be resubmitted.
       orderIdempotency.clear();
       setSelected(new Set());
+      setSelectedProductId(null);
+      setQuantity(1);
       // Keep the button disabled through navigation — do not reset the guard.
       router.push(`/success?order_id=${res.order_id}&amount=${res.total_amount}`);
     } catch (err) {
@@ -607,6 +753,24 @@ export default function CustomerMenuPageClient() {
     );
   }
 
+  // The branch resolved, but it has published nothing to sell. A correctly
+  // scoped menu can legitimately be empty (see menu_service.list_menu_products);
+  // it must read as a calm Turkish sentence, not as a broken screen — and there
+  // must be no way to submit from it.
+  if (menuIsEmpty(products)) {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6 text-center">
+        <span className="text-3xl">🧇</span>
+        <p className="text-gray-700 text-sm font-medium">{MENU_EMPTY_MESSAGE}</p>
+        {context && (
+          <p className="text-xs text-gray-400">
+            {context.store.name} · {context.table.name}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   const allIngredients = (menu?.categories ?? []).flatMap((c) => c.ingredients);
 
   // Single ingredient with highest ranking_score across all categories (in-stock only)
@@ -625,6 +789,13 @@ export default function CustomerMenuPageClient() {
           </p>
         )}
       </header>
+
+      {/* Product choice — explicit, nothing pre-selected */}
+      <ProductSection
+        products={products}
+        selectedProductId={selectedProductId}
+        onSelect={setSelectedProductId}
+      />
 
       {/* Quick Start Combos — above everything else */}
       {selected.size === 0 && (
@@ -689,27 +860,36 @@ export default function CustomerMenuPageClient() {
 
       {/* Sticky bottom bar */}
       <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-white border-t border-gray-100 px-4 py-3 shadow-lg">
+        {/* What is being ordered, spelled out before submit — the product name
+            and the count, never implied. */}
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-gray-500">
-            {selected.size > 0
-              ? `${selected.size} malzeme seçtiniz`
-              : "Sepetiniz boş"}
+          <span className="text-xs text-gray-500 truncate mr-2">
+            {product
+              ? `${product.name} · ${selected.size} malzeme`
+              : "Ürün seçilmedi"}
           </span>
           <span className="text-lg font-bold text-gray-900">
             ₺{totalPrice.toFixed(0)}
           </span>
         </div>
+
+        <div className="mb-3">
+          <QuantityStepper quantity={quantity} onChange={setQuantity} />
+        </div>
+
         <button
           onClick={handleSubmit}
-          disabled={submitting || selected.size === 0}
+          disabled={submitting || submission === null}
           className={`w-full py-3.5 rounded-xl text-sm font-bold transition-all ${
-            selected.size === 0
+            submission === null
               ? "bg-gray-100 text-gray-400 cursor-not-allowed"
               : "bg-amber-400 text-white hover:bg-amber-500 active:scale-[0.98]"
           } disabled:opacity-70`}
         >
           {submitting
             ? "Siparişiniz gönderiliyor…"
+            : !product
+            ? "Ürün seçin"
             : selected.size === 0
             ? "Malzeme seçin"
             : `Sipariş ver — ₺${totalPrice.toFixed(0)}`}

@@ -79,6 +79,7 @@ from app.models.order_status_event import OrderStatusEvent
 from app.models.product import Product
 from app.models.role import Role
 from app.models.store import Store
+from app.models.store_product import StoreProduct
 from app.models.table import Table
 from app.models.user import User
 from app.schemas.order_issue import IssueCreateRequest, IssueResolveRequest
@@ -181,6 +182,40 @@ def get_or_create_product(db: Session, name: str, category: str, base_price: Dec
         db.flush()
     SUMMARY.note("product", created=created)
     return product
+
+
+def offer_product(
+    db: Session, store: Store, product: Product, sort_order: int
+) -> StoreProduct:
+    """
+    Publish a product on a branch's customer menu.
+
+    This is the demo equivalent of the decision a shop makes when it puts an
+    item on the board. Without it the product exists in the catalog and is
+    invisible to every guest — which is exactly the boundary migration
+    a9e4c7b25d13 introduced, and the reason the seed has to be explicit about
+    what the demo branches sell.
+    """
+    offering = (
+        db.query(StoreProduct)
+        .filter(
+            StoreProduct.store_id == store.id,
+            StoreProduct.product_id == product.id,
+        )
+        .first()
+    )
+    created = offering is None
+    if created:
+        offering = StoreProduct(
+            store_id=store.id,
+            product_id=product.id,
+            is_available=True,
+            sort_order=sort_order,
+        )
+        db.add(offering)
+        db.flush()
+    SUMMARY.note("menu offering", created=created)
+    return offering
 
 
 def get_or_create_ingredient(
@@ -364,6 +399,18 @@ def seed_foundation(db: Session) -> DemoWorld:
     }
     tables = {num: get_or_create_table(db, primary, num, qr)
               for num, qr in _PRIMARY_TABLES}
+
+    # Publish the menu. A product in the catalog is not on anybody's menu until
+    # a branch offers it, so this is what makes the demo QR flow show anything
+    # at all. The two branches deliberately publish DIFFERENT menus — Moda is a
+    # small satellite that sells the waffles but no drinks — so the demo data
+    # exercises store scoping instead of merely permitting it.
+    primary_menu = [name for name, _cat, _price in _PRODUCTS]
+    secondary_menu = [name for name, cat, _price in _PRODUCTS if cat == "Waffle"]
+    for order_index, name in enumerate(primary_menu):
+        offer_product(db, primary, products[name], order_index)
+    for order_index, name in enumerate(secondary_menu):
+        offer_product(db, secondary, products[name], order_index)
 
     users = {
         uname: get_or_create_user(db, uname, roles[role_name], primary)

@@ -151,7 +151,17 @@ future dependency; either way it is a container an operator has to reason about.
 **All runtime claims in this section: NEEDS_MANUAL_BROWSER_CONFIRMATION.**
 
 ### F-01 · The customer can only ever order one product, quantity 1
-**Lens:** PM · **Severity:** blocker · **Effort:** M
+**Lens:** PM · **Severity:** blocker · **Effort:** M ·
+**Status: PARTIALLY FIXED** — `fix/customer-menu-scope-and-selection`
+
+> **Fixed:** the `products[0]` fallback is gone. The guest picks a product
+> explicitly (nothing is pre-selected, not even on a one-product menu), the
+> choice is named in the sticky bar before submit, and quantity is a visible
+> stepper bounded 1–10 rather than a hard-coded `1`. Submit stays disabled until
+> the selection is complete and still on the menu.
+> **NOT fixed:** one product line per submission. A table wanting two waffles
+> *and* a Türk Kahvesi still submits twice — the multi-item cart remains open
+> under P0-D. See [CUSTOMER_MENU_SCOPING.md](CUSTOMER_MENU_SCOPING.md).
 
 [`CustomerMenuPageClient.tsx:490`](../apps/customer-web/src/components/CustomerMenuPageClient.tsx#L490):
 
@@ -174,7 +184,19 @@ staff take the rest of the order verbally — which is precisely the paper/Whats
 fallback this product exists to eliminate.
 
 ### F-02 · The product catalog is global, unfiltered, and currently contains test debris that is customer-facing
-**Lens:** DataEng / CTO · **Severity:** blocker · **Effort:** M
+**Lens:** DataEng / CTO · **Severity:** blocker · **Effort:** M ·
+**Status: FIXED** — `fix/customer-menu-scope-and-selection`
+
+> Migration `a9e4c7b25d13` adds `products.is_active` (catalog retirement,
+> chain-wide) and a `store_products` publication table (one row = "this branch
+> offers this product"). The customer menu is now a join through that table
+> against the store the QR token resolved to, and order creation re-checks the
+> same relationship server-side before any stock is locked. A product nobody
+> published is unreachable from every customer surface — no name matching
+> anywhere. Nothing was backfilled: the catalog fails closed, so an
+> unprovisioned branch returns an empty menu rather than the whole table. Full
+> design, including what was deliberately deferred (per-store pricing, cart,
+> onboarding): [CUSTOMER_MENU_SCOPING.md](CUSTOMER_MENU_SCOPING.md).
 
 [`menu_service.py:38`](../apps/api/app/services/menu_service.py#L38):
 
@@ -910,7 +932,19 @@ signal in the audit: the ledgers are correct even with test debris, cancellation
 discrepant shift and cross-store demo data resident.
 
 ### F-23 · Test debris reaches a customer-facing table
-**Lens:** DataEng · **Severity:** major · **Effort:** S
+**Lens:** DataEng · **Severity:** major · **Effort:** S ·
+**Status: FIXED (reachability)** — `fix/customer-menu-scope-and-selection`
+
+> Debris can no longer *reach* a guest: a `products` row is customer-facing only
+> through a `store_products` publication row, and a test run never writes one
+> (F-02). The specific leak was also closed at source — the local helper in
+> `test_order_quantity_accounting.py` that minted `TestWaffle_<hex>` and cleaned
+> up only the product now delegates to a shared conftest helper that publishes
+> the product and withdraws it again, so an interrupted run leaves at worst an
+> unpublished row.
+> **Still true:** the eight existing debris rows are still resident in the
+> development database. They are now inert — unpublished, invisible on every
+> menu, unorderable — and removing them is a database chore, not a code change.
 
 `PRODUCTION_READINESS.md` §14.8 says interrupted test runs leave "orphaned
 `user_<hex>` rows and orders behind. They are harmless but they accumulate." The live
@@ -1040,11 +1074,11 @@ Ordered by severity, then by how directly they block a paying pilot.
 | ID | Lens | Finding | Sev | Eff | § |
 | --- | --- | --- | --- | --- | --- |
 | **F-13** | PM/CTO | No way to onboard a store, catalog, table or price without editing Python | blocker | L | 11 |
-| **F-01** | PM | Customer can order only `products[0]`, quantity 1 — 13 of 14 catalog items unreachable | blocker | M | 3 |
+| **F-01** | PM | ~~Customer can order only `products[0]`, quantity 1~~ **PARTLY FIXED** — `fix/customer-menu-scope-and-selection` (explicit product choice + bounded quantity; multi-item cart still open) | blocker | M | 3 |
 | **F-03** | Analyst | Two conflicting "revenue" definitions on one owner page | blocker | M | 6 |
 | **F-04** | Analyst/DataEng | ~~Every day boundary and hour bucket is UTC; the shop is UTC+3~~ **FIXED** — `fix/business-timezone` | blocker | M | 6 |
 | **F-05** | CTO/PM | ~~Kitchen board never re-syncs after a dropped socket; shows "Canlı" while stale~~ **FIXED** — `fix/kitchen-live-resync` | blocker | S | 4 |
-| **F-02** | DataEng/CTO | Product catalog is global and unfiltered; test debris is customer-facing | blocker | M | 3 |
+| **F-02** | DataEng/CTO | ~~Product catalog is global and unfiltered; test debris is customer-facing~~ **FIXED** — `fix/customer-menu-scope-and-selection` | blocker | M | 3 |
 | **F-06** | PM | Kitchen cannot mark DELIVERED, cancel, or undo | major | M | 4 |
 | **F-07** | PM | No kitchen history or shift recap | major | M | 4 |
 | **F-08** | PM/Analyst | ~~Kitchen timing and tempo freeze between order creations~~ **FIXED** — `fix/kitchen-live-resync` | major | S | 4 |
@@ -1057,7 +1091,7 @@ Ordered by severity, then by how directly they block a paying pilot.
 | **F-16** | CTO/DataEng | Compose starts Metabase pointed at the operational DB; README understates the command | major | S | 2 |
 | **F-17** | Analyst | A 7-day mean is presented as a forecast with row-count "confidence" | major | S | 8 |
 | **F-18** | DataEng | Legacy dbt owner/forecast marts are not store-scoped | major | M | 8 |
-| **F-23** | DataEng | Test debris (8 `TestWaffle_*` products) sits in a customer-facing table | major | S | 10 |
+| **F-23** | DataEng | ~~Test debris (8 `TestWaffle_*` products) sits in a customer-facing table~~ **FIXED** — `fix/customer-menu-scope-and-selection` (rows now inert and unreachable; deleting them is a DB chore) | major | S | 10 |
 | **F-32** | DataEng | No demo/real data marker outside store id | major | M | 10 |
 | **F-34** | DataEng/Analyst | Cancellation counts in legacy analytics, excluded everywhere else | major | S | 10 |
 | **F-19** | PM/Analyst | Customer combo comparator mixes operands; "today's" label is not today | minor | S | 3 |

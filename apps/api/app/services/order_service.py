@@ -2,6 +2,10 @@
 Order Service — production-grade order creation.
 
 Key guarantees:
+  0. Store-scoped menu validation: an order may only contain products the
+     resolved store actually publishes (store_products), that are active in the
+     catalog, in a quantity inside the bounds the schema enforces. Nothing the
+     client sends can widen any of the three.
   1. Idempotent: same idempotency_key returns existing order, never duplicates
      and never double-reserves — including under a concurrent retry, where the
      unique key constraint makes the loser return the winner's order.
@@ -32,6 +36,7 @@ from app.models.order_item import OrderItem
 from app.models.order_item_ingredient import OrderItemIngredient
 from app.models.order_status_event import OrderStatusEvent
 from app.models.product import Product
+from app.models.store_product import StoreProduct
 from app.schemas.order import OrderCreateRequest, OrderCreatedResponse
 from app.services import inventory_service
 from app.services.audit_service import audit
@@ -85,6 +90,13 @@ def create_order(
     """
     Create an order.
 
+    Menu context:
+        Every ordered product must be published by the store the QR token
+        resolved to, active in the catalog, and available today. A product id
+        that fails any of those is refused with a Turkish 422 before any stock
+        is locked — the client's rendered menu is never taken as evidence.
+        See ``_resolve_menu_products``.
+
     Idempotency:
         If idempotency_key already exists in the orders table, returns the
         existing order immediately without touching stock. A concurrent retry
@@ -116,6 +128,13 @@ def create_order(
     # token that was revoked before this transaction validated it. Any
     # client-supplied store_id/table_id are ignored whenever a token is present.
     store_id, table_id = _derive_order_context(db, order_data)
+
+    # ── 1c. Validate the products against THAT store's menu ──────────────
+    # Runs before any stock is touched, and against the store derived above —
+    # never against a store_id the client sent. A product the branch does not
+    # publish cannot be ordered from it even if the id is real and the guest
+    # read it off another branch's menu.
+    products_by_id = _resolve_menu_products(db, order_data, store_id)
 
     # ── 2. Resolve products & ingredients (outside lock — read-only) ─────
     ingredient_ids: list[int] = []
@@ -207,12 +226,10 @@ def create_order(
         line_requirements: dict[tuple[int, int], Decimal] = {}
 
         for item_data in order_data.items:
-            product = db.get(Product, item_data.product_id)
-            if product is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Product {item_data.product_id} not found.",
-                )
+            # Validated in step 1c against this store's published menu — the
+            # price charged is therefore always the price of a product this
+            # branch actually offers.
+            product = products_by_id[item_data.product_id]
 
             base_price = product.base_price
             item_total = base_price * item_data.quantity
@@ -340,6 +357,67 @@ def create_order(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_menu_products(
+    db: Session, order_data: OrderCreateRequest, store_id: int
+) -> dict[int, Product]:
+    """
+    Resolve every ordered product against the MENU OF THE RESOLVED STORE.
+
+    A product id in the request body is a claim, and this is where the claim is
+    checked. It survives only if all three hold:
+
+      * the product exists;
+      * it is active in the catalog (not retired chain-wide);
+      * this branch has published it and has not switched it off today —
+        i.e. there is a ``store_products`` row for (store_id, product_id) with
+        is_available.
+
+    The store is the one derived from the QR token in ``_derive_order_context``,
+    so the check cannot be moved by anything the client sends. That is what
+    makes it a boundary rather than a formality: the frontend renders a menu,
+    but the menu the frontend rendered is not evidence of anything here.
+
+    Everything that fails collapses into ONE Turkish 422 with the machine
+    code ``product_unavailable``. A guest can only ever do one thing about it —
+    pick something that IS on the menu in front of them — and a per-reason
+    response would let a probe map which product ids exist in other branches.
+    """
+    requested = {item.product_id for item in order_data.items}
+
+    offered: dict[int, Product] = {
+        product.id: product
+        for product in (
+            db.query(Product)
+            .join(StoreProduct, StoreProduct.product_id == Product.id)
+            .filter(
+                Product.id.in_(requested),
+                Product.is_active == True,          # noqa: E712
+                StoreProduct.store_id == store_id,
+                StoreProduct.is_available == True,  # noqa: E712
+            )
+            .all()
+        )
+    }
+
+    rejected = sorted(requested - offered.keys())
+    if rejected:
+        logger.info(
+            "order_rejected_product_not_on_menu store_id=%s product_ids=%s",
+            store_id,
+            rejected,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "product_unavailable",
+                "message": messages.ORDER_PRODUCT_UNAVAILABLE,
+                "ids": rejected,
+            },
+        )
+
+    return offered
+
 
 def _derive_order_context(
     db: Session, order_data: OrderCreateRequest
