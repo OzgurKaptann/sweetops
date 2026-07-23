@@ -77,7 +77,16 @@ function sliceDays<T>(points: T[], days: number): T[] {
 }
 
 function formatDate(dateStr: string) {
-  return new Date(dateStr).toLocaleDateString("tr-TR", { day: "numeric", month: "short" });
+  // sales_date is a BUSINESS calendar date ("2026-07-24"), not an instant. Bare
+  // `new Date("2026-07-24")` parses as UTC midnight and then renders in the
+  // browser's zone, which shifts the label to the previous day for any viewer
+  // west of UTC. Appending the time forces a local-midnight parse, so the label
+  // always names the business day the backend bucketed. Same rule as
+  // formatBusinessDate in lib/operational-dashboard-view.ts.
+  return new Date(`${dateStr}T00:00:00`).toLocaleDateString("tr-TR", {
+    day: "numeric",
+    month: "short",
+  });
 }
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────

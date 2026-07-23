@@ -35,7 +35,22 @@ Effort keys: S (< 1 day), M (1–3 days), L (a week or more).
 ## P0 — before a paying shop
 
 ### P0-A · `fix/business-timezone` — one business day boundary, defined once
-**Fixes:** F-04 (and unblocks the forecasting track) · **Effort:** M
+**Fixes:** F-04 (and unblocks the forecasting track) · **Effort:** M ·
+**Status: DONE** — branch `fix/business-timezone`
+
+> **Delivered.** `BUSINESS_TIMEZONE` (default `Europe/Istanbul`) plus one shared
+> helper module, [`app/core/business_time.py`](../apps/api/app/core/business_time.py).
+> Storage is untouched and still UTC. Routed through it: `owner_analytics_service`
+> (KPIs/`peak_hour`/hourly demand/daily sales/forecast windows),
+> `operational_dashboard_service`, `kitchen_timing_service.get_timing_summary`,
+> `metrics_service` (all seventeen daily predicates), `operational_context_service`,
+> `owner_insights_service` (7/14-day windows and the `active_days` denominator) and
+> the `/owner/metrics` future-date guard. Day windows are half-open UTC intervals;
+> day and hour *groupings* use `AT TIME ZONE`. 48 tests in
+> `apps/api/tests/test_business_timezone.py`; docs §3 of
+> `OWNER_OPERATIONAL_DASHBOARD.md` and `KITCHEN_PREP_TIMING_METRICS.md` updated.
+> Still open and deliberately out of scope: **F-11** (the "30 Gün" tab still renders
+> the 7-day series) and **F-12**.
 
 The single highest-leverage change in the audit. Istanbul is UTC+3; "today" currently
 ends at 03:00 local, and every hour bucket on the owner's demand chart is labelled

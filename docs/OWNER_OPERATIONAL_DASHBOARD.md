@@ -38,8 +38,15 @@ exposed by [`app/routers/owner_dashboard.py`](../apps/api/app/routers/owner_dash
 
 ## 3. Metric definitions
 
-"Today" is the server/UTC calendar day (`func.date(col) == today`), the same day
-boundary the kitchen-timing summary and owner metrics layer already use.
+"Today" is the **business** calendar day — the local day in `BUSINESS_TIMEZONE`
+(default `Europe/Istanbul`) — the same day boundary the kitchen-timing summary and
+owner metrics layer use. Timestamps are still **stored in UTC**; the business day is
+expressed as the half-open UTC interval `[day_start, day_end)` that covers it, and
+every "today" figure is filtered with `col >= day_start AND col < day_end`. For
+Istanbul that interval opens at **21:00Z on the previous UTC date**, so a 01:00 local
+sale is counted on the day the shop actually made it. `business_date` in the response
+is that local date. The boundary is defined once in
+[`app/core/business_time.py`](../apps/api/app/core/business_time.py).
 
 ### orders
 - `active_count` / `waiting_count` / `in_prep_count` / `ready_count` — live counts

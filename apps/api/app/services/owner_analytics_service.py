@@ -5,10 +5,25 @@ No dependency on analytics.* schema or views.
 Store scoping:
   Every order-derived metric is filtered by the authenticated store_id. The
   store_id is supplied by the router from the session — never from the client.
+
+Time scoping:
+  Storage stays UTC; every window here is a BUSINESS day range (app.core.
+  business_time). "Today" is the local calendar day, daily buckets are local
+  days and hour buckets are local hours — so ``peak_hour`` and "Saatlik Talep"
+  name the hour on the shop's wall clock rather than the UTC hour three hours
+  earlier. Windows are half-open ``[start, end)`` in UTC.
 """
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
+from app.core.business_time import (
+    business_date_sql_expression,
+    business_day_bounds_utc,
+    business_hour_sql_expression,
+    business_today,
+    last_n_days_bounds_utc,
+    utc_now,
+)
 from app.schemas.owner_analytics import (
     KPIsResponse, KPIsData,
     TopIngredientsResponse, TopIngredientItem,
@@ -19,14 +34,18 @@ from app.schemas.owner_analytics import (
 
 
 def get_current_utc():
-    return datetime.now(timezone.utc)
+    """Aware UTC now — response ``as_of`` stamps stay UTC, like every stored instant."""
+    return utc_now()
 
 
 def fetch_kpis(db: Session, store_id: int) -> KPIsResponse:
     """KPIs from direct queries on the orders table, scoped to store_id."""
     now = get_current_utc()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    params = {"today_start": today_start, "store_id": store_id}
+    # "Today" = the business calendar day in progress, as the UTC interval that
+    # covers it. In Istanbul that interval opens at 21:00Z the previous UTC day,
+    # so the 00:00-03:00 local trade lands on the right report.
+    today_start, today_end = business_day_bounds_utc()
+    params = {"today_start": today_start, "today_end": today_end, "store_id": store_id}
 
     # Today's stats
     today_query = text("""
@@ -36,6 +55,7 @@ def fetch_kpis(db: Session, store_id: int) -> KPIsResponse:
             COALESCE(AVG(total_amount), 0) as aov
         FROM orders
         WHERE created_at >= :today_start
+          AND created_at <  :today_end
           AND store_id = :store_id
     """)
     today_res = db.execute(today_query, params).fetchone()
@@ -55,18 +75,20 @@ def fetch_kpis(db: Session, store_id: int) -> KPIsResponse:
         FROM orders
         WHERE status IN ('READY', 'DELIVERED')
           AND created_at >= :today_start
+          AND created_at <  :today_end
           AND store_id = :store_id
     """)
     delivered_res = db.execute(delivered_query, params).fetchone()
 
-    # Peak hour today
-    peak_query = text("""
-        SELECT EXTRACT(HOUR FROM created_at)::int as hour, COUNT(*) as cnt
+    # Peak hour today — bucketed by LOCAL hour, so "18:00" means 18:00 in the shop.
+    peak_query = text(f"""
+        SELECT {business_hour_sql_expression('created_at')} as hour, COUNT(*) as cnt
         FROM orders
         WHERE created_at >= :today_start
+          AND created_at <  :today_end
           AND store_id = :store_id
         GROUP BY hour
-        ORDER BY cnt DESC
+        ORDER BY cnt DESC, hour ASC
         LIMIT 1
     """)
     peak_res = db.execute(peak_query, params).fetchone()
@@ -130,21 +152,32 @@ def fetch_top_ingredients(db: Session, store_id: int, limit: int = 5) -> TopIngr
 
 
 def fetch_hourly_demand(db: Session, store_id: int) -> HourlyDemandResponse:
-    """Hourly order counts for today, scoped to store_id."""
-    today_start = get_current_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+    """
+    Hourly order counts for today, scoped to store_id.
 
-    query = text("""
+    Buckets are LOCAL hours over the LOCAL day: an order at 22:00Z on 23 July is
+    hour 01 of 24 July in Istanbul, not hour 22 of 23 July. Staffing and prep
+    decisions are read straight off this chart, so the labels have to match the
+    wall clock.
+    """
+    today_start, today_end = business_day_bounds_utc()
+
+    query = text(f"""
         SELECT
-            EXTRACT(HOUR FROM created_at)::int as hour,
+            {business_hour_sql_expression('created_at')} as hour,
             COUNT(*) as order_count
         FROM orders
         WHERE created_at >= :today_start
+          AND created_at <  :today_end
           AND store_id = :store_id
         GROUP BY hour
         ORDER BY hour ASC
     """)
 
-    rows = db.execute(query, {"today_start": today_start, "store_id": store_id}).fetchall()
+    rows = db.execute(
+        query,
+        {"today_start": today_start, "today_end": today_end, "store_id": store_id},
+    ).fetchall()
     points = [
         HourlyDemandPoint(hour_bucket=f"{int(r[0]):02d}:00", order_count=int(r[1]))
         for r in rows
@@ -154,23 +187,33 @@ def fetch_hourly_demand(db: Session, store_id: int) -> HourlyDemandResponse:
 
 
 def fetch_daily_sales(db: Session, store_id: int) -> DailySalesResponse:
-    """Daily sales for last 7 days, scoped to store_id."""
-    seven_days_ago = get_current_utc() - timedelta(days=7)
+    """
+    Daily sales for the last 7 business days (today included), scoped to store_id.
 
-    query = text("""
+    The window is seven WHOLE local days rather than "168 hours ago", which would
+    put a half day at the left edge of the chart and make its average line wrong.
+    Rows are grouped by local calendar date, so each point is one shop day.
+    """
+    since, until = last_n_days_bounds_utc(7)
+    business_date = business_date_sql_expression("created_at")
+
+    query = text(f"""
         SELECT
-            DATE(created_at) as sales_date,
+            {business_date} as sales_date,
             COUNT(id) as total_orders,
             COALESCE(SUM(total_amount), 0) as gross_revenue,
             COALESCE(AVG(total_amount), 0) as average_order_value
         FROM orders
         WHERE created_at >= :since
+          AND created_at <  :until
           AND store_id = :store_id
-        GROUP BY DATE(created_at)
+        GROUP BY {business_date}
         ORDER BY sales_date ASC
     """)
 
-    rows = db.execute(query, {"since": seven_days_ago, "store_id": store_id}).fetchall()
+    rows = db.execute(
+        query, {"since": since, "until": until, "store_id": store_id}
+    ).fetchall()
     points = [
         DailySalesPoint(
             sales_date=str(r[0]),
@@ -188,10 +231,16 @@ def fetch_ingredient_forecast(db: Session, store_id: int) -> IngredientForecastR
     """
     Simple forecast based on last 7 days of this store's ingredient usage.
     No ML needed for MVP — just project forward using average daily usage.
+
+    The two comparison windows are whole local days (last 7 vs the 7 before), so
+    "this week" and "last week" are the same length and neither is clipped
+    mid-day. That matters more here than anywhere else: whatever forecasting
+    lands later inherits these buckets, and a three-hour-displaced history is not
+    something a model can be told about afterwards.
     """
     now = get_current_utc()
-    seven_days_ago = now - timedelta(days=7)
-    fourteen_days_ago = now - timedelta(days=14)
+    seven_days_ago, until = last_n_days_bounds_utc(7)
+    fourteen_days_ago, _ = last_n_days_bounds_utc(14)
 
     # Get this week's and last week's usage per ingredient (this store only)
     query = text("""
@@ -204,6 +253,7 @@ def fetch_ingredient_forecast(db: Session, store_id: int) -> IngredientForecastR
         JOIN orders o ON it.order_id = o.id
         JOIN ingredients i ON oi.ingredient_id = i.id
         WHERE o.created_at >= :last_week
+          AND o.created_at <  :until
           AND o.store_id = :store_id
         GROUP BY i.name
         ORDER BY this_week_usage DESC
@@ -212,11 +262,13 @@ def fetch_ingredient_forecast(db: Session, store_id: int) -> IngredientForecastR
     rows = db.execute(query, {
         "this_week": seven_days_ago,
         "last_week": fourteen_days_ago,
+        "until": until,
         "store_id": store_id,
     }).fetchall()
 
     items = []
-    tomorrow = now + timedelta(days=1)
+    # The forecast is FOR a business day, so it is named with a business date.
+    tomorrow = business_today() + timedelta(days=1)
     for r in rows:
         name = r[0]
         tw = int(r[1])
@@ -250,7 +302,7 @@ def fetch_ingredient_forecast(db: Session, store_id: int) -> IngredientForecastR
 
         items.append(ForecastItem(
             ingredient_name=name,
-            forecast_date=str(tomorrow.date()),
+            forecast_date=str(tomorrow),
             predicted_usage=round(predicted, 2),
             recent_avg_usage=round(avg_daily, 2),
             trend_direction=direction,

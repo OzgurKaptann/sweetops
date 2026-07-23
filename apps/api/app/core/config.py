@@ -85,6 +85,15 @@ class Settings(BaseSettings):
     # test/development configuration for non-browser clients.
     ALLOW_MISSING_WEBSOCKET_ORIGIN: bool = False
 
+    # ── Business timezone ────────────────────────────────────────────────────
+    # Storage stays UTC everywhere — every timestamp column is timestamptz and
+    # every write uses an aware UTC datetime. This setting affects REPORTING
+    # ONLY: which UTC instants make up "today", where a daily bucket starts and
+    # ends, and which local hour an order falls into. An IANA zone name resolved
+    # by the stdlib zoneinfo (see app/core/business_time.py) — an unknown name
+    # fails loudly at import, never silently falls back to UTC.
+    BUSINESS_TIMEZONE: str = "Europe/Istanbul"
+
     class Config:
         env_file = ".env"
 
