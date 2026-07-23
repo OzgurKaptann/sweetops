@@ -1,12 +1,16 @@
 """
 Public (customer-facing) menu.
 
-The catalog — products, ingredients, prices, recipes — is global: every branch
-sells the same waffle. ``stock_status`` is NOT: it is physical stock on one
-branch's shelves, so every route here needs to know which branch it is talking
-about.
+Nothing served here is global. ``products`` is what the branch has published
+(``store_products`` — see docs/CUSTOMER_MENU_SCOPING.md); ``stock_status`` is
+physical stock on that branch's shelves. Both need to know which branch they
+are talking about, so every route here does.
 
-There are two ways to know, and only two:
+The ingredient CATALOG (names, units, recipe quantities, prices) is still
+chain-wide — every branch builds the same waffle from the same definitions —
+but which of those a guest may pick is filtered by that branch's own stock.
+
+There are two ways to know the branch, and only two:
 
   QR-GATED   POST /resolve, POST /upsell, POST /validate (with qr_token)
              The scanned token resolves server-side to a store. This is what the
@@ -58,8 +62,9 @@ def read_menu(
 
     This route carries NO QR token — a bearer token must never appear in a URL
     (see `POST /public/menu/resolve`) — and therefore no store context. Its
-    ``stock_status`` fields are physical, so it resolves the single operational
-    store and fails closed with a Turkish 409 once a second branch is staffed.
+    ``products`` and ``stock_status`` fields both belong to one branch, so it
+    resolves the single operational store and fails closed with a Turkish 409
+    once a second branch is staffed.
     The customer app uses the QR-gated `POST /public/menu/resolve` variant, which
     is properly store-scoped; this ungated read remains for internal callers of
     a single-branch installation.
@@ -94,10 +99,16 @@ def read_menu_for_qr(
     menu. There is deliberately no numeric `store` parameter to manipulate — the
     store is DERIVED from the token, which is exactly what makes it trustworthy.
 
-    The catalog is one shared waffle menu, but `stock_status` is this table's own
-    branch: the same ingredient can read in_stock here and out_of_stock at the
-    branch across town, and the customer is told the truth about the kitchen that
-    will actually cook their waffle.
+    `products` is this branch's published menu — not the chain's `products`
+    table. A product nobody published here is absent, which is what keeps a
+    seed leftover or an interrupted test run's row off a guest's phone. An
+    unprovisioned branch returns an EMPTY product list and the customer app
+    shows a Turkish empty state; it never falls back to "everything".
+
+    `stock_status` is likewise this table's own branch: the same ingredient can
+    read in_stock here and out_of_stock at the branch across town, and the
+    customer is told the truth about the kitchen that will actually cook their
+    waffle.
 
     Each ingredient includes additive fields:
       stock_status             — "in_stock" | "low_stock" | "out_of_stock" (this store)

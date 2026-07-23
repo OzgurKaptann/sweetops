@@ -12,13 +12,30 @@ class OrderStatusEnum(str, Enum):
     DELIVERED = "DELIVERED"
     CANCELLED = "CANCELLED"
 
+# ── Customer order bounds ───────────────────────────────────────────────────
+# A guest ordering from a table is not an operator placing a wholesale order.
+# Unbounded quantities were reachable from the public endpoint: `quantity` was a
+# bare `int` with a default, so 0, -3 and 10_000_000 all validated. A negative
+# multiplied straight through calculate_consumed_quantity into a NEGATIVE stock
+# requirement — a "sale" that RELEASES stock and reduces the bill.
+#
+# These bounds are the outer edge of what a table can plausibly order in one
+# submission, not a UI preference: the customer app offers a smaller range still
+# (MAX_QUANTITY in order-selection.ts). A shop that genuinely needs 30 of one
+# item raises the constant deliberately; nothing here should be the thing that
+# silently allows it.
+MAX_ITEM_QUANTITY = 20        # portions of one product on one line
+MAX_INGREDIENT_PORTIONS = 5   # portions of one ingredient on one product
+MAX_ORDER_ITEMS = 20          # lines in one submission
+
+
 class OrderItemIngredientCreate(BaseModel):
     ingredient_id: int
-    quantity: int = 1
+    quantity: int = Field(1, ge=1, le=MAX_INGREDIENT_PORTIONS)
 
 class OrderItemCreate(BaseModel):
     product_id: int
-    quantity: int = 1
+    quantity: int = Field(1, ge=1, le=MAX_ITEM_QUANTITY)
     ingredients: List[OrderItemIngredientCreate] = []
 
 class OrderCreateRequest(BaseModel):
@@ -30,7 +47,7 @@ class OrderCreateRequest(BaseModel):
     qr_token: Optional[str] = None
     store_id: Optional[int] = None
     table_id: Optional[int] = None
-    items: List[OrderItemCreate]
+    items: List[OrderItemCreate] = Field(..., min_length=1, max_length=MAX_ORDER_ITEMS)
 
 class OrderCreatedResponse(BaseSchema):
     order_id: int

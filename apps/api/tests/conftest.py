@@ -38,8 +38,10 @@ from app.models.order_item import OrderItem
 from app.models.order_item_ingredient import OrderItemIngredient
 from app.models.order_status_event import OrderStatusEvent
 from app.models.owner_decision import OwnerDecision
+from app.models.product import Product
 from app.models.role import Role
 from app.models.store import Store
+from app.models.store_product import StoreProduct
 from app.models.table import Table
 from app.models.table_qr_token import TableQrToken
 from app.models.user import User
@@ -53,6 +55,11 @@ from app.services import auth_service, qr_token_service
 
 # Store id used by the legacy order path in the pre-existing test suite.
 DEFAULT_STORE_ID = 1
+# Product id the pre-existing suite orders. Since migration a9e4c7b25d13 a
+# product is orderable at a store only if that store PUBLISHES it, so a store a
+# test creates has to be given a menu the same way a real shop would — see
+# ``offer_product`` and the fixtures below.
+DEFAULT_PRODUCT_ID = 1
 DEFAULT_PASSWORD = "testpassw0rd"
 
 
@@ -126,6 +133,137 @@ def client() -> TestClient:
     Thread-safe — multiple threads may call it concurrently.
     """
     return TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# Menu publication (store-scoped customer catalog)
+# ---------------------------------------------------------------------------
+
+def offer_product(
+    db: Session,
+    store_id: int,
+    product_id: int = DEFAULT_PRODUCT_ID,
+    *,
+    is_available: bool = True,
+    sort_order: int = 0,
+) -> StoreProduct | None:
+    """
+    Publish a product on a store's customer menu (idempotent).
+
+    A test that creates a store is playing the part of a shop being set up, and
+    a shop with no menu sells nothing: the public menu is empty and every order
+    against it is refused. So every fixture that creates a store calls this,
+    exactly as ``scripts/seed_demo_data.py`` does for the demo branches.
+
+    Returns None when the store or the product does not exist — a fresh,
+    unseeded database is not this helper's problem to solve, and inserting
+    would only turn a clear "product not found" into a foreign-key error.
+    """
+    if db.get(Store, store_id) is None or db.get(Product, product_id) is None:
+        return None
+
+    offering = (
+        db.query(StoreProduct)
+        .filter(
+            StoreProduct.store_id == store_id,
+            StoreProduct.product_id == product_id,
+        )
+        .first()
+    )
+    if offering is None:
+        offering = StoreProduct(
+            store_id=store_id,
+            product_id=product_id,
+            is_available=is_available,
+            sort_order=sort_order,
+        )
+        db.add(offering)
+    else:
+        offering.is_available = is_available
+        offering.sort_order = sort_order
+    db.commit()
+    db.refresh(offering)
+    return offering
+
+
+def withdraw_product(db: Session, store_id: int, product_id: int) -> None:
+    """Take a product back off a store's menu (delete the publication row)."""
+    db.query(StoreProduct).filter(
+        StoreProduct.store_id == store_id,
+        StoreProduct.product_id == product_id,
+    ).delete(synchronize_session=False)
+    db.commit()
+
+
+def purge_menu_for_store(db: Session, store_id: int) -> None:
+    """Drop every publication row of a store (its offerings FK to the store)."""
+    db.query(StoreProduct).filter(
+        StoreProduct.store_id == store_id
+    ).delete(synchronize_session=False)
+    db.commit()
+
+
+def make_product(
+    db: Session,
+    *,
+    base_price: Decimal = Decimal("100.00"),
+    name: str | None = None,
+    category: str = "Test",
+    is_active: bool = True,
+    offered_at_store_id: int | None = DEFAULT_STORE_ID,
+) -> Product:
+    """
+    Create a catalog product, optionally published on one store's menu.
+
+    ``offered_at_store_id=None`` creates exactly the shape this branch exists to
+    contain: a real row in ``products`` that NO branch has published. It must be
+    invisible on every customer menu and unorderable everywhere — which is what
+    makes it the honest stand-in for the ``TestWaffle_<hex>`` debris, without any
+    test ever matching on a name.
+    """
+    uid = uuid.uuid4().hex[:8]
+    product = Product(
+        name=name if name is not None else f"TestProduct_{uid}",
+        category=category,
+        base_price=base_price,
+        is_active=is_active,
+    )
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    if offered_at_store_id is not None:
+        offer_product(db, offered_at_store_id, product.id)
+    return product
+
+
+def cleanup_product(db: Session, product_id: int) -> None:
+    """Delete a product and every publication row pointing at it."""
+    db.query(StoreProduct).filter(
+        StoreProduct.product_id == product_id
+    ).delete(synchronize_session=False)
+    db.query(Product).filter(
+        Product.id == product_id
+    ).delete(synchronize_session=False)
+    db.commit()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _publish_default_menu():
+    """
+    Make sure the store/product the pre-existing suite orders is a published
+    menu item.
+
+    Before migration a9e4c7b25d13 any product id that existed could be ordered
+    anywhere; now it has to be on the branch's menu. This fixture provisions
+    that one pair once per session so the ~30 order-placing test modules keep
+    exercising the pipeline they were written for, rather than every one of them
+    growing a menu-setup step.
+    """
+    session = SessionLocal()
+    try:
+        offer_product(session, DEFAULT_STORE_ID, DEFAULT_PRODUCT_ID)
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +748,10 @@ def make_store_table(
     )
     db.add(table)
     db.commit()
+    # A branch with a table but no menu can be scanned and sells nothing. Give
+    # it the default product so the QR-path tests exercise ordering rather than
+    # the empty-menu refusal; the scoping tests publish their own products.
+    offer_product(db, store.id, DEFAULT_PRODUCT_ID)
     db.refresh(store)
     db.refresh(table)
     return store, table
@@ -642,6 +784,8 @@ def make_store_table_token(
 
 def cleanup_store_table(db: Session, store_id: int, table_id: int) -> None:
     """Delete QR tokens, table and store created by make_store_table_token."""
+    # Menu offerings FK to the store, so they pin it exactly as its tables do.
+    purge_menu_for_store(db, store_id)
     db.query(TableQrToken).filter(
         TableQrToken.table_id == table_id
     ).delete(synchronize_session=False)
@@ -769,11 +913,16 @@ def make_store(db: Session):
         db.commit()
         db.refresh(store)
         created_ids.append(store.id)
+        # Give the new branch the default product, so a test that places an
+        # order in it is testing store isolation rather than an empty menu.
+        offer_product(db, store.id, DEFAULT_PRODUCT_ID)
         return store
 
     yield _make
 
     for sid in created_ids:
+        # Menu offerings FK to the store — they pin it like everything below.
+        purge_menu_for_store(db, sid)
         # Cashier shifts first: they FK to the store and its users, so a leftover
         # shift would block both the user and the store delete below.
         purge_shifts_for_store(db, sid)

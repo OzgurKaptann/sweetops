@@ -144,27 +144,47 @@ unit suite; **still NEEDS_MANUAL_BROWSER_CONFIRMATION** on a real tablet.
 ---
 
 ### P0-D · `feat/customer-real-menu` — a menu a shop can actually sell from
-**Fixes:** F-01, F-02, F-23 · **Effort:** M
+**Fixes:** F-01, F-02, F-23 · **Effort:** M · **Status: PARTIALLY DONE**
+(scoping + selection delivered on `fix/customer-menu-scope-and-selection`;
+the multi-item cart is still open)
 
 Fourteen products exist; a guest can order one. Eight of the fourteen are test
 debris in a customer-facing table. These must be fixed together — fixing the first
 alone exposes the second to guests.
 
 **Scope**
-- Render the real product list: product selection, quantity, and multiple lines per
-  order (the order API already accepts an items array).
-- Give the catalog an activation and ownership boundary so test debris and retired
-  items cannot reach a guest. **This requires a schema decision** — take it
+- ⚠️ Render the real product list: product selection ✅, quantity ✅, and multiple
+  lines per order ❌ — the order API accepts an items array, but the customer
+  screen still submits exactly one line. **This is the remaining half of P0-D.**
+- ✅ Give the catalog an activation and ownership boundary so test debris and
+  retired items cannot reach a guest. **This requires a schema decision** — take it
   explicitly, in this branch, with a migration, or defer the branch. Do not smuggle
-  it in.
-- Clean the existing `TestWaffle_*` debris and document how it got there.
+  it in. — Taken explicitly: migration `a9e4c7b25d13` adds `products.is_active`
+  (chain-wide retirement) and a `store_products` publication table. The menu and
+  order creation are both joins through it, scoped to the store the QR token
+  resolved to. Nothing was backfilled, so the catalog fails closed.
+- ⚠️ Clean the existing `TestWaffle_*` debris and document how it got there. — How
+  it got there is documented (a test helper that created products and cleaned up
+  only the product; it now delegates to a publishing/withdrawing conftest helper),
+  and the rows are inert and unreachable. **The eight rows are still in the
+  development database** — deleting them is a database chore, deliberately not
+  done from application code.
+
+**Delivered:** [CUSTOMER_MENU_SCOPING.md](CUSTOMER_MENU_SCOPING.md) — the model,
+where it is enforced, the quantity bounds (server `ge=1` with explicit maxima;
+a negative quantity previously produced a *negative* stock requirement), and 14
+backend + 18 customer-web tests, none of which match on a product name.
 
 **Not in this branch:** no per-store pricing (name it, defer it to P1-B), no cart
 persistence across sessions, no order notes/allergens (P1-C), no upsell rework, no
 combo redesign beyond fixing the comparator (F-19 rides along, it is three lines).
+The delivered branch was narrower still: **no cart, no onboarding surface, no QR
+management, and F-19 was left alone** to keep the diff to scoping and selection.
 
 **Done when:** a guest at a table can order two waffles and a Türk Kahvesi in one
-submission, and no `TestWaffle` is reachable from any surface.
+submission, and no `TestWaffle` is reachable from any surface. — **Half met:** no
+`TestWaffle` is reachable from any surface; the single submission still cannot
+carry both items.
 
 ---
 
