@@ -114,6 +114,9 @@ export default function OwnerDashboard() {
             </div>
             <div className="flex items-center gap-4">
               <span className="text-xs text-gray-400 hidden sm:block">{now}</span>
+              <a href="/setup" className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors font-medium">
+                Menü ve Masalar →
+              </a>
               <a href="/inventory" className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors font-medium">
                 Stok Yönetimi →
               </a>

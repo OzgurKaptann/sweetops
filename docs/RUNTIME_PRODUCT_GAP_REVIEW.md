@@ -1011,20 +1011,40 @@ event. Nothing verifies:
 ## 11. Commercial readiness
 
 ### F-13 · There is no way to onboard a shop
-**Lens:** PM / CTO · **Severity:** blocker · **Effort:** L
+**Lens:** PM / CTO · **Severity:** blocker · **Effort:** L ·
+**Status: PARTIALLY ADDRESSED** — `feat/store-setup-and-menu-provisioning`
+
+> **Update (v1 store setup).** An authenticated, role-gated, store-scoped setup
+> surface now exists: `/setup` in owner-web over `/owner/setup/status`,
+> `/owner/menu/*` and `/owner/tables/*`. An OWNER/MANAGER can create and edit
+> products, publish/withdraw them from **their own branch's** menu, mark an item
+> sold out for the day, set menu order, add and rename tables, and issue or rotate a
+> table's QR sticker — none of which required a developer to be reachable before. A
+> readiness checklist explains why the customer menu is empty, which is the specific
+> support call the fail-closed menu would otherwise generate. No migration, no new
+> dependency; 35 backend + 48 owner-web tests. See
+> [STORE_SETUP_AND_MENU_PROVISIONING.md](STORE_SETUP_AND_MENU_PROVISIONING.md).
+>
+> **The finding is not closed.** Creating a *store*, creating a staff account or
+> resetting a password, authoring an ingredient/recipe, setting a per-store price,
+> and printing a QR sheet all still require a script on the database host. The
+> severity stays a blocker for full self-service onboarding; what changed is that the
+> day-to-day acts a shop performs constantly — menu and tables — no longer need the
+> vendor.
 
 This is the finding that decides whether SweetOps can be sold, and it is worth
 stating flatly: **a new customer cannot be set up without a developer editing Python
 and running shell commands on the database host.**
 
-| To create a… | Supported path today |
-| --- | --- |
-| Store | **None.** `Store(...)` is constructed only in `apps/api/seed.py`, `scripts/seed_demo_data.py`, a migration, and test fixtures |
-| Table | **None** outside those same scripts |
-| Product / price | **None** — no admin endpoint, no owner UI, no CLI |
-| Ingredient / recipe | **None** outside the seeds |
-| Staff account | `python scripts/manage_staff_users.py create --username … --role … --store-id …` |
-| QR token for a table | `python scripts/manage_qr_tokens.py issue --table-id 5` |
+| To create a… | Supported path today | After v1 store setup |
+| --- | --- | --- |
+| Store | **None.** `Store(...)` is constructed only in `apps/api/seed.py`, `scripts/seed_demo_data.py`, a migration, and test fixtures | unchanged |
+| Table | **None** outside those same scripts | **owner-web `/setup`** (add, rename) |
+| Product / price | **None** — no admin endpoint, no owner UI, no CLI | **owner-web `/setup`** (chain catalog + per-branch publication); per-*store* price still none (P1-B) |
+| Menu (what a branch sells) | **None** outside `seed_demo_data.py` | **owner-web `/setup`** (publish / withdraw / sold-out / order) |
+| Ingredient / recipe | **None** outside the seeds | unchanged |
+| Staff account | `python scripts/manage_staff_users.py create --username … --role … --store-id …` | unchanged |
+| QR token for a table | `python scripts/manage_qr_tokens.py issue --table-id 5` | **owner-web `/setup`** (issue + rotate; the CLI still owns revoke-without-replacement) |
 
 The two CLIs that do exist are well built — `getpass` so passwords never reach shell
 history, raw QR tokens printed exactly once and never recoverable, destructive
@@ -1073,7 +1093,7 @@ Ordered by severity, then by how directly they block a paying pilot.
 
 | ID | Lens | Finding | Sev | Eff | § |
 | --- | --- | --- | --- | --- | --- |
-| **F-13** | PM/CTO | No way to onboard a store, catalog, table or price without editing Python | blocker | L | 11 |
+| **F-13** | PM/CTO | No way to onboard a store, catalog, table or price without editing Python — **PARTLY FIXED** on `feat/store-setup-and-menu-provisioning` (menu, tables and table QR are now owner-web actions; store creation, staff accounts, recipes, per-store prices and a printable QR sheet are not) | blocker | L | 11 |
 | **F-01** | PM | ~~Customer can order only `products[0]`, quantity 1~~ **PARTLY FIXED** — `fix/customer-menu-scope-and-selection` (explicit product choice + bounded quantity; multi-item cart still open) | blocker | M | 3 |
 | **F-03** | Analyst | Two conflicting "revenue" definitions on one owner page | blocker | M | 6 |
 | **F-04** | Analyst/DataEng | ~~Every day boundary and hour bucket is UTC; the shop is UTC+3~~ **FIXED** — `fix/business-timezone` | blocker | M | 6 |
@@ -1128,7 +1148,10 @@ consistent and thorough; and the readiness documentation is honest to the point 
 listing thirteen of its own failings. That is a genuine operational core and it is
 worth more than most of what gets called an MVP.
 
-What stops it: a shop cannot be *set up* without a developer (F-13); a guest can order
+What stops it: a shop cannot be fully *set up* without a developer (F-13 — its menu,
+tables and table QR codes now can be, on
+`feat/store-setup-and-menu-provisioning`, but its store row and its staff accounts
+still cannot); a guest can order
 only one hard-coded product while the catalog holds fourteen including test debris
 (F-01, F-02); ~~the kitchen display can silently drop tickets after a Wi-Fi blip while
 still showing "Canlı"~~ (F-05, fixed on `fix/kitchen-live-resync`); the owner sees two

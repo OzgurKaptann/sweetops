@@ -189,22 +189,49 @@ carry both items.
 ---
 
 ### P0-E · `feat/store-onboarding` — a shop can be set up without a developer
-**Fixes:** F-13 · **Effort:** L
+**Fixes:** F-13 · **Effort:** L ·
+**Status: PARTIALLY DONE** — branch `feat/store-setup-and-menu-provisioning` (v1)
+
+> **Delivered (v1).** An authenticated, role-gated, store-scoped setup surface:
+> `/owner/setup/status`, `/owner/menu/*` and `/owner/tables/*` in the API
+> ([`owner_setup.py`](../apps/api/app/routers/owner_setup.py) +
+> [`store_setup_service.py`](../apps/api/app/services/store_setup_service.py)), and
+> `/setup` in owner-web. An OWNER/MANAGER can now create and edit catalog products,
+> publish and withdraw them from **their own branch's** menu, switch an item off for
+> the day, set menu order, add and rename tables, and issue or rotate a table's QR
+> sticker. Two new permissions (`setup:read`, `setup:manage`) held by OWNER/MANAGER
+> only. A readiness checklist answers the question a fail-closed customer menu
+> cannot: *why is my menu empty?* **No migration, no new dependency.** 35 backend +
+> 48 owner-web tests. See
+> [STORE_SETUP_AND_MENU_PROVISIONING.md](STORE_SETUP_AND_MENU_PROVISIONING.md).
+>
+> **Still open in this phase:** creating a **store** (still a seed/psql act); staff
+> accounts and password resets (`manage_staff_users.py` remains the only supported
+> path); a printable QR sheet; ingredient/recipe authoring; per-store pricing (P1-B);
+> closing/retiring a table (`tables` has no `is_active` column); and any guided
+> onboarding wizard. The two CLIs still exist and are still the supported path for
+> what they cover.
 
 The largest single piece of unbuilt work, and the one that decides whether there can
 be a second customer. Today: creating a store, a table, a product or a price requires
 editing Python on the database host.
 
 **Scope**
-- An authenticated, role-gated administration surface for store, tables, products and
-  prices, and ingredients/recipes.
-- Bring the two existing CLIs (`manage_staff_users.py`, `manage_qr_tokens.py`) into
+- ⚠️ An authenticated, role-gated administration surface for store, tables, products and
+  prices, and ingredients/recipes. — **Partly delivered:** tables ✅, products ✅ (name,
+  category, price, active state, per-branch publication/availability/order),
+  store ❌, per-store prices ❌ (P1-B), ingredients/recipes ❌.
+- ⚠️ Bring the two existing CLIs (`manage_staff_users.py`, `manage_qr_tokens.py`) into
   the same authenticated surface — staff creation, password reset, session revoke,
   QR issue/rotate/revoke. Preserve their existing safety properties exactly:
   passwords never in argv, raw QR tokens printed once and never recoverable,
-  destructive operations keyed on primary key not display prefix.
-- A printable QR sheet per table, since the current path prints a raw token to a
-  terminal.
+  destructive operations keyed on primary key not display prefix. — **QR issue and
+  rotate are now in the authenticated surface**, with the safety properties intact
+  (the raw link is returned exactly once and is unrecoverable, so there is
+  deliberately no "show QR link" endpoint). Revoke-without-replacement, and all of
+  `manage_staff_users.py`, are untouched.
+- ❌ A printable QR sheet per table, since the current path prints a raw token to a
+  terminal. — Not built; the link is copyable text in a one-time dialog.
 
 **Not in this branch:** no chain-level multi-store console (P1-B), no supplier or
 purchase-order concepts, no billing, no self-service signup — this is *vendor-assisted
@@ -212,6 +239,8 @@ onboarding made possible without a developer*, not a SaaS signup funnel.
 
 **Done when:** a new waffle shop is fully operational — store, tables, QR codes,
 menu, prices, staff accounts — without anyone opening an editor or a psql prompt.
+— **Not yet met.** Tables, QR codes and the menu are now self-service; the store row
+and the staff accounts are not.
 
 ---
 

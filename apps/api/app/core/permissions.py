@@ -41,6 +41,21 @@ PERM_PAYMENTS_REFUND = "payments:refund"
 PERM_INVENTORY_READ = "inventory:read"
 PERM_INVENTORY_ADJUST = "inventory:adjust"
 
+# Store setup / menu provisioning permissions.
+#   setup:read   — view the branch's setup readiness, its catalog publication
+#                  state and its tables. Read-only.
+#   setup:manage — create/edit catalog products, publish or withdraw them from
+#                  THIS branch's customer menu, switch an item off for the day,
+#                  reorder the menu, add a table, rotate a table's QR token.
+#
+# Deliberately its own authority rather than a reuse of ``owner:read`` /
+# ``inventory:adjust``. Publishing decides what a guest can order and rotating a
+# QR invalidates a printed sticker: neither is a stock movement and neither is a
+# read. A future role that may count the freezer but must not rewrite the menu
+# then already exists as a matrix change rather than a router change.
+PERM_SETUP_READ = "setup:read"
+PERM_SETUP_MANAGE = "setup:manage"
+
 # ── Matrix ───────────────────────────────────────────────────────────────────
 # MANAGER matches OWNER for current operational functionality. Neither is
 # granted any user-management capability here — that is a future authenticated
@@ -56,6 +71,8 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         PERM_PAYMENTS_REFUND,
         PERM_INVENTORY_READ,
         PERM_INVENTORY_ADJUST,
+        PERM_SETUP_READ,
+        PERM_SETUP_MANAGE,
     },
     ROLE_MANAGER: {
         PERM_OWNER_READ,
@@ -67,6 +84,8 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         PERM_PAYMENTS_REFUND,
         PERM_INVENTORY_READ,
         PERM_INVENTORY_ADJUST,
+        PERM_SETUP_READ,
+        PERM_SETUP_MANAGE,
     },
     # KITCHEN sees what stock is left so it can flag a shortage, but cannot
     # rewrite physical stock: a cook correcting the count is exactly the
