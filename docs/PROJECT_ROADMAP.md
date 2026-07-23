@@ -52,7 +52,20 @@ migrations, and frontend surfaces:
   (one with a discrepancy), all inventory threshold states, and stock
   receipts/waste/adjustments/transfers/counts. Idempotent, demo-scoped, and
   non-destructive: it drives the existing services so the reconcilers stay green
-  and non-demo data is never touched. See `docs/DEMO_SEED_DATA.md`.
+  and non-demo data is never touched. See [DEMO_SEED_DATA.md](DEMO_SEED_DATA.md).
+- **Production-readiness hardening** — the repository is documented, verifiable,
+  and safe to run, demo, and review:
+  [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) (setup, environment
+  checklist, migration/seed/test/reconciliation workflows, a practical security
+  review, deployment and rollback checklists, and an explicit list of
+  non-production limitations), [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
+  (pre-merge tick-list plus manual browser smoke checks), and
+  [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) (day-to-day operation,
+  inspection queries, dirty-database recovery, and what not to do). Audited
+  `.env.example` files at the repo root and in `apps/api`, and a read-only
+  `scripts/verify_release_readiness.py` that checks required docs and scripts,
+  a single Alembic head, doc links, merge markers, and committed secrets.
+  Documentation and verification only — no product behaviour was changed.
 
 App surfaces: `customer-web`, `kitchen-web`, `cashier-web`, `owner-web`, and the
 `apps/api` FastAPI backend.
@@ -61,15 +74,21 @@ App surfaces: `customer-web`, `kitchen-web`, `cashier-web`, `owner-web`, and the
 
 ## 2. Near-term MVP Completion
 
-Work that finishes the MVP without expanding the product's scope:
+**This list is now empty — the MVP is complete.** Every item that finished the
+MVP without expanding the product's scope has shipped and moved to section 1:
 
-- **Production readiness hardening** — configuration, error handling, and
-  operational robustness for a demonstrable deployment.
+- ✅ Owner operational dashboard
+- ✅ Deterministic demo and sample data
+- ✅ Production-readiness hardening
 
-_Seed demo and sample data is now implemented — see section 1._
+The repository is at **release-candidate readiness**. It is **not yet a hosted
+production deployment**: there is no CI, no monitoring or alerting, no managed
+secret storage, and no backup automation. These are infrastructure concerns
+rather than product scope, and the full, honest gap list is section 14 of
+[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).
 
-Forecasting is **not** in this list. It is deferred until enough reliable
-operational data exists.
+Forecasting is **not** in this list, and never was. It is deferred until enough
+reliable operational data exists — see the closing section.
 
 ---
 
