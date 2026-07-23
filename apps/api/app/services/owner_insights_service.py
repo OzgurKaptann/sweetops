@@ -1,11 +1,19 @@
 """
 Owner Insights Service — Value perception features.
 Critical alerts, prep time, trending ingredients, popular combos.
+
+Time scoping:
+  Storage stays UTC. Every "last N days" window here is N WHOLE BUSINESS days
+  (app.core.business_time) rather than N×24 hours back from now, so a week-over-
+  week comparison compares two equal-length local weeks instead of two windows
+  that each start mid-afternoon. Day counts used as denominators (``active_days``)
+  count LOCAL calendar days for the same reason.
 """
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text, case, literal_column
-from datetime import datetime, timezone, timedelta
 from decimal import Decimal
+
+from app.core.business_time import business_date_sql_expression, last_n_days_bounds_utc
 
 from app.models.order import Order
 from app.models.order_item import OrderItem
@@ -26,11 +34,10 @@ def fetch_critical_alerts(db: Session, store_id: int):
     denominator come from different branches. The stock join is therefore ON
     (ingredient, store), not on ingredient alone.
     """
-    now = datetime.now(timezone.utc)
-    seven_days_ago = now - timedelta(days=7)
+    seven_days_ago, until = last_n_days_bounds_utc(7)
 
-    # Get daily avg usage and revenue per ingredient over last 7 days
-    daily_stats = db.execute(text("""
+    # Get daily avg usage and revenue per ingredient over last 7 business days
+    daily_stats = db.execute(text(f"""
         SELECT
             oi.ingredient_id,
             i.name,
@@ -43,7 +50,9 @@ def fetch_critical_alerts(db: Session, store_id: int):
             COALESCE(s.on_hand_quantity, 0) as on_hand_qty,
             COALESCE(s.reserved_quantity, 0) as reserved_qty,
             COALESCE(s.reorder_level, 0) as reorder_lvl,
-            COUNT(DISTINCT DATE(o.created_at)) as active_days,
+            -- LOCAL calendar days: this is the denominator of every "per day"
+            -- figure below, so a UTC day count would skew the daily average.
+            COUNT(DISTINCT {business_date_sql_expression('o.created_at')}) as active_days,
             COUNT(oi.id) as total_selections,
             COALESCE(SUM(oi.price_modifier), 0) as total_revenue
         FROM order_item_ingredients oi
@@ -54,12 +63,13 @@ def fetch_critical_alerts(db: Session, store_id: int):
                ON s.ingredient_id = i.id
               AND s.store_id      = :store_id
         WHERE o.created_at >= :since
+          AND o.created_at <  :until
           AND o.store_id = :store_id
           AND o.status IN ('DELIVERED', 'READY', 'IN_PREP', 'NEW')
         GROUP BY oi.ingredient_id, i.name, i.category, i.unit,
                  s.available_quantity, s.on_hand_quantity, s.reserved_quantity, s.reorder_level
         ORDER BY stock_qty ASC
-    """), {"since": seven_days_ago, "store_id": store_id}).fetchall()
+    """), {"since": seven_days_ago, "until": until, "store_id": store_id}).fetchall()
 
     alerts = []
     for row in daily_stats:
@@ -201,10 +211,13 @@ def fetch_prep_time_stats(db: Session, store_id: int):
 def fetch_trending_ingredients(db: Session, store_id: int):
     """
     Compare this week vs last week ingredient usage for this store.
+
+    Both weeks are seven whole LOCAL days, split on a local midnight — otherwise
+    "this week" and "last week" each straddle two shop days at their edges and
+    the percentage change is an artefact of the query time.
     """
-    now = datetime.now(timezone.utc)
-    this_week_start = now - timedelta(days=7)
-    last_week_start = now - timedelta(days=14)
+    this_week_start, week_end = last_n_days_bounds_utc(7)
+    last_week_start, _ = last_n_days_bounds_utc(14)
 
     def usage_in_range(start, end):
         rows = db.execute(text("""
@@ -223,7 +236,7 @@ def fetch_trending_ingredients(db: Session, store_id: int):
         """), {"start": start, "end": end, "store_id": store_id}).fetchall()
         return {row[0]: {"name": row[1], "category": row[2], "count": int(row[3])} for row in rows}
 
-    this_week = usage_in_range(this_week_start, now)
+    this_week = usage_in_range(this_week_start, week_end)
     last_week = usage_in_range(last_week_start, this_week_start)
 
     # All ingredient IDs across both weeks
@@ -353,9 +366,8 @@ def fetch_value_summary(db: Session, store_id: int):
     One-screen value proof for the owner.
     Shows ₺ protected, ₺ at risk, and top insights — scoped to this store.
     """
-    now = datetime.now(timezone.utc)
-    seven_days_ago = now - timedelta(days=7)
-    fourteen_days_ago = now - timedelta(days=14)
+    seven_days_ago, week_end = last_n_days_bounds_utc(7)
+    fourteen_days_ago, _ = last_n_days_bounds_utc(14)
 
     # === Revenue this week ===
     rev_result = db.execute(text("""
@@ -364,9 +376,10 @@ def fetch_value_summary(db: Session, store_id: int):
             COALESCE(SUM(total_amount), 0) as revenue
         FROM orders
         WHERE created_at >= :since
+          AND created_at <  :until
           AND store_id = :store_id
           AND status IN ('DELIVERED', 'READY', 'IN_PREP', 'NEW')
-    """), {"since": seven_days_ago, "store_id": store_id}).fetchone()
+    """), {"since": seven_days_ago, "until": week_end, "store_id": store_id}).fetchone()
 
     this_week_orders = int(rev_result[0]) if rev_result else 0
     this_week_revenue = float(rev_result[1]) if rev_result else 0

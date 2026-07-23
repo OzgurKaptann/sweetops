@@ -93,10 +93,10 @@ class DecisionMetrics(BaseModel):
         on today is counted.
 
     decisions_acknowledged
-        Count where acknowledged_at::date = target_date.
+        Count where acknowledged_at (business-local date) = target_date.
 
     decisions_completed
-        Count where completed_at::date = target_date.
+        Count where completed_at (business-local date) = target_date.
 
     completion_rate
         decisions_completed / decisions_seen.
@@ -161,16 +161,16 @@ class RevenueProtectionMetrics(BaseModel):
     Measures whether stock-risk signals translate into real revenue protection.
 
     stock_risk_triggered
-        stock_risk decisions where created_at::date = target_date.
+        stock_risk decisions where created_at (business-local date) = target_date.
         (New signals detected today.)
 
     stock_risk_resolved
-        stock_risk decisions where completed_at::date = target_date.
+        stock_risk decisions where completed_at (business-local date) = target_date.
         (Note: a signal triggered yesterday may be resolved today.)
 
     estimated_revenue_saved
         SUM(estimated_revenue_saved) for decisions where:
-          completed_at::date = target_date
+          completed_at (business-local date) = target_date
           AND resolution_quality IN ('good', 'partial')
         Failed / unattributed completions contribute 0.
 

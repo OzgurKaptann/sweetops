@@ -7,6 +7,15 @@ when it is high or low.
 
 Served via GET /owner/metrics/dictionary so the dashboard can render
 inline help text from the same source that governs computation.
+
+Day boundary
+------------
+"Today" and ``target_date`` everywhere below mean a BUSINESS calendar day in the
+configured business timezone (``BUSINESS_TIMEZONE``, default Europe/Istanbul) —
+not a UTC day. Timestamps are still STORED in UTC; only the bucketing is local.
+For a shop in Istanbul the day therefore runs 00:00–24:00 local, so the late
+evening trade counts on the day it was actually sold. See
+``app/core/business_time.py``.
 """
 from app.schemas.metrics import MetricDefinition, MetricDictionaryResponse
 
@@ -171,9 +180,9 @@ METRIC_DEFINITIONS: list[MetricDefinition] = [
             "A decision created before today but acted on today is included."
         ),
         calculation=(
-            "COUNT(*) WHERE acknowledged_at::date = target_date\n"
-            "           OR completed_at::date = target_date\n"
-            "           OR (status = 'dismissed' AND updated_at::date = target_date)"
+            "COUNT(*) WHERE acknowledged_at (business-local date) = target_date\n"
+            "           OR completed_at (business-local date) = target_date\n"
+            "           OR (status = 'dismissed' AND updated_at (business-local date) = target_date)"
         ),
         edge_cases=[
             "0 is a valid value — no decisions were acted on. Does not imply no decisions exist.",
@@ -202,7 +211,7 @@ METRIC_DEFINITIONS: list[MetricDefinition] = [
             "Acknowledgement means the owner has seen the signal and intends to act."
         ),
         calculation=(
-            "COUNT(*) WHERE acknowledged_at::date = target_date"
+            "COUNT(*) WHERE acknowledged_at (business-local date) = target_date"
         ),
         edge_cases=[
             "A decision acknowledged today may be completed on a future day.",
@@ -230,7 +239,7 @@ METRIC_DEFINITIONS: list[MetricDefinition] = [
             "Completion means an action was taken in the real world."
         ),
         calculation=(
-            "COUNT(*) WHERE completed_at::date = target_date"
+            "COUNT(*) WHERE completed_at (business-local date) = target_date"
         ),
         edge_cases=[
             "A decision may be completed on a different day from when it was triggered.",
@@ -295,7 +304,7 @@ METRIC_DEFINITIONS: list[MetricDefinition] = [
             "AVG(\n"
             "  EXTRACT(EPOCH FROM (first_ready_event.created_at - orders.created_at)) / 60\n"
             ")\n"
-            "scoped to orders where created_at::date = target_date AND status NOT IN ('NEW','IN_PREP','CANCELLED')\n"
+            "scoped to orders where created_at (business-local date) = target_date AND status NOT IN ('NEW','IN_PREP','CANCELLED')\n"
             "minimum sample: 3 orders"
         ),
         edge_cases=[
@@ -387,7 +396,7 @@ METRIC_DEFINITIONS: list[MetricDefinition] = [
             "within the next 12 hours based on current velocity."
         ),
         calculation=(
-            "COUNT(*) WHERE type = 'stock_risk' AND created_at::date = target_date"
+            "COUNT(*) WHERE type = 'stock_risk' AND created_at (business-local date) = target_date"
         ),
         edge_cases=[
             "The same ingredient can trigger multiple signals in a day if the decision "
@@ -418,7 +427,7 @@ METRIC_DEFINITIONS: list[MetricDefinition] = [
         ),
         calculation=(
             "COUNT(*) WHERE type = 'stock_risk' AND status = 'completed' "
-            "AND completed_at::date = target_date"
+            "AND completed_at (business-local date) = target_date"
         ),
         edge_cases=[
             "A decision triggered yesterday can be resolved today — this is expected.",
@@ -451,7 +460,7 @@ METRIC_DEFINITIONS: list[MetricDefinition] = [
             "SUM(estimated_revenue_saved)\n"
             "WHERE type = 'stock_risk'\n"
             "  AND status = 'completed'\n"
-            "  AND completed_at::date = target_date\n"
+            "  AND completed_at (business-local date) = target_date\n"
             "  AND resolution_quality IN ('good', 'partial')\n"
             "Failed / NULL resolution_quality: excluded (not credited)"
         ),

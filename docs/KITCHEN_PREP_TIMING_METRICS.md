@@ -137,8 +137,15 @@ average_time_to_ready_seconds_today
 p95_prep_seconds_today
 ```
 
-"Today" is keyed on `orders.created_at::date = today (UTC)`, matching the day
-boundary the owner-metrics layer already uses. **Averages are computed only from
+"Today" is the **business** calendar day in `BUSINESS_TIMEZONE` (default
+`Europe/Istanbul`), matching the day boundary the owner-metrics and dashboard layers
+use. `orders.created_at` is still stored in UTC; the window is the half-open UTC
+interval covering the local day (`created_at >= day_start AND created_at < day_end`),
+so a rush finished at 01:00 local is summarised on the shift that cooked it rather
+than on the previous day. See
+[`app/core/business_time.py`](../apps/api/app/core/business_time.py). The **live**
+active board is deliberately not windowed — an order still cooking across the day
+boundary stays on it. **Averages are computed only from
 real completed prep timing.** With no completed orders today, every completed
 figure is `null` (never `0`-as-if-measured), and `completed_orders_today` is `0`.
 `CANCELLED`-before-`READY` orders have no `READY` event, so they never inflate

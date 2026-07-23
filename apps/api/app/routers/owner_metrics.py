@@ -1,5 +1,5 @@
 """
-GET  /owner/metrics/           — daily metrics (defaults to today UTC)
+GET  /owner/metrics/           — daily metrics (defaults to the business today)
 GET  /owner/metrics/?date=...  — metrics for a specific date (YYYY-MM-DD)
 GET  /owner/metrics/dictionary — formal metric definitions
 
@@ -50,7 +50,7 @@ Sample response (200 OK)
 }
 """
 import logging
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -58,6 +58,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core import messages
+from app.core.business_time import business_today
 from app.core.db import get_db
 from app.core.deps import require_permission
 from app.core.permissions import PERM_OWNER_READ
@@ -75,7 +76,8 @@ def get_metrics(
     target_date: Optional[date] = Query(
         default=None,
         alias="date",
-        description="Date to compute metrics for (YYYY-MM-DD). Defaults to today UTC.",
+        description="Business date to compute metrics for (YYYY-MM-DD). "
+                    "Defaults to the current business day.",
         example="2026-04-02",
     ),
     db: Session = Depends(get_db),
@@ -104,15 +106,17 @@ def get_metrics(
       Provision: same weekday last week supported by passing ?date=target and
                  modifying comparison_date — no schema change needed.
     """
-    # Validate: refuse future dates (no data can exist, would mislead)
-    today_utc = datetime.now(timezone.utc).date()
-    if target_date and target_date > today_utc:
+    # Validate: refuse future dates (no data can exist, would mislead).
+    # "Today" is the BUSINESS day, so between 21:00Z and 00:00Z an owner in
+    # Istanbul can still ask for the date showing on their own calendar.
+    today = business_today()
+    if target_date and target_date > today:
         raise HTTPException(
             status_code=422,
             detail={
                 "error": "future_date",
                 "message": f"Cannot compute metrics for a future date ({target_date}). "
-                           f"Today is {today_utc}.",
+                           f"Today is {today}.",
             },
         )
 

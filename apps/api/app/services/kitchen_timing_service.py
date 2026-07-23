@@ -53,6 +53,7 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.business_time import business_day_bounds_utc
 from app.models.order import Order
 from app.models.order_status_event import OrderStatusEvent
 
@@ -377,15 +378,21 @@ def get_timing_summary(db: Session, store_id: int) -> dict:
     """
     Operational timing summary for the store: live active/waiting/in-prep/ready/
     delayed counts (right now) + completed averages for orders CREATED today
-    (UTC) that reached READY.
+    that reached READY.
 
-    "Today" is keyed on ``orders.created_at::date`` = today (UTC), matching the
-    day boundary the owner metrics layer already uses. Averages are computed only
-    from real completed prep timing; with no completed orders every completed
-    figure is ``None`` (never 0-as-if-measured, never a guess).
+    "Today" is the BUSINESS calendar day (``app.core.business_time``), expressed
+    as the half-open UTC interval covering it — matching the day boundary the
+    owner metrics and dashboard layers use. Storage stays UTC; only the window
+    is local, so a 01:00 local rush is summarised on the shift that cooked it
+    rather than on the previous day. Averages are computed only from real
+    completed prep timing; with no completed orders every completed figure is
+    ``None`` (never 0-as-if-measured, never a guess).
+
+    The live board above is deliberately NOT windowed: an order still cooking at
+    the day boundary stays on the board.
     """
     now = datetime.now(timezone.utc)
-    today = now.date()
+    day_start, day_end = business_day_bounds_utc()
 
     # ── Live active board ──────────────────────────────────────────────────
     active_orders = (
@@ -404,7 +411,8 @@ def get_timing_summary(db: Session, store_id: int) -> dict:
         db.query(Order)
         .filter(
             Order.store_id == store_id,
-            func.date(Order.created_at) == today,
+            Order.created_at >= day_start,
+            Order.created_at < day_end,
             Order.status.in_(["READY", "DELIVERED"]),
         )
         .all()

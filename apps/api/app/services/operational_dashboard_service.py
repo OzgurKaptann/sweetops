@@ -19,8 +19,14 @@ disagree with the screen a metric came from:
   * stock alerts            → inventory_service.threshold_status, the SAME
                               classifier the threshold-alerts screen uses.
 
-"Today" is the server/UTC calendar day, matching the day boundary the kitchen
-timing summary and owner metrics layer already use (``func.date(col) == today``).
+"Today" is the BUSINESS calendar day (``app.core.business_time``), matching the
+day boundary the kitchen timing summary and owner metrics layer use. Stored
+timestamps stay UTC; the business day is expressed as the half-open UTC interval
+``[day_start, day_end)`` that covers it, and every "today" filter is a range
+predicate over that interval rather than ``func.date(col) == today``. In Istanbul
+that interval opens at 21:00Z on the previous UTC date, so a 01:00 local sale is
+counted on the day the shop actually made it — see
+``docs/RUNTIME_PRODUCT_GAP_REVIEW.md`` F-04.
 
 Store scope is the caller's responsibility: ``store_id`` comes from the
 authenticated session, never the client, exactly as everywhere else.
@@ -35,12 +41,12 @@ no LLM.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.business_time import business_day_bounds_utc, business_today, utc_now
 from app.models.cashier_shift import CashierShift, SHIFT_CLOSED, SHIFT_OPEN
 from app.models.ingredient import Ingredient
 from app.models.ingredient_stock import IngredientStock
@@ -151,7 +157,9 @@ def _build_attention(
 
 # ── Block builders ────────────────────────────────────────────────────────────
 
-def _orders_block(db: Session, store_id: int, today, kitchen_summary: dict) -> DashboardOrders:
+def _orders_block(
+    db: Session, store_id: int, day_start, day_end, kitchen_summary: dict
+) -> DashboardOrders:
     # Live counts come straight from the kitchen timing summary (source of truth
     # for the active board), so orders and kitchen tempo can never disagree.
     completed_today = (
@@ -159,7 +167,8 @@ def _orders_block(db: Session, store_id: int, today, kitchen_summary: dict) -> D
         .filter(
             Order.store_id == store_id,
             Order.status == "DELIVERED",
-            func.date(Order.created_at) == today,
+            Order.created_at >= day_start,
+            Order.created_at < day_end,
         )
         .scalar()
     ) or 0
@@ -168,7 +177,8 @@ def _orders_block(db: Session, store_id: int, today, kitchen_summary: dict) -> D
         .filter(
             Order.store_id == store_id,
             Order.status == "CANCELLED",
-            func.date(Order.created_at) == today,
+            Order.created_at >= day_start,
+            Order.created_at < day_end,
         )
         .scalar()
     ) or 0
@@ -182,7 +192,7 @@ def _orders_block(db: Session, store_id: int, today, kitchen_summary: dict) -> D
     )
 
 
-def _payments_block(db: Session, store_id: int, today) -> DashboardPayments:
+def _payments_block(db: Session, store_id: int, day_start, day_end) -> DashboardPayments:
     # Collected today — the SAME "collected" definition as payment_analytics
     # (Σ completed allocations), scoped to settlements completed today. Order totals
     # are never used as money collected; unpaid orders never count as revenue.
@@ -193,7 +203,8 @@ def _payments_block(db: Session, store_id: int, today) -> DashboardPayments:
         .filter(
             PaymentSettlement.store_id == store_id,
             PaymentSettlement.status == "COMPLETED",
-            func.date(PaymentSettlement.completed_at) == today,
+            PaymentSettlement.completed_at >= day_start,
+            PaymentSettlement.completed_at < day_end,
         )
         .scalar()
     ) or 0
@@ -202,7 +213,8 @@ def _payments_block(db: Session, store_id: int, today) -> DashboardPayments:
         db.query(func.coalesce(func.sum(PaymentRefund.amount), 0))
         .filter(
             PaymentRefund.store_id == store_id,
-            func.date(PaymentRefund.created_at) == today,
+            PaymentRefund.created_at >= day_start,
+            PaymentRefund.created_at < day_end,
         )
         .scalar()
     ) or 0
@@ -238,7 +250,7 @@ def _kitchen_block(kitchen_summary: dict) -> DashboardKitchen:
     )
 
 
-def _issues_block(db: Session, store_id: int, today) -> DashboardIssues:
+def _issues_block(db: Session, store_id: int, day_start, day_end) -> DashboardIssues:
     open_count = (
         db.query(func.count(OrderIssue.id))
         .filter(OrderIssue.store_id == store_id, OrderIssue.status == ISSUE_STATUS_OPEN)
@@ -249,7 +261,8 @@ def _issues_block(db: Session, store_id: int, today) -> DashboardIssues:
         .filter(
             OrderIssue.store_id == store_id,
             OrderIssue.status == ISSUE_STATUS_RESOLVED,
-            func.date(OrderIssue.resolved_at) == today,
+            OrderIssue.resolved_at >= day_start,
+            OrderIssue.resolved_at < day_end,
         )
         .scalar()
     ) or 0
@@ -262,7 +275,8 @@ def _issues_block(db: Session, store_id: int, today) -> DashboardIssues:
             OrderIssue.store_id == store_id,
             OrderIssue.status == ISSUE_STATUS_RESOLVED,
             OrderIssue.resolution_type.in_(list(REFUNDING_RESOLUTIONS)),
-            func.date(OrderIssue.resolved_at) == today,
+            OrderIssue.resolved_at >= day_start,
+            OrderIssue.resolved_at < day_end,
         )
         .scalar()
     ) or 0
@@ -273,7 +287,7 @@ def _issues_block(db: Session, store_id: int, today) -> DashboardIssues:
     )
 
 
-def _shifts_block(db: Session, store_id: int, today) -> DashboardShifts:
+def _shifts_block(db: Session, store_id: int, day_start, day_end) -> DashboardShifts:
     open_count = (
         db.query(func.count(CashierShift.id))
         .filter(CashierShift.store_id == store_id, CashierShift.status == SHIFT_OPEN)
@@ -285,7 +299,8 @@ def _shifts_block(db: Session, store_id: int, today) -> DashboardShifts:
         .filter(
             CashierShift.store_id == store_id,
             CashierShift.status == SHIFT_CLOSED,
-            func.date(CashierShift.closed_at) == today,
+            CashierShift.closed_at >= day_start,
+            CashierShift.closed_at < day_end,
         )
         .all()
     )
@@ -342,18 +357,21 @@ def _inventory_block(db: Session, store_id: int) -> DashboardInventory:
 
 def fetch_operational_dashboard(db: Session, store_id: int) -> OperationalDashboardResponse:
     """Read-only operational snapshot for one store, right now."""
-    now = datetime.now(timezone.utc)
-    today = now.date()
+    now = utc_now()
+    # ``as_of`` stays UTC (an instant); ``business_date`` is the local shop day
+    # every "today" figure below is scoped to.
+    today = business_today()
+    day_start, day_end = business_day_bounds_utc(today)
 
     # One kitchen-timing read powers both the orders live counts and the kitchen
     # tempo block, so the two are guaranteed consistent.
     kitchen_summary = get_timing_summary(db, store_id)
 
-    orders = _orders_block(db, store_id, today, kitchen_summary)
-    payments = _payments_block(db, store_id, today)
+    orders = _orders_block(db, store_id, day_start, day_end, kitchen_summary)
+    payments = _payments_block(db, store_id, day_start, day_end)
     kitchen = _kitchen_block(kitchen_summary)
-    issues = _issues_block(db, store_id, today)
-    shifts = _shifts_block(db, store_id, today)
+    issues = _issues_block(db, store_id, day_start, day_end)
+    shifts = _shifts_block(db, store_id, day_start, day_end)
     inventory = _inventory_block(db, store_id)
 
     attention = _build_attention(

@@ -21,6 +21,14 @@ Comparison model
 Primary comparison: target_date - 1 day  (always applied)
 Design provision:   same weekday last week could be added by passing
                     comparison_date=target_date - 7 days — no schema change needed.
+
+Day boundary
+------------
+``target_date`` is a BUSINESS calendar date, not a UTC one. Storage is unchanged
+(timestamptz, UTC), but every ``= :target_date`` predicate below buckets the row
+by its local date via ``_bdate`` — so a 01:00 Istanbul order counts on the day
+the shop made the sale rather than the day before. See
+``docs/RUNTIME_PRODUCT_GAP_REVIEW.md`` F-04.
 """
 from __future__ import annotations
 
@@ -32,6 +40,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from app.core.business_time import business_date_sql_expression, business_today
 from app.schemas.metrics import (
     DataQuality,
     TrendValue,
@@ -160,6 +169,17 @@ def _store_and(store_id: Optional[int], alias: str = "o") -> str:
     return f" AND {alias}.store_id = :store_id" if store_id is not None else ""
 
 
+def _bdate(column: str) -> str:
+    """
+    The business-local calendar date of a stored UTC instant, as SQL.
+
+    Every daily predicate in this module goes through here, so the day boundary
+    is decided in exactly one place (``app.core.business_time``) rather than
+    seventeen ``::date`` casts that silently mean "UTC".
+    """
+    return business_date_sql_expression(column)
+
+
 def _params(target_date: date, store_id: Optional[int], **extra) -> dict:
     p: dict = {"target_date": str(target_date), **extra}
     if store_id is not None:
@@ -181,7 +201,7 @@ WITH item_ing_counts AS (
     FROM order_item_ingredients oii
     JOIN order_items oi ON oi.id = oii.order_item_id
     JOIN orders o        ON o.id  = oi.order_id
-    WHERE o.created_at::date = :target_date
+    WHERE {_bdate('o.created_at')} = :target_date
       AND o.status <> 'CANCELLED'{s}
     GROUP BY oi.order_id, oii.order_item_id
 ),
@@ -198,7 +218,7 @@ order_totals AS (
         COALESCE(cf.is_combo, FALSE)                     AS is_combo
     FROM orders o
     LEFT JOIN order_combo_flag cf ON cf.order_id = o.id
-    WHERE o.created_at::date = :target_date
+    WHERE {_bdate('o.created_at')} = :target_date
       AND o.status <> 'CANCELLED'{s}
 ),
 item_level AS (
@@ -315,19 +335,19 @@ def _decision_sql(store_id: Optional[int]):
     return text(f"""
 SELECT
     COUNT(*) FILTER (
-        WHERE acknowledged_at::date = :target_date
+        WHERE {_bdate('acknowledged_at')} = :target_date
     )                                             AS acknowledged,
     COUNT(*) FILTER (
-        WHERE completed_at::date = :target_date
+        WHERE {_bdate('completed_at')} = :target_date
     )                                             AS completed,
     COUNT(*) FILTER (
         WHERE status = 'dismissed'
-          AND updated_at::date = :target_date
+          AND {_bdate('updated_at')} = :target_date
     )                                             AS dismissed
 FROM owner_decisions
-WHERE (acknowledged_at::date    = :target_date
-   OR completed_at::date        = :target_date
-   OR (status = 'dismissed' AND updated_at::date = :target_date)){s}
+WHERE ({_bdate('acknowledged_at')}    = :target_date
+   OR {_bdate('completed_at')}        = :target_date
+   OR (status = 'dismissed' AND {_bdate('updated_at')} = :target_date)){s}
 """)
 
 
@@ -404,7 +424,7 @@ prep_times AS (
         ) AS prep_minutes
     FROM orders o
     JOIN ready_events re ON re.order_id = o.id
-    WHERE o.created_at::date = :target_date
+    WHERE {_bdate('o.created_at')} = :target_date
       AND o.status NOT IN ('NEW', 'IN_PREP', 'CANCELLED'){s}
 )
 SELECT
@@ -485,47 +505,47 @@ def _revprot_sql(store_id: Optional[int]):
 SELECT
     -- triggered today (new signals)
     COUNT(*) FILTER (
-        WHERE created_at::date = :target_date
+        WHERE {_bdate('created_at')} = :target_date
     )                                                      AS triggered,
 
     -- resolved today (completed, regardless of when triggered)
     COUNT(*) FILTER (
         WHERE status = 'completed'
-          AND completed_at::date = :target_date
+          AND {_bdate('completed_at')} = :target_date
     )                                                      AS resolved,
 
     -- saved: only good + partial — failed = 0 contribution
     COALESCE(SUM(estimated_revenue_saved) FILTER (
         WHERE status = 'completed'
-          AND completed_at::date = :target_date
+          AND {_bdate('completed_at')} = :target_date
           AND resolution_quality IN ('good', 'partial')
     ), 0)                                                  AS saved,
 
     -- outcome breakdown (deterministic, mutually exclusive)
     COUNT(*) FILTER (
         WHERE status = 'completed'
-          AND completed_at::date = :target_date
+          AND {_bdate('completed_at')} = :target_date
           AND resolution_quality = 'good'
     )                                                      AS outcome_good,
 
     COUNT(*) FILTER (
         WHERE status = 'completed'
-          AND completed_at::date = :target_date
+          AND {_bdate('completed_at')} = :target_date
           AND resolution_quality = 'partial'
     )                                                      AS outcome_partial,
 
     -- failed = explicit 'failed' OR completed without attribution (conservative)
     COUNT(*) FILTER (
         WHERE status = 'completed'
-          AND completed_at::date = :target_date
+          AND {_bdate('completed_at')} = :target_date
           AND (resolution_quality = 'failed' OR resolution_quality IS NULL)
     )                                                      AS outcome_failed
 
 FROM owner_decisions
 WHERE type = 'stock_risk'
   AND (
-      created_at::date = :target_date
-      OR (status = 'completed' AND completed_at::date = :target_date)
+      {_bdate('created_at')} = :target_date
+      OR (status = 'completed' AND {_bdate('completed_at')} = :target_date)
   ){s}
 """)
 
@@ -647,7 +667,8 @@ def fetch_daily_metrics(
     store_id: Optional[int] = None,
 ) -> DailyMetricsResponse:
     """
-    Return all four metric groups for target_date (defaults to today UTC).
+    Return all four metric groups for target_date (defaults to the business
+    today — the local shop day, not the UTC one).
 
     Store scoping:
       When store_id is provided every order-derived and decision-derived metric
@@ -659,7 +680,7 @@ def fetch_daily_metrics(
     Non-fatal errors are captured in meta.errors — never raises for data issues.
     """
     if target_date is None:
-        target_date = datetime.now(timezone.utc).date()
+        target_date = business_today()
 
     prev_date = target_date - timedelta(days=1)
     errors: list[str] = []

@@ -243,6 +243,7 @@ per session and persisted only as SHA-256 hashes
 | Variable | Local default | Must be reviewed before any real deployment |
 | --- | --- | --- |
 | `ENVIRONMENT` | `development` | **Yes** — set to `production`; this forces Secure cookies on |
+| `BUSINESS_TIMEZONE` | `Europe/Istanbul` | **Yes if the shop is not in Türkiye** — decides where the business day starts and which hour a bucket belongs to. Reporting only; storage stays UTC. An unknown zone fails at startup (slim images need `tzdata`) |
 | `DATABASE_URL` | local Compose Postgres | **Yes** — managed instance, credentials from a secret store |
 | `REDIS_URL` | `redis://localhost:6379/0` | Yes |
 | `CUSTOMER_WEB_BASE_URL` | `http://localhost:3000` in code | **Yes** — see the note in §13 |

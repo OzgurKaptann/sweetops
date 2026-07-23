@@ -29,6 +29,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.business_time import business_today, utc_now
 from app.services.metrics_service import fetch_daily_metrics
 from app.schemas.metrics import DailyMetricsResponse
 
@@ -108,8 +109,10 @@ def compute_operational_context(
     If metrics fail, returns mode="normal" (safe default — no adaptation applied).
     """
     ctx = OperationalContext(
-        computed_at=datetime.now(timezone.utc).isoformat(),
-        metrics_date=str(target_date or datetime.now(timezone.utc).date()),
+        # computed_at is an instant → UTC. metrics_date is a business day →
+        # local, so it agrees with the date fetch_daily_metrics will default to.
+        computed_at=utc_now().isoformat(),
+        metrics_date=str(target_date or business_today()),
     )
 
     try:

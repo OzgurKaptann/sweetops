@@ -458,7 +458,21 @@ trusting both. This is the finding that most directly blocks charging money for
 reporting.
 
 ### F-04 · Every day boundary and every hour bucket is UTC; the shop is in Istanbul
-**Lens:** Analyst / DataEng · **Severity:** blocker · **Effort:** M
+**Lens:** Analyst / DataEng · **Severity:** blocker · **Effort:** M ·
+**Status: FIXED** on `fix/business-timezone`
+
+> **Resolution.** A single business-day definition now lives in
+> [`app/core/business_time.py`](../apps/api/app/core/business_time.py), configured by
+> `BUSINESS_TIMEZONE` (default `Europe/Istanbul`). Storage is unchanged — every
+> column is still `timestamptz` holding a UTC instant — but every reporting window,
+> daily bucket and hour bucket is now local: the owner dashboard, owner analytics
+> (KPIs, `peak_hour`, Saatlik Talep, daily sales, ingredient forecast windows), the
+> measurement layer (`metrics_service`), the kitchen timing summary, owner insights
+> and the `/owner/metrics` future-date guard. Day windows are half-open UTC intervals
+> `[start, end)` derived from the local day; hour and day *groupings* use
+> `AT TIME ZONE`. Locked down by `apps/api/tests/test_business_timezone.py`.
+> The four consequences below are what the fix removes; they are kept here as the
+> record of why the change was made.
 
 No timezone configuration exists anywhere in the repository — no `TZ`, no
 `Europe/Istanbul`, no zone column. "Today" is computed as the UTC calendar day in at
@@ -604,16 +618,16 @@ partial day handled, the axis honest, the comparison fair, the empty state usefu
 
 | Chart / tile | Definition stated | Time zone | Partial day | Axis honest | Empty state | Verdict |
 | --- | --- | --- | --- | --- | --- | --- |
-| Zone 0 · Operasyon Özeti cards | **Yes** — `OWNER_OPERATIONAL_DASHBOARD.md` §3 | UTC, documented | N/A (today only, by design) | N/A | **Good** — `—` for no data, never a fake 0 | **Trustworthy**, modulo F-04 |
+| Zone 0 · Operasyon Özeti cards | **Yes** — `OWNER_OPERATIONAL_DASHBOARD.md` §3 | Business local, documented (F-04 fixed) | N/A (today only, by design) | N/A | **Good** — `—` for no data, never a fake 0 | **Trustworthy** |
 | Zone 0 · Dikkat gerektirenler | Yes — §9 rule table | N/A | N/A | N/A | Good Turkish empty line | **Trustworthy** |
-| KPI · Günlük ciro (`gross_revenue`) | **No** | UTC, undocumented | No | N/A | Unknown | **F-03 — conflicts with Zone 0** |
-| KPI · `peak_hour` | No | **UTC hour presented as local** | No | N/A | `null` handled | **F-04 — wrong by 3h** |
-| Ana grafik · Ciro/Sipariş/Sepet | No | UTC | **No** — F-29 | **No** — F-12 (₺ on counts) | *"Yeterli veri yok."* — fine | **Not trustworthy** |
-| Ana grafik · 30 Gün range | No | UTC | No | **No** — F-11, shows 7 days | — | **Misleading** |
+| KPI · Günlük ciro (`gross_revenue`) | **No** | Business local (F-04 fixed) | No | N/A | Unknown | **F-03 — conflicts with Zone 0** |
+| KPI · `peak_hour` | No | **Local hour** (F-04 fixed) | No | N/A | `null` handled | **Correct** |
+| Ana grafik · Ciro/Sipariş/Sepet | No | Business local (F-04 fixed) | **No** — F-29 | **No** — F-12 (₺ on counts) | *"Yeterli veri yok."* — fine | **Not trustworthy** |
+| Ana grafik · 30 Gün range | No | Business local (F-04 fixed) | No | **No** — F-11, still shows 7 days | — | **Misleading** — F-11 open |
 | Ana grafik · Malzeme Kullanımı | Partly — "anlık görünüm" | None (all-time) | N/A | Share % in tooltip only | — | **Weak** — an all-time cumulative count labelled a snapshot, with no window |
-| Saatlik Talep | No | **UTC buckets, local labels** | Today only | Counts, honest | *"Henüz saatlik veri yok."* — good | **F-04** |
-| Malzeme Tahmini (`IngredientForecastPanel`) | Partly — `baseline_method` is on the wire | UTC | No | — | — | **See §8 / F-17** |
-| Mutfak temposu (kitchen strip) | Yes — `KITCHEN_PREP_TIMING_METRICS.md` | UTC | Yes — `None` not `0` | Counts | Renders nothing when null | **Trustworthy**, modulo F-08 staleness |
+| Saatlik Talep | No | **Local buckets, local labels** (F-04 fixed) | Today only | Counts, honest | *"Henüz saatlik veri yok."* — good | **Correct** |
+| Malzeme Tahmini (`IngredientForecastPanel`) | Partly — `baseline_method` is on the wire | Business local (F-04 fixed) | No | — | — | **See §8 / F-17** |
+| Mutfak temposu (kitchen strip) | Yes — `KITCHEN_PREP_TIMING_METRICS.md` | Business local (F-04 fixed) | Yes — `None` not `0` | Counts | Renders nothing when null | **Trustworthy**, modulo F-08 staleness |
 
 The pattern is clean: **everything built in the operational-dashboard and
 kitchen-timing era is defined, documented and honest. Everything inherited from the
@@ -989,7 +1003,7 @@ Ordered by severity, then by how directly they block a paying pilot.
 | **F-13** | PM/CTO | No way to onboard a store, catalog, table or price without editing Python | blocker | L | 11 |
 | **F-01** | PM | Customer can order only `products[0]`, quantity 1 — 13 of 14 catalog items unreachable | blocker | M | 3 |
 | **F-03** | Analyst | Two conflicting "revenue" definitions on one owner page | blocker | M | 6 |
-| **F-04** | Analyst/DataEng | Every day boundary and hour bucket is UTC; the shop is UTC+3 | blocker | M | 6 |
+| **F-04** | Analyst/DataEng | ~~Every day boundary and hour bucket is UTC; the shop is UTC+3~~ **FIXED** — `fix/business-timezone` | blocker | M | 6 |
 | **F-05** | CTO/PM | Kitchen board never re-syncs after a dropped socket; shows "Canlı" while stale | blocker | S | 4 |
 | **F-02** | DataEng/CTO | Product catalog is global and unfiltered; test debris is customer-facing | blocker | M | 3 |
 | **F-06** | PM | Kitchen cannot mark DELIVERED, cancel, or undo | major | M | 4 |
