@@ -241,7 +241,29 @@ a considered choice, not a default.
 **All runtime claims in this section: NEEDS_MANUAL_BROWSER_CONFIRMATION.**
 
 ### F-05 · The board never re-syncs after a dropped socket
-**Lens:** CTO / PM · **Severity:** blocker · **Effort:** S
+**Lens:** CTO / PM · **Severity:** blocker · **Effort:** S ·
+**Status: FIXED** on `fix/kitchen-live-resync`
+
+> **Resolution.** The kitchen client's socket, reconnect and freshness rules now
+> live in one framework-free controller,
+> [`liveSync.ts`](../apps/kitchen-web/src/lib/liveSync.ts), bound to React by
+> [`useKitchenLiveSync.ts`](../apps/kitchen-web/src/lib/useKitchenLiveSync.ts).
+> `initial_state` is handled (it triggers a full refetch rather than a fragile
+> partial hydrate); **every** socket open — first connect or reconnect —
+> refetches orders and timing; a single 12-second interval polls whenever the
+> link is not live and every 30 seconds even when it is; and waking the tablet or
+> regaining the network resyncs immediately. No backend change was needed — the
+> server already sent everything required.
+>
+> The badge is now derived from *when data last arrived*, not from what the
+> socket claims: `live` requires an open socket **and** a successful refresh
+> inside 60 seconds. The remaining states — `reconnecting`, `polling`, `stale`,
+> `offline` — each say what is actually wrong, and "Yenile" is always visible
+> rather than only while disconnected. Locked down by
+> [`liveSync.test.ts`](../apps/kitchen-web/src/lib/liveSync.test.ts) (30 tests on
+> a fake clock and a fake socket).
+>
+> The diagnosis below is kept as the record of what was wrong.
 
 Two facts combine into a data-loss-shaped bug on the shop floor.
 
@@ -270,7 +292,16 @@ the board is *not* in after a successful reconnect. The manual recovery is hidde
 exactly when it is needed.
 
 ### F-08 · Timing cards and the tempo strip go stale between order creations
-**Lens:** PM / Analyst · **Severity:** major · **Effort:** S
+**Lens:** PM / Analyst · **Severity:** major · **Effort:** S ·
+**Status: FIXED** on `fix/kitchen-live-resync`
+
+> **Resolution.** The local-patch path is gone. `order_status_updated`,
+> `order_created` and `initial_state` all funnel into the same coalesced refetch
+> of `/kitchen/orders/` **and** `/kitchen/timing/orders` together, so tickets and
+> delay badges can never come from different moments. The fallback poll refreshes
+> both on the same cadence, so `delay_state` keeps advancing during a lull — the
+> case where it mattered most. Concurrent events coalesce into at most one
+> in-flight refetch plus one trailing refetch, so a rush cannot stampede the API.
 
 `loadOrders()` fetches orders *and* timing together
 ([`page.tsx:113-135`](../apps/kitchen-web/src/app/page.tsx#L113-L135)) and is called
@@ -333,7 +364,15 @@ the wrong instrument. Every other surface in the repo uses inline Turkish status
 copy; this is the one place that does not.
 
 ### F-26 · The reconnect timer outlives the component
-**Lens:** CTO · **Severity:** minor · **Effort:** S
+**Lens:** CTO · **Severity:** minor · **Effort:** S ·
+**Status: FIXED** on `fix/kitchen-live-resync`
+
+> **Resolution.** `KitchenLiveSync.stop()` clears the reconnect timer and the
+> poll interval, closes the socket with its handlers already detached (so a
+> deliberate close is not reported back as a drop), and latches the controller
+> inert — after `stop()` no timer fires, no socket callback lands, and no state
+> is emitted, including from a fetch that was already in flight. Sockets carry an
+> epoch, so a callback from a replaced socket cannot move the state either.
 
 Cleanup closes the socket ([`page.tsx:201-205`](../apps/kitchen-web/src/app/page.tsx#L201-L205)),
 which fires `onclose`, which schedules another `connectWS` five seconds later. On an
@@ -627,7 +666,7 @@ partial day handled, the axis honest, the comparison fair, the empty state usefu
 | Ana grafik · Malzeme Kullanımı | Partly — "anlık görünüm" | None (all-time) | N/A | Share % in tooltip only | — | **Weak** — an all-time cumulative count labelled a snapshot, with no window |
 | Saatlik Talep | No | **Local buckets, local labels** (F-04 fixed) | Today only | Counts, honest | *"Henüz saatlik veri yok."* — good | **Correct** |
 | Malzeme Tahmini (`IngredientForecastPanel`) | Partly — `baseline_method` is on the wire | Business local (F-04 fixed) | No | — | — | **See §8 / F-17** |
-| Mutfak temposu (kitchen strip) | Yes — `KITCHEN_PREP_TIMING_METRICS.md` | Business local (F-04 fixed) | Yes — `None` not `0` | Counts | Renders nothing when null | **Trustworthy**, modulo F-08 staleness |
+| Mutfak temposu (kitchen strip) | Yes — `KITCHEN_PREP_TIMING_METRICS.md` | Business local (F-04 fixed) | Yes — `None` not `0` | Counts | Renders nothing when null | **Trustworthy** (F-08 staleness fixed) |
 
 The pattern is clean: **everything built in the operational-dashboard and
 kitchen-timing era is defined, documented and honest. Everything inherited from the
@@ -1004,11 +1043,11 @@ Ordered by severity, then by how directly they block a paying pilot.
 | **F-01** | PM | Customer can order only `products[0]`, quantity 1 — 13 of 14 catalog items unreachable | blocker | M | 3 |
 | **F-03** | Analyst | Two conflicting "revenue" definitions on one owner page | blocker | M | 6 |
 | **F-04** | Analyst/DataEng | ~~Every day boundary and hour bucket is UTC; the shop is UTC+3~~ **FIXED** — `fix/business-timezone` | blocker | M | 6 |
-| **F-05** | CTO/PM | Kitchen board never re-syncs after a dropped socket; shows "Canlı" while stale | blocker | S | 4 |
+| **F-05** | CTO/PM | ~~Kitchen board never re-syncs after a dropped socket; shows "Canlı" while stale~~ **FIXED** — `fix/kitchen-live-resync` | blocker | S | 4 |
 | **F-02** | DataEng/CTO | Product catalog is global and unfiltered; test debris is customer-facing | blocker | M | 3 |
 | **F-06** | PM | Kitchen cannot mark DELIVERED, cancel, or undo | major | M | 4 |
 | **F-07** | PM | No kitchen history or shift recap | major | M | 4 |
-| **F-08** | PM/Analyst | Kitchen timing and tempo freeze between order creations | major | S | 4 |
+| **F-08** | PM/Analyst | ~~Kitchen timing and tempo freeze between order creations~~ **FIXED** — `fix/kitchen-live-resync` | major | S | 4 |
 | **F-09** | PM | Partial payment exists in the API, unreachable from the cashier screen | major | S | 5 |
 | **F-10** | PM | Refund only possible on the just-taken settlement, in-tab | major | M | 5 |
 | **F-11** | Analyst | "30 Gün" renders 7 days | major | S | 6 |
@@ -1026,7 +1065,7 @@ Ordered by severity, then by how directly they block a paying pilot.
 | **F-21** | PM/UI | Guest confirmation reads from URL params; no live order status | minor | S | 3 |
 | **F-24** | UI | Kitchen errors use blocking `alert()` | minor | S | 4 |
 | **F-25** | PM/UI | Cashier open-tables list never auto-refreshes | minor | S | 5 |
-| **F-26** | CTO | Kitchen reconnect timer survives unmount | minor | S | 4 |
+| **F-26** | CTO | ~~Kitchen reconnect timer survives unmount~~ **FIXED** — `fix/kitchen-live-resync` | minor | S | 4 |
 | **F-27** | CTO | Redis started and configured with no consumer | minor | S | 2 |
 | **F-28** | UI | Refund amount is free text with no bound shown, no numeric keypad | minor | S | 5 |
 | **F-29** | Analyst | Average reference line includes the partial current day | minor | S | 6 |
@@ -1057,8 +1096,9 @@ worth more than most of what gets called an MVP.
 
 What stops it: a shop cannot be *set up* without a developer (F-13); a guest can order
 only one hard-coded product while the catalog holds fourteen including test debris
-(F-01, F-02); the kitchen display can silently drop tickets after a Wi-Fi blip while
-still showing "Canlı" (F-05); the owner sees two irreconcilable revenue figures on one
+(F-01, F-02); ~~the kitchen display can silently drop tickets after a Wi-Fi blip while
+still showing "Canlı"~~ (F-05, fixed on `fix/kitchen-live-resync`); the owner sees two
+irreconcilable revenue figures on one
 screen (F-03) with every date and hour shifted three hours from the shop's clock
 (F-04); and the shop's takings have no backup. The pattern behind most of these is
 singular and encouraging: **the code written in the operational-dashboard and

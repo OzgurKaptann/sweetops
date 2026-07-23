@@ -107,25 +107,39 @@ a storeless owner sees a refusal rather than a zero.
 ---
 
 ### P0-C · `fix/kitchen-live-resync` — the board must never lie
-**Fixes:** F-05, F-08, F-26 · **Effort:** S
+**Fixes:** F-05, F-08, F-26 · **Effort:** S · **Status: DONE**
 
 A kitchen display that shows a green **Canlı** badge while missing three tickets is
 worse than one that shows an error. The server already sends everything needed; the
 client discards it.
 
 **Scope**
-- Handle the `initial_state` event the server already emits on every connect
-  (`ws.py:64-79`), or refetch on every successful reconnect — either closes the gap.
-- Refresh timing and tempo on `order_status_updated`, not only on `order_created`.
-- Add a low-frequency safety poll so the board self-heals even if the socket lies.
-- Always offer the manual refresh control, not only while disconnected.
-- Clear the reconnect timer on unmount.
+- ✅ Handle the `initial_state` event the server already emits on every connect
+  (`ws.py:64-79`), or refetch on every successful reconnect — *both* were done:
+  `initial_state` triggers a refetch, and every socket open resyncs independently.
+- ✅ Refresh timing and tempo on `order_status_updated`, not only on `order_created`.
+  The local-patch path is gone; orders and timing are always refetched as a pair.
+- ✅ Add a low-frequency safety poll so the board self-heals even if the socket lies.
+  One interval: 12 s while degraded, 30 s while live.
+- ✅ Always offer the manual refresh control, not only while disconnected.
+- ✅ Clear the reconnect timer on unmount (and the poll interval, and any socket).
+
+**Delivered:** the socket/reconnect/freshness rules moved into
+[`liveSync.ts`](../apps/kitchen-web/src/lib/liveSync.ts), a framework-free
+controller bound to React by
+[`useKitchenLiveSync.ts`](../apps/kitchen-web/src/lib/useKitchenLiveSync.ts), with
+30 deterministic tests on a fake clock and a fake socket. The badge is derived from
+when data last *arrived*: `live` requires an open socket **and** a refresh inside
+60 s; otherwise it reads `reconnecting`, `polling`, `stale` or `offline`, always
+alongside a "son güncelleme" line. Waking the tablet or regaining the network
+resyncs immediately. **No backend change was required.**
 
 **Not in this branch:** no board redesign, no history surface (P1-A), no new
 transitions (P1-A), no WebSocket protocol change, no broker.
 
 **Done when:** disconnecting the network for ninety seconds, placing orders, and
-reconnecting leaves the board correct without a human touching it.
+reconnecting leaves the board correct without a human touching it. — Met in the
+unit suite; **still NEEDS_MANUAL_BROWSER_CONFIRMATION** on a real tablet.
 
 ---
 
