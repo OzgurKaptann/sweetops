@@ -253,7 +253,20 @@ Python (for the API and scripts).
    npm install
    ```
 
-3. **(Recommended) Seed the demo dataset** so every screen has meaningful data:
+   Optionally copy the environment examples (both contain placeholders only):
+
+   ```bash
+   cp .env.example .env                     # documents the local stack
+   cp apps/api/.env.example apps/api/.env   # backend settings
+   ```
+
+3. Apply database migrations:
+
+   ```bash
+   cd apps/api && python -m alembic upgrade head && cd ../..
+   ```
+
+4. **(Recommended) Seed the demo dataset** so every screen has meaningful data:
 
    ```bash
    npm run seed:demo          # or: python scripts/seed_demo_data.py
@@ -269,8 +282,14 @@ Python (for the API and scripts).
    scenarios, and safety model.
 
    > ⚠️ Development/demo only — never run the seed against a production database.
+   >
+   > ⚠️ **Run the backend test suite _before_ seeding.** Tests and local
+   > development share one database, and resident demo data makes roughly two
+   > dozen tests fail for reasons that are not regressions. Correct order:
+   > **migrate → test → seed → demo.** See
+   > [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) §9.
 
-4. Start the frontends (each in its own terminal):
+5. Start the frontends (each in its own terminal):
 
    ```bash
    npm run dev:customer   # customer-web  -> http://localhost:3001
@@ -295,8 +314,15 @@ npm run build:ui          # build @sweetops/ui
 # Backend / infra
 docker-compose up -d      # start API + PostgreSQL
 
+# Migrations (from apps/api)
+python -m alembic heads   # expect exactly ONE head
+python -m alembic upgrade head
+
 # Demo data (development/demo only — deterministic, idempotent, non-destructive)
 npm run seed:demo         # or: python scripts/seed_demo_data.py
+
+# Release readiness (read-only: no database, no network, no writes)
+python scripts/verify_release_readiness.py
 
 # Operational tooling / staff management
 python scripts/manage_staff_users.py
@@ -315,14 +341,43 @@ python scripts/reconcile_kitchen_timing.py
 
 - Backend tests use **pytest** (`apps/api`). The current test baseline is
   documented in [docs/TEST_SUITE_BASELINE.md](docs/TEST_SUITE_BASELINE.md).
+- Frontend tests use the Node test runner, per workspace.
 - Reconciliation scripts under `scripts/` provide read-only integrity checks for
   payments, inventory, order issues, and kitchen timing.
-
-Run the API test suite from `apps/api`:
+- `scripts/verify_release_readiness.py` is a read-only repository-state check
+  (required docs/scripts, one Alembic head, doc links, merge markers, committed
+  secrets). It does **not** replace the suites below.
 
 ```bash
-cd apps/api && pytest
+# Repository state (from the repo root) — no database, no network
+python scripts/verify_release_readiness.py
+
+# Backend suite — run this BEFORE seeding demo data
+cd apps/api && python -m pytest -q
+
+# Frontend suites (from the repo root)
+npm run test --workspace=customer-web
+npm run test --workspace=kitchen-web
+npm run test --workspace=owner-web
+npm run test --workspace=cashier-web
 ```
+
+The full verification sequence — builds, both suites, migrations, seed
+idempotency, and all four reconcilers — is in
+[docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) §9.
+
+### Production readiness, releases, and operations
+
+| Document | Purpose |
+| --- | --- |
+| [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Readiness checklist: setup, env vars, migrations, verification, security review, deployment/rollback, and known non-production limitations |
+| [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Tick-list to work through before merging a release branch, including manual browser smoke checks |
+| [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) | Day-to-day commands: start the stack, migrate, seed, inspect shifts/issues/inventory, recover a dirty local database, and what not to do |
+
+> SweetOps is at **release-candidate readiness**. It is **not yet a hosted
+> production deployment** — there is no CI, monitoring, or managed secret
+> storage. The limitations are listed explicitly in
+> [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) §14.
 
 ---
 
@@ -330,6 +385,9 @@ cd apps/api && pytest
 
 Workflow and subsystem documentation lives in `docs/`:
 
+- [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md)
+- [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)
+- [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md)
 - [docs/ORDER_ISSUE_REFUND_WORKFLOW.md](docs/ORDER_ISSUE_REFUND_WORKFLOW.md)
 - [docs/CASHIER_SHIFT_CLOSING.md](docs/CASHIER_SHIFT_CLOSING.md)
 - [docs/PAYMENT_SETTLEMENT_WORKFLOW.md](docs/PAYMENT_SETTLEMENT_WORKFLOW.md)
@@ -368,8 +426,11 @@ visibility — all with Turkish UX.
 A full breakdown lives in [docs/PROJECT_ROADMAP.md](docs/PROJECT_ROADMAP.md).
 In short:
 
-- **Near-term MVP completion:** production-readiness hardening. (The owner
-  operational dashboard and deterministic demo/sample data are now implemented.)
+- **Near-term MVP completion:** complete. Production-readiness hardening —
+  readiness documentation, a release checklist, an operations runbook, audited
+  environment examples, and a read-only readiness verification script — is now
+  implemented, alongside the owner operational dashboard and deterministic
+  demo/sample data.
 - **Post-MVP backlog:** forecasting, supplier management, purchase orders,
   automatic reorder, scheduled alerts, barcode, lot/expiry tracking, customer
   wallet, coupons/store credit, delivery integration, bank reconciliation,
@@ -403,3 +464,10 @@ SweetOps is a serious, portfolio-grade operational system. Every capability
 described in this README maps to code in the repository. Demand forecasting and
 the older analytics pipeline remain as legacy/post-MVP references and are not
 presented as the current product center.
+
+The repository is at **release-candidate readiness**: the MVP scope is complete,
+the backend suite is green on a clean database, migrations sit on a single head,
+all four frontends build, and the demo is reproducible with one command. It is
+**not yet a hosted production deployment** — see
+[docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) for the honest gap
+list.

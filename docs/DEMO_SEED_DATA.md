@@ -35,6 +35,14 @@ Migrate first if needed:
 cd apps/api && python -m alembic upgrade head
 ```
 
+> ⚠️ **Run the backend test suite _before_ seeding.** The tests and local
+> development share one database. With demo data resident, roughly two dozen
+> tests fail for reasons that are not regressions — the migration downgrade
+> tests correctly refuse to downgrade store-scoped inventory while a second
+> store holds stock. Correct order: **migrate → test → seed → demo**. See
+> [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) §9 and
+> [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) §10.
+
 The script prints a create/reuse summary, the demo stores, and the local login
 credentials.
 
